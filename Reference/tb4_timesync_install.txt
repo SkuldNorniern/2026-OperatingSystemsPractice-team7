@@ -1,0 +1,81 @@
+# =====================================================================
+#  tb4_timesync 설치 파일 (운영체제의 실제 · TurtleBot4 실습)
+#
+#  사용법 (노트북 터미널, 최초 1회):
+#      bash tb4_timesync_install.txt
+#  → ~/tb4_timesync.sh 가 만들어집니다.
+#
+#  매번 (로봇을 켤 때마다, 로봇 토픽이 보이는 터미널에서):
+#      ~/tb4_timesync.sh
+#
+#  ※ 사전 설정(SSH 키 · sudoers)은 강의 교안 "Time Sync (2)" ① 참고
+#  ※ Windows 메모장 등에서 수정·저장하지 마세요 (줄바꿈이 CRLF로 바뀌면 실행 오류).
+#     오류가 나면: sed -i 's/\r$//' tb4_timesync_install.txt
+# =====================================================================
+
+cat > ~/tb4_timesync.sh <<'EOF'
+#!/bin/bash
+# 노트북 · 라즈베리파이 · Create3 시간을 한 번에 맞추는 스크립트
+ROBOT=ubuntu@192.168.185.3
+source /opt/ros/jazzy/setup.bash
+
+measure() {   # 노트북 시각 - 메시지 시각 (초, 중앙값)
+/usr/bin/python3 - "$1" <<'PY' 2>/dev/null
+import sys, time, rclpy
+from rclpy.qos import qos_profile_sensor_data
+topic = sys.argv[1]
+if topic == '/odom':
+    from nav_msgs.msg import Odometry as M
+else:
+    from sensor_msgs.msg import LaserScan as M
+rclpy.init(); n = rclpy.create_node('tb4_timesync')
+d = []
+def cb(m):
+    s = m.header.stamp
+    d.append(time.time() - (s.sec + s.nanosec * 1e-9))
+n.create_subscription(M, topic, cb, qos_profile_sensor_data)
+end = time.time() + 5
+while time.time() < end and len(d) < 20:
+    rclpy.spin_once(n, timeout_sec=0.1)
+print(f"{sorted(d)[len(d)//2]:.3f}" if d else "nan")
+PY
+}
+off() { awk -v d="$1" 'BEGIN{exit !(d<-0.05 || d>0.05)}'; }
+
+echo "[0] sudo 인증 / 노트북 자동 시간동기화 끄기"
+sudo -v || exit 1
+sudo timedatectl set-ntp false
+# chrony가 설치된 노트북은 chrony가 시간을 되돌리지 않도록 정지
+systemctl is-active --quiet chrony && sudo systemctl stop chrony
+
+echo "[1] 노트북을 Create3(/odom) 시간에 맞추기"
+for i in 1 2 3; do
+  od=$(measure /odom)
+  { [ -z "$od" ] || [ "$od" = "nan" ]; } && { echo "  /odom 을 받지 못함 (ROS 설정/로봇 상태 확인)"; exit 1; }
+  echo "  /odom delay = $od s"
+  off "$od" || break
+  sudo date -s "@$(date +%s.%N | awk -v d="$od" '{printf "%.3f", $1-d}')" >/dev/null
+done
+
+echo "[2] 라즈베리파이(/scan)를 노트북 시간에 맞추기"
+ssh -o BatchMode=yes $ROBOT "sudo -n date -s @$(date +%s.%N)" >/dev/null 2>&1 \
+  || { echo "  SSH 키 / sudoers 설정이 필요함"; exit 1; }
+sleep 1
+for i in 1 2 3; do
+  sd=$(measure /scan)
+  { [ -z "$sd" ] || [ "$sd" = "nan" ]; } && { echo "  /scan 을 받지 못함"; exit 1; }
+  echo "  /scan delay = $sd s"
+  off "$sd" || break
+  ssh -o BatchMode=yes $ROBOT "sudo -n date -s @\$(date +%s.%N | awk '{printf \"%.3f\", \$1+($sd)}')" >/dev/null 2>&1
+  sleep 1
+done
+
+echo "[3] 최종 확인 (0에 가까우면 정상)"
+echo "  /odom delay = $(measure /odom) s"
+echo "  /scan delay = $(measure /scan) s"
+echo "완료. 켜져 있던 SLAM / Nav2 / RViz 는 재시작하세요."
+echo "실습이 끝나면: sudo timedatectl set-ntp true"
+echo "  (chrony를 설치한 경우: sudo systemctl start chrony)"
+EOF
+chmod +x ~/tb4_timesync.sh
+echo "설치 완료: ~/tb4_timesync.sh"

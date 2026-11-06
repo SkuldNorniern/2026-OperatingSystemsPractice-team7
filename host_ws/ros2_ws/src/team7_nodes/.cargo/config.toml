@@ -1,0 +1,3 @@
+[env]
+# r2r only makes bindings for these, add new msg pkg here
+IDL_PACKAGE_FILTER = "std_msgs;geometry_msgs;nav_msgs;sensor_msgs;visualization_msgs;tf2_msgs;action_msgs;unique_identifier_msgs;builtin_interfaces;rcl_interfaces;geographic_msgs;nav2_msgs;aruco_opencv_msgs"

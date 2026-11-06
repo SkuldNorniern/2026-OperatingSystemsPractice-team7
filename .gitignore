@@ -66,3 +66,17 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Rust
+target/
+
+# colcon (any workspace)
+install/
+log/
+
+# third-party sources pulled with `vcs import src < team7.repos`
+host_ws/ros2_ws/src/external/
+rpi4_ws/ros2_ws/src/external/
+
+# demo run output
+team7_run/

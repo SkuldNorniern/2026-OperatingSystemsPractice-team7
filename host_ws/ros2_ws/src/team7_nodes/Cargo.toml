@@ -1,0 +1,20 @@
+[package]
+name = "team7_nodes"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+r2r = "0.9.7"
+futures = "0.3"
+ctrlc = { version = "3.5", features = ["termination"] }
+tb4_core = { path = "../../../../crates/tb4_core" }
+tb4_explore = { path = "../../../../crates/tb4_explore" }
+tb4_markers = { path = "../../../../crates/tb4_markers" }
+
+[profile.colcon]
+inherits = "release"

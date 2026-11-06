@@ -1,0 +1,49 @@
+# Parameters for the team7_nodes executables. Launch arguments override
+# output_dir, time_limit and expected_targets.
+
+marker_mapper:
+  ros__parameters:
+    detections_topic: /aruco_detections
+    map_topic: /map
+    map_frame: map
+    output_dir: ~/team7_run
+    csv_name: targets.csv
+    # localisation
+    max_range: 4.0            # m, raycast length
+    occupied_threshold: 65    # map cell value counted as a surface
+    range_ratio_gate: 3.0     # accept raycast if PnP range / ray range in [1/3, 3]
+    allow_pnp_fallback: true
+    max_abs_bearing_z: 0.8
+    # fusion
+    min_views: 5              # detections before an ID is confirmed
+    max_spread: 0.25          # m, median deviation allowed for confirmation
+    max_history: 200
+    ignore_ids: [-1]          # IDs to ignore (e.g. a marker on the robot). [-1] = none
+
+explorer:
+  ros__parameters:
+    costmap_topic: /global_costmap/costmap
+    nav_action: /navigate_to_pose
+    map_frame: map
+    base_frame: base_link
+    period: 1.0               # s between decisions
+    goal_timeout: 60.0        # s, give up on a goal after this
+    progress_timeout: 15.0    # s without getting progress_epsilon closer
+    progress_epsilon: 0.1
+    frontier_gone_radius: 0.5 # m, goal counts as explored when no frontier is this close
+    free_threshold: 50        # costmap value < this is free
+    min_frontier_cells: 8
+    size_weight: 1.0          # score = size_weight * frontier_len_m - distance_weight * dist_m
+    distance_weight: 1.0
+    blacklist_radius: 0.5
+    min_goal_distance: 0.3
+
+mission:
+  ros__parameters:
+    expected_targets: 3
+    time_limit: 590.0         # s; the run is 10 min, keep a margin for saving
+    autosave_period: 60.0     # s; map snapshot in case something crashes
+    output_dir: ~/team7_run
+    map_name: map
+    map_topic: /map
+    nav_action: /navigate_to_pose

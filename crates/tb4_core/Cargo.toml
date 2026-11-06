@@ -1,0 +1,10 @@
+[package]
+name = "tb4_core"
+version = "0.1.0"
+description = "Shared geometry, occupancy grid and TF buffer types (no ROS)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nalgebra.workspace = true

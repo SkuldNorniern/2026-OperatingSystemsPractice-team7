@@ -1,0 +1,10 @@
+[package]
+name = "tb4_markers"
+version = "0.1.0"
+description = "ArUco target localisation (bearing + map raycast) and multi-view fusion (no ROS)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tb4_core = { path = "../tb4_core" }

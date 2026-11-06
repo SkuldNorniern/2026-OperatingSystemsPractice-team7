@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    cam_base_topic: /oakd/rgb/preview/image_raw
+    output_frame: ''
+    marker_dict: ARUCO_ORIGINAL
+    marker_size: 0.10
+    image_is_rectified: false
+    image_sub_compressed: false
+    image_sub_qos:
+      reliability: 2
+      durability: 2
+      depth: 1
+    publish_tf: false
+    pose_selector:
+      strategy: REPROJECTION_ERROR

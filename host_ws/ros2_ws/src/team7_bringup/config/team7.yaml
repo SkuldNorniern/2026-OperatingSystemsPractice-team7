@@ -1,0 +1,42 @@
+# output_dir, time_limit, expected_targets come from launch args, dont set here
+
+marker_mapper:
+  ros__parameters:
+    detections_topic: /aruco_detections
+    map_topic: /map
+    map_frame: map
+    csv_name: targets.csv
+    max_range: 4.0
+    occupied_threshold: 65
+    range_ratio_gate: 3.0
+    allow_pnp_fallback: true
+    max_abs_bearing_z: 0.8
+    min_views: 5
+    max_spread: 0.25
+    max_history: 200
+    ignore_ids: [-1]
+
+explorer:
+  ros__parameters:
+    costmap_topic: /global_costmap/costmap
+    nav_action: /navigate_to_pose
+    map_frame: map
+    base_frame: base_link
+    period: 1.0
+    goal_timeout: 60.0
+    progress_timeout: 15.0
+    progress_epsilon: 0.1
+    frontier_gone_radius: 0.5
+    free_threshold: 50
+    min_frontier_cells: 8
+    size_weight: 1.0
+    distance_weight: 1.0
+    blacklist_radius: 0.5
+    min_goal_distance: 0.3
+
+mission:
+  ros__parameters:
+    autosave_period: 60.0
+    map_name: map
+    map_topic: /map
+    nav_action: /navigate_to_pose

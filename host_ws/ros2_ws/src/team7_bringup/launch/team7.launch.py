@@ -1,21 +1,9 @@
-"""Team 7 laptop bringup: SLAM + Nav2 + ArUco + exploration + mission + RViz.
-
-The robot (Raspberry Pi) only runs its factory TurtleBot 4 bringup; everything
-here runs on the laptop.
-
-    ros2 launch team7_bringup team7.launch.py                        # team7 Rust explorer
-    ros2 launch team7_bringup team7.launch.py explorer:=explore_lite  # baseline
-    ros2 launch team7_bringup team7.launch.py explorer:=none          # map/detect only (teleop testing)
-
-Reset odometry first so map frame == start pose (scripts/run_demo.sh does this).
-"""
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -31,8 +19,8 @@ ARGS = [
     ('time_limit', '590.0', 'Seconds until the mission stops'),
     ('expected_targets', '3', 'Stop once this many marker IDs are confirmed'),
     ('slam_sync', 'true', 'Synchronous slam_toolbox (processes every scan)'),
+    ('use_sim_time', 'false', 'true when running against the Gazebo simulation'),
 ]
-
 
 def generate_launch_description():
     bringup = FindPackageShare('team7_bringup')
@@ -44,13 +32,14 @@ def generate_launch_description():
 
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([tb4_nav, 'launch', 'slam.launch.py'])),
-        launch_arguments={'params': cfg('slam.yaml'), 'sync': arg('slam_sync')}.items(),
+        launch_arguments={'params': cfg('slam.yaml'), 'sync': arg('slam_sync'),
+                          'use_sim_time': arg('use_sim_time')}.items(),
         condition=IfCondition(arg('slam')),
     )
-    # Give slam_toolbox a moment to publish map->odom before Nav2 activates.
     nav2 = TimerAction(period=3.0, actions=[IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([tb4_nav, 'launch', 'nav2.launch.py'])),
-        launch_arguments={'params_file': cfg('nav2.yaml')}.items(),
+        launch_arguments={'params_file': cfg('nav2.yaml'),
+                          'use_sim_time': arg('use_sim_time')}.items(),
         condition=IfCondition(arg('nav2')),
     )])
 
@@ -87,7 +76,6 @@ def generate_launch_description():
         parameters=[cfg('explore_lite.yaml')], output='screen',
         condition=LaunchConfigurationEquals('explorer', 'explore_lite'),
     )
-    # Start exploring once Nav2 has had time to come up.
     explorers = TimerAction(period=10.0, actions=[explorer_team7, explorer_baseline])
 
     rviz = Node(
@@ -96,7 +84,10 @@ def generate_launch_description():
         condition=IfCondition(arg('rviz')),
     )
 
+    sim_time = SetParameter(name='use_sim_time',
+                            value=ParameterValue(arg('use_sim_time'), value_type=bool))
+
     return LaunchDescription(
         [DeclareLaunchArgument(n, default_value=d, description=h) for n, d, h in ARGS]
-        + [slam, nav2, aruco, marker_mapper, mission, explorers, rviz]
+        + [sim_time, slam, nav2, aruco, marker_mapper, mission, explorers, rviz]
     )

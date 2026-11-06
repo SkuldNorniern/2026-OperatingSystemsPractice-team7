@@ -1,15 +1,3 @@
-//! mission: run clock and end-of-run handling.
-//!
-//! Subscribes   /team7/targets (MarkerArray from marker_mapper)
-//! Publishes    /team7/mission_state (std_msgs/String, latched): RUNNING | DONE
-//!              /explore/resume (std_msgs/Bool) = false on DONE, to stop explore_lite
-//! Service      <nav_action>/_action/cancel_goal: cancel every Nav2 goal on DONE
-//! Runs         `ros2 run nav2_map_server map_saver_cli` on DONE and every
-//!              `autosave_period` s, writing <output_dir>/<map_name>.{pgm,yaml}
-//!
-//! DONE = `expected_targets` confirmed ids, or `time_limit` seconds since start.
-//! The marker CSV is written continuously by marker_mapper into the same output_dir.
-
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,7 +13,6 @@ use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{QosProfile, log_error, log_info, log_warn};
 use team7_nodes::Params;
 
-/// Late joiners get only the current state.
 const LATCHED: QosProfile = QosProfile::default().keep_last(1).reliable().transient_local();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,7 +68,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_info!(&log, "{n}/{expected} targets confirmed at {:.1} s: {:?}", elapsed.as_secs_f64(), found.borrow());
                 last_count = n;
             }
-            // Reap a finished autosave.
             if let Some(c) = saver.as_mut()
                 && let Ok(Some(_)) = c.try_wait()
             {
@@ -92,9 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_info!(&log, "DONE ({why}) after {:.1} s with {n}/{expected} targets", elapsed.as_secs_f64());
                 let _ = pub_state.publish(&r2r::std_msgs::msg::String { data: "DONE".into() });
                 let _ = pub_resume.publish(&r2r::std_msgs::msg::Bool { data: false });
-                // Empty goal_info (zero uuid, zero stamp) = cancel all goals.
-                // Fire and forget: the request goes out now, and awaiting the reply
-                // would hang forever if Nav2 is not running.
+                // empty goal_info cancels all goals. no await, it hangs if nav2 is down
                 if let Err(e) = cancel.request(&CancelGoal::Request::default()) {
                     log_warn!(&log, "cancel_goal request failed: {e}");
                 }
@@ -119,8 +103,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
-    // Keep spinning after DONE so the latched state stays available and RViz keeps
-    // showing the result; Ctrl-C ends the node.
     team7_nodes::run(node, pool, || false);
     Ok(())
 }
@@ -130,7 +112,8 @@ fn save_map(dir: &Path, name: &str, map_topic: &str) -> std::io::Result<Child> {
     Command::new("ros2")
         .args(["run", "nav2_map_server", "map_saver_cli", "-f"])
         .arg(&path)
-        .args(["-t", map_topic, "--ros-args", "-p", "save_map_timeout:=10.0", "--log-level", "warn"])
+        .args(["-t", map_topic, "--ros-args", "-p", "save_map_timeout:=10.0"])
+        .args(["-p", "map_subscribe_transient_local:=true", "--log-level", "warn"])
         .stdin(Stdio::null())
         .spawn()
 }

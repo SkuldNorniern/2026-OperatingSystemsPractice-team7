@@ -93,6 +93,14 @@ run_demo.sh nav:=team7 slam_backend:=team7 aruco:=team7       # all ours, Nav2 n
 nav2.yaml MPPI is tuned for create3 too: vx_max 0.30, vx_min 0.0 (no reversing), accel 1.0.
 aruco_opencv needs reliable camera_info, our detector takes both reliable and best effort.
 
+in nav:=team7 our MPPI still goes through nav2 velocity_smoother and collision_monitor (cmd_vel_nav -> cmd_vel), same as nav2 controller.
+collision_monitor uses config/collision_monitor_team7.yaml there because there is no local costmap footprint.
+all our nodes have ros2 param services and follow use_sim_time.
+
+after frontiers are done explorer goes to look at walls the camera has not seen yet (lidar maps walls much further than camera reads markers).
+orange points in RViz are those camera views. turn off with `camera_coverage: false` in team7.yaml.
+when an unconfirmed marker is in view, marker_mapper publishes /speed_limit (nav2_msgs/SpeedLimit, 40%) so less motion blur. nav2 controller and our navigator both follow it.
+
 run_demo.sh undocks if robot is on dock (power_saver keeps lidar and camera off there), calls create3 `/reset_pose` so map origin is start pose, then launches `team7.launch.py`.
 
 run stops when 3 ids are confirmed or `time_limit` (590 s) is over. mission cancels Nav2 goals, stops explore_lite and saves:

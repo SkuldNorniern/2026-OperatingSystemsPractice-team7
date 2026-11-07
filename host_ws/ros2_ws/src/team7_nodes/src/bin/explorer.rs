@@ -11,12 +11,14 @@ use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{ActionClient, ActionClientGoal, GoalStatus, QosProfile, log_info, log_warn};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener, viz};
 use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
-use tb4_explore::{ExploreParams, Frontier, find_frontiers, select_goal};
+use tb4_explore::{Coverage, CoverageParams, ExploreParams, Frontier, View, find_frontiers, select_goal};
 
 type Nav = NavigateToPose::Action;
 
 struct Active {
     goal: (f64, f64),
+    /// camera view goal: wall point it looks at
+    view_target: Option<(f64, f64)>,
     handle: Option<ActionClientGoal<Nav>>,
     started: Instant,
     best_dist: f64,
@@ -25,6 +27,9 @@ struct Active {
 
 struct State {
     grid: Option<Grid>,
+    map: Option<Grid>,
+    coverage: Coverage,
+    visited_views: Vec<(f64, f64)>,
     active: Option<Active>,
     blacklist: Vec<(f64, f64)>,
     done: bool,
@@ -39,7 +44,9 @@ struct Cfg {
     progress_timeout: Duration,
     progress_epsilon: f64,
     gone_radius: f64,
+    heading_weight: f64,
     explore: ExploreParams,
+    coverage: Option<CoverageParams>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         progress_timeout: Duration::from_secs_f64(p.f64("progress_timeout", 15.0)),
         progress_epsilon: p.f64("progress_epsilon", 0.1),
         gone_radius: p.f64("frontier_gone_radius", 0.5),
+        heading_weight: p.f64("heading_weight", 0.0),
         explore: ExploreParams {
             free_threshold: p.i64("free_threshold", 50) as i8,
             min_frontier_cells: p.i64("min_frontier_cells", 8) as usize,
@@ -63,7 +71,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             blacklist_radius: p.f64("blacklist_radius", 0.5),
             min_goal_distance: p.f64("min_goal_distance", 0.3),
         },
+        // after frontiers: go look at walls the camera has not seen, markers can be on any of them
+        coverage: p.bool("camera_coverage", true).then(|| CoverageParams {
+            half_fov: p.f64("camera_half_fov", 0.52),
+            range: p.f64("camera_range", 2.5),
+            standoff: p.f64("view_standoff", 1.2),
+            ..CoverageParams::default()
+        }),
     });
+    let map_topic = p.string("coverage_map_topic", "/map");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
     let costmap_topic = p.string("costmap_topic", "/global_costmap/costmap");
     let nav_action = p.string("nav_action", "/navigate_to_pose");
@@ -72,11 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let tf = Rc::new(RefCell::new(TfBuffer::new(10.0, 0.2)));
     spawn_tf_listener(&mut node, &spawner, tf.clone(), &tf_topic, &tf_static_topic)?;
 
     let state = Rc::new(RefCell::new(State {
         grid: None,
+        map: None,
+        coverage: Coverage::new(),
+        visited_views: Vec::new(),
         active: None,
         blacklist: Vec::new(),
         done: false,
@@ -88,6 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let st = state.clone();
     spawner.spawn_local(costmap.for_each(move |m| {
         st.borrow_mut().grid = grid_from_msg(&m);
+        futures::future::ready(())
+    }))?;
+
+    let maps = node.subscribe::<OccupancyGrid>(&map_topic, QosProfile::default().reliable().transient_local())?;
+    let st = state.clone();
+    spawner.spawn_local(maps.for_each(move |m| {
+        st.borrow_mut().map = grid_from_msg(&m);
         futures::future::ready(())
     }))?;
 
@@ -107,6 +134,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let available = r2r::Node::is_available(&client)?;
     let pub_frontiers = node.create_publisher::<MarkerArray>("/team7/frontiers", QosProfile::default())?;
     let mut timer = node.create_wall_timer(period)?;
+
+    // what the camera saw, 5 Hz
+    let mut cov_timer = node.create_wall_timer(Duration::from_millis(200))?;
+    let (st, tfc, c) = (state.clone(), tf.clone(), cfg.clone());
+    spawner.spawn_local(async move {
+        while cov_timer.tick().await.is_ok() {
+            let Some(cp) = c.coverage.as_ref() else { return };
+            let Ok(t) = tfc.borrow().lookup(&c.map_frame, &c.base_frame, Stamp::LATEST) else { continue };
+            let r = Pose2::from_isometry(&t);
+            let mut s = st.borrow_mut();
+            let s = &mut *s;
+            if let Some(m) = s.map.as_ref() {
+                s.coverage.update(m, (r.x, r.y, r.yaw), cp);
+            }
+        }
+    })?;
 
     let sp = spawner.clone();
     spawner.spawn_local(async move {
@@ -152,7 +195,10 @@ fn tick(
     if let Some((goal, status)) = s.result.take() {
         let was_active = s.active.as_ref().is_some_and(|a| a.goal == goal);
         if was_active {
-            s.active = None;
+            // a reached view whose wall still counts as unseen must not be picked again
+            if let Some(t) = s.active.take().and_then(|a| a.view_target) {
+                s.visited_views.push(t);
+            }
         }
         // results of goals we already dropped (preempted -> aborted) dont count
         if was_active && !matches!(status, GoalStatus::Succeeded | GoalStatus::Canceled) {
@@ -172,8 +218,21 @@ fn tick(
             return;
         }
     };
-    let frontiers = find_frontiers(grid, (robot.x, robot.y), &cfg.explore);
-    let _ = pub_frontiers.publish(&frontier_markers(&cfg.map_frame, &frontiers));
+    let mut frontiers = find_frontiers(grid, (robot.x, robot.y), &cfg.explore);
+    tb4_explore::rescore_heading(&mut frontiers, (robot.x, robot.y, robot.yaw), cfg.heading_weight);
+    let need_views = s.active.as_ref().is_some_and(|a| a.view_target.is_some())
+        || select_goal(&frontiers, &s.blacklist, &cfg.explore).is_none();
+    let views: Vec<View> = match (cfg.coverage.as_ref(), s.map.as_ref()) {
+        (Some(cp), Some(m)) if need_views => s
+            .coverage
+            .views(m, (robot.x, robot.y), cp)
+            .into_iter()
+            .filter(|v| s.visited_views.iter().all(|t| dist(*t, v.target) > 0.6))
+            .filter(|v| s.blacklist.iter().all(|b| dist(*b, (v.x, v.y)) > cfg.explore.blacklist_radius))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let _ = pub_frontiers.publish(&frontier_markers(&cfg.map_frame, &frontiers, &views));
 
     let now = Instant::now();
     let mut abandon = None;
@@ -183,13 +242,16 @@ fn tick(
             a.best_dist = d;
             a.last_progress = now;
         }
-        let gone = !frontiers.iter().any(|f| dist(f.goal, a.goal) < cfg.gone_radius);
+        let gone = match a.view_target {
+            Some(t) => !views.iter().any(|v| dist(v.target, t) < 0.6),
+            None => !frontiers.iter().any(|f| dist(f.goal, a.goal) < cfg.gone_radius),
+        };
         if now - a.started > cfg.goal_timeout {
             abandon = Some((a.goal, "timeout", true));
         } else if now - a.last_progress > cfg.progress_timeout {
             abandon = Some((a.goal, "no progress", true));
         } else if gone {
-            abandon = Some((a.goal, "frontier explored", false));
+            abandon = Some((a.goal, if a.view_target.is_some() { "wall seen" } else { "frontier explored" }, false));
         }
     }
     if let Some((goal, why, blacklist)) = abandon {
@@ -205,23 +267,27 @@ fn tick(
         return;
     }
 
-    let Some(f) = select_goal(&frontiers, &s.blacklist, &cfg.explore) else {
+    let (goal, yaw, view_target) = if let Some(f) = select_goal(&frontiers, &s.blacklist, &cfg.explore) {
+        log_info!(log, "new goal ({:.2}, {:.2}) frontier {:.1} m, {:.1} m away", f.goal.0, f.goal.1, f.size_m, f.distance);
+        (f.goal, (f.goal.1 - robot.y).atan2(f.goal.0 - robot.x), None)
+    } else if let Some(v) = views.first() {
+        log_info!(log, "new goal ({:.2}, {:.2}) camera view of {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
+        ((v.x, v.y), v.yaw, Some(v.target))
+    } else {
         if !s.finished_exploring {
-            log_info!(log, "no reachable frontiers left: exploration finished");
+            log_info!(log, "no frontiers or unseen walls left: exploration finished ({} wall cells seen)", s.coverage.seen_count());
             s.finished_exploring = true;
         }
         return;
     };
     s.finished_exploring = false;
-    let goal = f.goal;
-    let yaw = (goal.1 - robot.y).atan2(goal.0 - robot.x);
-    log_info!(log, "new goal ({:.2}, {:.2}) frontier {:.1} m, {:.1} m away", goal.0, goal.1, f.size_m, f.distance);
 
     let mut msg = NavigateToPose::Goal::default();
     msg.pose.header.frame_id = cfg.map_frame.clone();
     msg.pose.pose = pose_msg(goal.0, goal.1, yaw);
     s.active = Some(Active {
         goal,
+        view_target,
         handle: None,
         started: now,
         best_dist: robot.distance_to(goal.0, goal.1),
@@ -263,7 +329,7 @@ fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
-fn frontier_markers(frame: &str, frontiers: &[Frontier]) -> MarkerArray {
+fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> MarkerArray {
     let mut pts = viz::base(frame, "frontier_goals", 0, viz::POINTS);
     pts.scale.x = 0.12;
     pts.scale.y = 0.12;
@@ -272,5 +338,10 @@ fn frontier_markers(frame: &str, frontiers: &[Frontier]) -> MarkerArray {
         .iter()
         .map(|f| r2r::geometry_msgs::msg::Point { x: f.goal.0, y: f.goal.1, z: 0.05 })
         .collect();
-    MarkerArray { markers: vec![viz::delete_all(frame), pts] }
+    let mut cams = viz::base(frame, "camera_views", 0, viz::POINTS);
+    cams.scale.x = 0.12;
+    cams.scale.y = 0.12;
+    cams.color = viz::color(1.0, 0.5, 0.0, 0.9);
+    cams.points = views.iter().map(|v| r2r::geometry_msgs::msg::Point { x: v.x, y: v.y, z: 0.05 }).collect();
+    MarkerArray { markers: vec![viz::delete_all(frame), pts, cams] }
 }

@@ -1,3 +1,6 @@
+mod coverage;
+pub use coverage::{Coverage, CoverageParams, View};
+
 use std::collections::VecDeque;
 
 use tb4_core::grid::{Cell, Grid, UNKNOWN};
@@ -121,6 +124,18 @@ pub fn select_goal<'a>(frontiers: &'a [Frontier], blacklist: &[(f64, f64)], p: &
         .find(|f| blacklist.iter().all(|b| dist2(*b, f.goal) > r2))
 }
 
+/// prefer frontiers in front of the robot: score -= weight * |turn angle| (rad), then re-sort
+pub fn rescore_heading(frontiers: &mut [Frontier], robot: (f64, f64, f64), weight: f64) {
+    if weight <= 0.0 {
+        return;
+    }
+    for f in frontiers.iter_mut() {
+        let a = (f.goal.1 - robot.1).atan2(f.goal.0 - robot.0) - robot.2;
+        f.score -= weight * a.sin().atan2(a.cos()).abs();
+    }
+    frontiers.sort_by(|a, b| b.score.total_cmp(&a.score));
+}
+
 #[inline]
 fn dist2(a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)
@@ -180,6 +195,15 @@ mod tests {
         assert!(select_goal(&f, &[f[0].goal], &p).is_none());
         let near = find_frontiers(&g, f[0].goal, &p);
         assert!(select_goal(&near, &[], &p).is_none());
+    }
+
+    #[test]
+    fn heading_prefers_frontier_ahead() {
+        let mk = |x: f64, y: f64| Frontier { cells: 10, size_m: 1.0, centroid: (x, y), goal: (x, y), distance: 2.0, score: 0.0 };
+        let mut f = vec![mk(-2.0, 0.0), mk(2.0, 0.0)];
+        rescore_heading(&mut f, (0.0, 0.0, 0.0), 0.5);
+        assert_eq!(f[0].goal, (2.0, 0.0));
+        assert!((f[1].score + 0.5 * std::f64::consts::PI).abs() < 1e-9);
     }
 
     #[test]

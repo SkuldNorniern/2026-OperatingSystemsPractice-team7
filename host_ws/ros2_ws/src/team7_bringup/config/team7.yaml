@@ -1,5 +1,5 @@
 # launch sets per mode, dont set here: output_dir, time_limit, expected_targets, nav_action,
-# costmap_topic, scan_topic (slam), mode (navigator), image_topic, marker_size
+# costmap_topic, scan_topic (slam), mode and cmd_vel_topic (navigator), image_topic, marker_size
 
 marker_mapper:
   ros__parameters:
@@ -16,6 +16,10 @@ marker_mapper:
     max_spread: 0.25
     max_history: 200
     ignore_ids: [-1]
+    slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
+    slow_percent: 40.0
+    slow_hold: 2.5
+    image_time_offset: 0.0    # s, add to image stamp if camera stamps are late/early
 
 explorer:
   ros__parameters:
@@ -32,6 +36,12 @@ explorer:
     distance_weight: 1.0
     blacklist_radius: 0.5
     min_goal_distance: 0.3
+    heading_weight: 0.0
+    camera_coverage: true     # after frontiers, drive to look at walls the camera has not seen
+    coverage_map_topic: /map
+    camera_half_fov: 0.52     # rad, OAK-D preview is ~60 deg wide
+    camera_range: 2.5         # m, where markers still get detected
+    view_standoff: 1.2
 
 mission:
   ros__parameters:
@@ -71,7 +81,6 @@ navigator:
     map_topic: /map
     scan_topic: /scan
     odom_topic: /odom
-    cmd_vel_topic: /cmd_vel
     robot_radius: 0.18
     safety_margin: 0.05
     cost_scaling_dist: 0.5

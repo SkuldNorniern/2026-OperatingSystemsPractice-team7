@@ -1,0 +1,10 @@
+[package]
+name = "tb4_planning"
+version = "0.1.0"
+description = "Configuration-space grid planning: cost-aware Lazy Theta* and A* (no ROS)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tb4_core = { path = "../tb4_core" }

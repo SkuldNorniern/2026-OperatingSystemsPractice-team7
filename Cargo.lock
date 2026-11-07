@@ -193,6 +193,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tb4_aruco"
+version = "0.1.0"
+
+[[package]]
+name = "tb4_control"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
 name = "tb4_core"
 version = "0.1.0"
 dependencies = [
@@ -208,6 +219,24 @@ dependencies = [
 
 [[package]]
 name = "tb4_markers"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
+name = "tb4_planning"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
+name = "tb4_scan"
+version = "0.1.0"
+
+[[package]]
+name = "tb4_slam"
 version = "0.1.0"
 dependencies = [
  "tb4_core",

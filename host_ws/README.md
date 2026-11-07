@@ -6,7 +6,7 @@ pi only runs factory TurtleBot 4 drivers.
 ```
 ros2_ws/
   team7.repos            vcs import list
-  src/team7_nodes/       r2r nodes: marker_mapper, explorer, mission. uses ../../../../crates
+  src/team7_nodes/       r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector. uses ../../../../crates
   src/team7_bringup/     launch/team7.launch.py, config/*.yaml, rviz/team7.rviz
   src/external/          m-explore-ros2 from team7.repos (git ignored)
 scripts/run_demo.sh      undock if docked, reset odom, launch
@@ -75,6 +75,24 @@ host_ws/scripts/run_demo.sh explorer:=explore_lite   # baseline
 host_ws/scripts/run_demo.sh explorer:=none           # mapping + detection only, drive with teleop
 ```
 
+switch stock parts and ours:
+
+```bash
+run_demo.sh nav:=nav2 slam_backend:=toolbox aruco:=opencv     # all stock (default)
+run_demo.sh nav:=lazy_nav2                                    # our Lazy Theta*, Nav2 MPPI follows it
+run_demo.sh nav:=team7 slam_backend:=team7 aruco:=team7       # all ours, Nav2 not started
+```
+
+| arg | values | |
+|---|---|---|
+| `nav` | `nav2`, `lazy_nav2`, `team7` | team7 publishes /cmd_vel itself, no Nav2 running |
+| `slam_backend` | `toolbox`, `team7` | both publish /map and map->odom |
+| `aruco` | `opencv`, `team7` | both publish /aruco_detections |
+| `scan_filter` | `true` | /scan -> /scan_filtered (range, median, outlier, deskew) for SLAM |
+
+nav2.yaml MPPI is tuned for create3 too: vx_max 0.30, vx_min 0.0 (no reversing), accel 1.0.
+aruco_opencv needs reliable camera_info, our detector takes both reliable and best effort.
+
 run_demo.sh undocks if robot is on dock (power_saver keeps lidar and camera off there), calls create3 `/reset_pose` so map origin is start pose, then launches `team7.launch.py`.
 
 run stops when 3 ids are confirmed or `time_limit` (590 s) is over. mission cancels Nav2 goals, stops explore_lite and saves:
@@ -85,6 +103,7 @@ run stops when 3 ids are confirmed or `time_limit` (590 s) is over. mission canc
 ```
 
 in RViz confirmed targets are green with `ID n (x, y)`, not confirmed yet are yellow `ID n? kv`.
+our parts show up too: Lazy Theta* path (cyan), MPPI predicted trajectory (magenta), SLAM keyframes and loop closures (orange/pink), aruco debug image, filtered scan (off by default).
 
 | launch arg | default | |
 |---|---|---|
@@ -95,7 +114,7 @@ in RViz confirmed targets are green with `ID n (x, y)`, not confirmed yet are ye
 | `time_limit` | `590.0` | seconds |
 | `expected_targets` | `3` | |
 | `use_sim_time` | `false` | `true` for gazebo |
-| `rviz`, `slam`, `nav2`, `mission` | `true` | turn parts off for testing |
+| `rviz`, `slam`, `mission` | `true` | turn parts off for testing (Nav2 follows `nav`) |
 
 node params are in `src/team7_bringup/config/team7.yaml`. nav2.yaml and slam.yaml are turtlebot4_navigation 2.1.1 copies, our changes have `team7:` on them.
 

@@ -90,6 +90,61 @@ Visualization Manager:
         Durability Policy: Volatile
         Depth: 5
       Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan filtered
+      Enabled: false
+      Topic:
+        Value: /scan_filtered
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 5
+      Size (m): 0.03
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 200; 0
+      Value: false
+    - Class: rviz_default_plugins/Path
+      Name: Lazy Theta* path (team7)
+      Enabled: true
+      Topic:
+        Value: /team7/path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Color: 0; 200; 255
+      Line Width: 0.04
+      Line Style: Billboards
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: MPPI trajectory (team7)
+      Enabled: true
+      Topic:
+        Value: /team7/mppi/trajectory
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Color: 255; 0; 255
+      Line Width: 0.03
+      Line Style: Billboards
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SLAM graph (team7)
+      Enabled: true
+      Topic:
+        Value: /team7/slam/graph
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: ArUco debug (team7)
+      Enabled: true
+      Topic:
+        Value: /team7/aruco/debug
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Name: Targets
       Enabled: true

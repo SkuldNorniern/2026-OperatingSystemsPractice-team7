@@ -1,4 +1,5 @@
-# output_dir, time_limit, expected_targets come from launch args, dont set here
+# launch sets per mode, dont set here: output_dir, time_limit, expected_targets, nav_action,
+# costmap_topic, scan_topic (slam), mode (navigator), image_topic, marker_size
 
 marker_mapper:
   ros__parameters:
@@ -18,8 +19,6 @@ marker_mapper:
 
 explorer:
   ros__parameters:
-    costmap_topic: /global_costmap/costmap
-    nav_action: /navigate_to_pose
     map_frame: map
     base_frame: base_link
     period: 1.0
@@ -39,4 +38,61 @@ mission:
     autosave_period: 60.0
     map_name: map
     map_topic: /map
-    nav_action: /navigate_to_pose
+
+scan_filter:
+  ros__parameters:
+    scan_topic: /scan
+    output_topic: /scan_filtered
+    odom_topic: /odom
+    min_range: 0.18
+    max_range: 8.0
+    median_window: 3
+    isolated_dist: 0.15
+    deskew: true
+    stamp_at_end: false
+
+slam:
+  ros__parameters:
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    resolution: 0.05
+    min_travel_dist: 0.1
+    min_travel_yaw: 0.1
+    max_range: 8.0
+    map_publish_period: 1.0
+    transform_publish_period: 0.05
+
+navigator:
+  ros__parameters:
+    action_name: /team7/navigate_to_pose
+    follow_action: /follow_path
+    controller_id: FollowPath
+    map_topic: /map
+    scan_topic: /scan
+    odom_topic: /odom
+    cmd_vel_topic: /cmd_vel
+    robot_radius: 0.18
+    safety_margin: 0.05
+    cost_scaling_dist: 0.5
+    cost_weight: 2.0
+    allow_unknown: true
+    goal_tolerance: 0.3
+    replan_period: 2.0
+    goal_timeout: 90.0
+    smooth_iterations: 2
+    use_scan_obstacles: true
+    mppi_samples: 1000
+    mppi_horizon: 40
+    mppi_threads: 4
+    vx_max: 0.30
+    wz_max: 1.9
+    goal_tolerance_xy: 0.15
+    goal_tolerance_yaw: 0.3
+
+aruco_detector:
+  ros__parameters:
+    max_hamming: 1
+    min_side_px: 8.0
+    refine_corners: true
+    debug_every: 3

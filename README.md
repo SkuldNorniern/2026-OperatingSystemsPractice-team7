@@ -16,8 +16,13 @@ crates/
   tb4_core/                Pose2, occupancy grid + raycast, TF buffer
   tb4_explore/             frontier detection, goal scoring
   tb4_markers/             target position from bearing + map, multi view fusion
+  tb4_scan/                scan range/median/outlier filter, motion deskew
+  tb4_slam/                own 2D SLAM: correlative matching, keyframes, loop closure, pose graph
+  tb4_planning/            C-space inflation, Lazy Theta*, A*
+  tb4_control/             own MPPI, multithreaded rollouts, create3 limits
+  tb4_aruco/               own ArUco detector (ARUCO_ORIGINAL), camera model
 host_ws/                   laptop (Ubuntu 24.04, Jazzy), runs everything heavy
-  ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission
+  ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector
   ros2_ws/src/team7_bringup/ launch, params, RViz config
   ros2_ws/team7.repos        explore_lite source
   scripts/run_demo.sh        undock, reset odom, launch
@@ -41,6 +46,9 @@ Laptop  slam_toolbox  -> /map, map->odom
 marker size can change on demo day so PnP range from one marker is not reliable. direction from camera is still right.
 so marker_mapper casts that direction through the SLAM map and takes first occupied cell. PnP range is only fallback.
 each id needs a few views that agree before it counts.
+
+every part has stock ROS version and ours, switch with launch args (host_ws/README.md):
+aruco_opencv or our detector, slam_toolbox or our SLAM, Nav2 NavFn+MPPI or our Lazy Theta* with Nav2 MPPI or with our MPPI.
 
 ## start
 

@@ -150,10 +150,12 @@ fn tick(
     }
 
     if let Some((goal, status)) = s.result.take() {
-        if s.active.as_ref().is_some_and(|a| a.goal == goal) {
+        let was_active = s.active.as_ref().is_some_and(|a| a.goal == goal);
+        if was_active {
             s.active = None;
         }
-        if !matches!(status, GoalStatus::Succeeded | GoalStatus::Canceled) {
+        // results of goals we already dropped (preempted -> aborted) dont count
+        if was_active && !matches!(status, GoalStatus::Succeeded | GoalStatus::Canceled) {
             log_warn!(log, "goal ({:.2}, {:.2}) ended with {status:?}, blacklisting", goal.0, goal.1);
             s.blacklist.push(goal);
         }

@@ -45,15 +45,15 @@ controller_server:
       time_steps: 56
       model_dt: 0.05
       batch_size: 2000
-      ax_max: 3.0
-      ax_min: -3.0
+      ax_max: 1.0     # team7: was 3.0, create3 cant follow 3 m/s^2 samples
+      ax_min: -1.0    # team7: was -3.0
       ay_max: 3.0
       az_max: 3.5
-      vx_std: 0.2
+      vx_std: 0.15    # team7: was 0.2, smaller v range
       vy_std: 0.2
       wz_std: 0.4
-      vx_max: 0.5
-      vx_min: -0.35
+      vx_max: 0.30    # team7: was 0.5, create3 cap 0.306 without safety_override
+      vx_min: 0.0     # team7: was -0.35, create3 backup limit blocks reversing
       vy_max: 0.5
       wz_max: 1.9
       iteration_count: 1

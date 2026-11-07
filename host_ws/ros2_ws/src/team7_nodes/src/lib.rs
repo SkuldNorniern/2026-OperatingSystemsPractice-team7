@@ -104,6 +104,14 @@ impl Params<'_> {
     }
 }
 
+/// ros2 param services for this node, also turns on use_sim_time (/clock) when set
+pub fn spawn_param_services(node: &mut r2r::Node, spawner: &LocalSpawner) -> r2r::Result<()> {
+    let (services, events) = node.make_parameter_handler()?;
+    spawner.spawn_local(services).expect("spawn param services");
+    spawner.spawn_local(events.for_each(|_| futures::future::ready(()))).expect("spawn param events");
+    Ok(())
+}
+
 pub type SharedTf = Rc<RefCell<TfBuffer>>;
 
 pub const TF_STATIC_QOS: QosProfile = QosProfile::default().keep_last(100).reliable().transient_local();

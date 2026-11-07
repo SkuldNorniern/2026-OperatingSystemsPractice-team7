@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let tf = Rc::new(RefCell::new(TfBuffer::new(10.0, 0.1)));
     spawn_tf_listener(&mut node, &spawner, tf.clone(), "/tf", "/tf_static")?;
 

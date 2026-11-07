@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let state = Rc::new(RefCell::new(State {
         cam: None,
         img: GrayImage::new(1, 1),

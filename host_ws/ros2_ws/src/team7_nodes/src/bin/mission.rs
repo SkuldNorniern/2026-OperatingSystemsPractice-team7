@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let f = found.clone();
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     spawner.spawn_local(targets.for_each(move |m| {
         let mut f = f.borrow_mut();
         for mk in m.markers.iter().filter(|mk| mk.ns == "target_confirmed") {

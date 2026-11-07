@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let state = Rc::new(RefCell::new(State::default()));
 
     let odom = node.subscribe::<Odometry>(&odom_topic, QosProfile::default())?;

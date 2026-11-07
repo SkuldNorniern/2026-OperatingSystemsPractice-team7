@@ -55,6 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_views: p.i64("min_views", 5) as usize,
             max_spread: p.f64("max_spread", 0.25),
             max_history: p.i64("max_history", 200) as usize,
+            scale_tolerance: p.f64("scale_tolerance", 0.25),
+            scale_min_samples: p.i64("scale_min_samples", 3) as usize,
+            min_view_move: p.f64("min_view_move", 0.05),
+            min_view_turn: p.f64("min_view_turn", 0.05),
         };
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {
@@ -135,10 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let b = cam.rotation * (t_cam / range);
             let obs = Observation { id, camera: (origin.x, origin.y, origin.z), bearing: (b.x, b.y, b.z), pnp_range: range };
-            let est = tb4_markers::locate(s.grid.as_ref(), &obs, &s.locate);
-            if let Some(e) = est {
-                s.stats[(e.source == Source::PnpRange) as usize] += 1;
-                s.tracker.add(id, &e);
+            let st = &mut *s;
+            if let Some(e) = st.tracker.observe(st.grid.as_ref(), &obs, &st.locate) {
+                st.stats[(e.source != Source::Raycast) as usize] += 1;
             }
         }
         let targets = s.tracker.targets();

@@ -65,8 +65,22 @@ def setup(context):
                               'use_sim_time': arg('use_sim_time')}.items())]))
     if nav in ('lazy_nav2', 'team7'):
         actions.append(Node(package='team7_nodes', executable='navigator', name='navigator',
-                            parameters=[team7_yaml, {'mode': 'nav2' if nav == 'lazy_nav2' else 'mppi'}],
+                            parameters=[team7_yaml, {'mode': 'nav2' if nav == 'lazy_nav2' else 'mppi',
+                                                     'cmd_vel_topic': '/cmd_vel_nav'}],
                             output='screen'))
+    if nav == 'team7':
+        # our MPPI goes through same safety chain as Nav2 controller: cmd_vel_nav -> smoother -> collision_monitor -> cmd_vel
+        nav2_params = cfg('nav2.yaml')
+        sim = {'use_sim_time': ParameterValue(arg('use_sim_time'), value_type=bool)}
+        actions += [
+            Node(package='nav2_velocity_smoother', executable='velocity_smoother', name='velocity_smoother',
+                 parameters=[nav2_params, sim], remappings=[('cmd_vel', 'cmd_vel_nav')], output='screen'),
+            Node(package='nav2_collision_monitor', executable='collision_monitor', name='collision_monitor',
+                 parameters=[cfg('collision_monitor_team7.yaml'), sim], output='screen'),
+            Node(package='nav2_lifecycle_manager', executable='lifecycle_manager', name='lifecycle_manager_safety',
+                 parameters=[sim, {'autostart': True, 'node_names': ['velocity_smoother', 'collision_monitor']}],
+                 output='screen'),
+        ]
 
     if aruco_be == 'team7':
         actions.append(Node(package='team7_nodes', executable='aruco_detector', name='aruco_detector',

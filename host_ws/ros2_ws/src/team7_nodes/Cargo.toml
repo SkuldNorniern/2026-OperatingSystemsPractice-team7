@@ -15,6 +15,11 @@ ctrlc = { version = "3.5", features = ["termination"] }
 tb4_core = { path = "../../../../crates/tb4_core" }
 tb4_explore = { path = "../../../../crates/tb4_explore" }
 tb4_markers = { path = "../../../../crates/tb4_markers" }
+tb4_scan = { path = "../../../../crates/tb4_scan" }
+tb4_planning = { path = "../../../../crates/tb4_planning" }
+tb4_control = { path = "../../../../crates/tb4_control" }
+tb4_slam = { path = "../../../../crates/tb4_slam" }
+tb4_aruco = { path = "../../../../crates/tb4_aruco" }
 
 [profile.colcon]
 inherits = "release"

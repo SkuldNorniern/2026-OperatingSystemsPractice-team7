@@ -7,7 +7,7 @@ find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
 
 set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(CARGO_PROFILE colcon)
-set(TEAM7_BINARIES marker_mapper explorer mission)
+set(TEAM7_BINARIES marker_mapper explorer mission scan_filter navigator slam aruco_detector)
 
 add_custom_target(cargo_build ALL
   # cargo cant use make jobserver from here

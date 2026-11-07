@@ -953,6 +953,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tb4_aruco"
+version = "0.1.0"
+
+[[package]]
+name = "tb4_control"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
 name = "tb4_core"
 version = "0.1.0"
 dependencies = [
@@ -974,15 +985,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "tb4_planning"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
+name = "tb4_scan"
+version = "0.1.0"
+
+[[package]]
+name = "tb4_slam"
+version = "0.1.0"
+dependencies = [
+ "tb4_core",
+]
+
+[[package]]
 name = "team7_nodes"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
  "futures",
  "r2r",
+ "tb4_aruco",
+ "tb4_control",
  "tb4_core",
  "tb4_explore",
  "tb4_markers",
+ "tb4_planning",
+ "tb4_scan",
+ "tb4_slam",
 ]
 
 [[package]]

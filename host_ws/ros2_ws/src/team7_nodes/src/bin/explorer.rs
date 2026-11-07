@@ -47,6 +47,8 @@ struct Cfg {
     heading_weight: f64,
     explore: ExploreParams,
     coverage: Option<CoverageParams>,
+    /// take a camera view during frontier exploration if it is this close (m), 0 = only after frontiers
+    view_detour: f64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,9 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         coverage: p.bool("camera_coverage", true).then(|| CoverageParams {
             half_fov: p.f64("camera_half_fov", 0.52),
             range: p.f64("camera_range", 2.5),
-            standoff: p.f64("view_standoff", 1.2),
+            standoff: p.f64("view_standoff", 1.6),
+            max_cluster_cells: p.i64("view_max_cells", 32) as usize,
             ..CoverageParams::default()
         }),
+        view_detour: p.f64("view_detour", 0.0),
     });
     let map_topic = p.string("coverage_map_topic", "/map");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
@@ -220,7 +224,8 @@ fn tick(
     };
     let mut frontiers = find_frontiers(grid, (robot.x, robot.y), &cfg.explore);
     tb4_explore::rescore_heading(&mut frontiers, (robot.x, robot.y, robot.yaw), cfg.heading_weight);
-    let need_views = s.active.as_ref().is_some_and(|a| a.view_target.is_some())
+    let need_views = cfg.view_detour > 0.0
+        || s.active.as_ref().is_some_and(|a| a.view_target.is_some())
         || select_goal(&frontiers, &s.blacklist, &cfg.explore).is_none();
     let views: Vec<View> = match (cfg.coverage.as_ref(), s.map.as_ref()) {
         (Some(cp), Some(m)) if need_views => s
@@ -267,7 +272,11 @@ fn tick(
         return;
     }
 
-    let (goal, yaw, view_target) = if let Some(f) = select_goal(&frontiers, &s.blacklist, &cfg.explore) {
+    let detour = views.first().filter(|v| v.distance <= cfg.view_detour);
+    let (goal, yaw, view_target) = if let Some(v) = detour {
+        log_info!(log, "new goal ({:.2}, {:.2}) camera view detour, {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
+        ((v.x, v.y), v.yaw, Some(v.target))
+    } else if let Some(f) = select_goal(&frontiers, &s.blacklist, &cfg.explore) {
         log_info!(log, "new goal ({:.2}, {:.2}) frontier {:.1} m, {:.1} m away", f.goal.0, f.goal.1, f.size_m, f.distance);
         (f.goal, (f.goal.1 - robot.y).atan2(f.goal.0 - robot.x), None)
     } else if let Some(v) = views.first() {

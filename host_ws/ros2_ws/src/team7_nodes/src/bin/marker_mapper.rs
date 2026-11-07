@@ -1,12 +1,14 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::executor::LocalPool;
 use futures::task::LocalSpawnExt;
 use r2r::QosProfile;
 use r2r::aruco_opencv_msgs::msg::ArucoDetection;
+use r2r::nav2_msgs::msg::SpeedLimit;
 use r2r::nav_msgs::msg::OccupancyGrid;
 use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{log_info, log_warn};
@@ -25,6 +27,14 @@ struct State {
     last_csv: String,
     tf_failures: u64,
     stats: [u64; 2],
+    slow_until: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct Slow {
+    enabled: bool,
+    percent: f64,
+    hold: Duration,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node = r2r::Node::create(ctx, "marker_mapper", "")?;
     let log = node.logger().to_owned();
 
-    let (state, detections_topic, map_topic, tf_topic, tf_static_topic) = {
+    let (state, detections_topic, map_topic, tf_topic, tf_static_topic, slow, time_offset) = {
         let p = Params(&node);
         let locate = LocateParams {
             max_range: p.f64("max_range", 4.0),
@@ -57,6 +67,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_csv: String::new(),
             tf_failures: 0,
             stats: [0, 0],
+            slow_until: None,
+        };
+        // slow down while an unconfirmed marker is in view: less motion blur, faster confirm
+        let slow = Slow {
+            enabled: p.bool("slow_on_tentative", true),
+            percent: p.f64("slow_percent", 40.0),
+            hold: Duration::from_secs_f64(p.f64("slow_hold", 2.5)),
         };
         (
             Rc::new(RefCell::new(state)),
@@ -64,12 +81,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p.string("map_topic", "/map"),
             p.string("tf_topic", "/tf"),
             p.string("tf_static_topic", "/tf_static"),
+            slow,
+            (p.f64("image_time_offset", 0.0) * 1e9) as i64,
         )
     };
     log_info!(&log, "writing confirmed targets to {}", state.borrow().csv_path.display());
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let tf: SharedTf = Rc::new(RefCell::new(TfBuffer::new(10.0, 0.1)));
     spawn_tf_listener(&mut node, &spawner, tf.clone(), &tf_topic, &tf_static_topic)?;
 
@@ -89,7 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if det.markers.is_empty() {
             return futures::future::ready(());
         }
-        let cam = match tf.borrow().lookup(&s.map_frame, &det.header.frame_id, stamp(&det.header.stamp)) {
+        let t_img = tb4_core::Stamp(stamp(&det.header.stamp).0 + time_offset);
+        let cam = match tf.borrow().lookup(&s.map_frame, &det.header.frame_id, t_img) {
             Ok(t) => t,
             Err(e) => {
                 s.tf_failures += 1;
@@ -121,6 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let targets = s.tracker.targets();
+        let seen_unconfirmed = det.markers.iter().any(|m| {
+            targets.iter().any(|t| t.id == m.marker_id as i64 && !t.confirmed)
+        });
+        if slow.enabled && seen_unconfirmed {
+            s.slow_until = Some(Instant::now() + slow.hold);
+        }
         for t in targets.iter().filter(|t| t.confirmed && !before.contains(&t.id)) {
             log_info!(&log2, "CONFIRMED target id={} at ({:.2}, {:.2}) from {} views", t.id, t.x, t.y, t.views);
         }
@@ -135,6 +162,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
         futures::future::ready(())
     }))?;
+
+    // nav2_msgs/SpeedLimit on /speed_limit: Nav2 controller and our navigator both follow it, 0 = no limit
+    let pub_limit = node.create_publisher::<SpeedLimit>("/speed_limit", QosProfile::default())?;
+    let mut timer = node.create_wall_timer(Duration::from_millis(200))?;
+    let st = state.clone();
+    let log3 = log.clone();
+    spawner.spawn_local(async move {
+        let mut active = false;
+        let mut last_pub = Instant::now();
+        while timer.tick().await.is_ok() {
+            let want = st.borrow().slow_until.is_some_and(|t| Instant::now() < t);
+            if want != active || (want && last_pub.elapsed() >= Duration::from_secs(1)) {
+                if want != active {
+                    log_info!(&log3, "speed limit {}", if want { format!("{:.0}%", slow.percent) } else { "off".into() });
+                }
+                let msg = SpeedLimit { percentage: true, speed_limit: if want { slow.percent } else { 0.0 }, ..Default::default() };
+                let _ = pub_limit.publish(&msg);
+                active = want;
+                last_pub = Instant::now();
+            }
+        }
+    })?;
 
     team7_nodes::run(node, pool, || false);
     Ok(())

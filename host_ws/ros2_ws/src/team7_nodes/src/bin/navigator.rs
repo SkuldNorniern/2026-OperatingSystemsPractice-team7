@@ -67,6 +67,8 @@ struct State {
     follow_result: Option<(u64, GoalStatus)>,
     done: bool,
     stopped: bool,
+    /// from /speed_limit: (percentage?, value), value 0 = no limit
+    speed_limit: (bool, f64),
 }
 
 struct Io {
@@ -133,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
+    team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let tf = Rc::new(RefCell::new(TfBuffer::new(10.0, 0.2)));
     spawn_tf_listener(&mut node, &spawner, tf.clone(), "/tf", "/tf_static")?;
 
@@ -155,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         follow_result: None,
         done: false,
         stopped: true,
+        speed_limit: (true, 0.0),
     }));
 
     let st = state.clone();
@@ -213,6 +217,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         futures::future::ready(())
     }))?;
 
+    let st = state.clone();
+    let limits = node.subscribe::<r2r::nav2_msgs::msg::SpeedLimit>("/speed_limit", QosProfile::default())?;
+    spawner.spawn_local(limits.for_each(move |m| {
+        st.borrow_mut().speed_limit = (m.percentage, m.speed_limit);
+        futures::future::ready(())
+    }))?;
+
     let requests = node.create_action_server::<Nav>(&action_name)?;
     let st = state.clone();
     let log2 = log.clone();
@@ -242,8 +253,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = old.handle.abort(NavigateToPose::Result::default());
                 }
                 s.goal = Some(g);
+                // keep MPPI warm start across goal switches, reset only from standstill (stop())
                 s.path.clear();
-                s.mppi.reset();
             }
             let st2 = st.clone();
             let uuid = handle.uuid;
@@ -420,7 +431,8 @@ fn tick(
             if !cmd.collision_free {
                 s.path.clear(); // force replan next tick
             }
-            publish_cmd(io, cfg, &now, cmd.v, cmd.w);
+            let (v, w) = apply_speed_limit(s.speed_limit, s.mppi.params().vx_max, cmd.v, cmd.w);
+            publish_cmd(io, cfg, &now, v, w);
             s.stopped = false;
         }
         Mode::Nav2Controller => {
@@ -460,6 +472,15 @@ fn send_follow(s: &mut State, state: &Rc<RefCell<State>>, io: &Rc<Io>, cfg: &Cfg
         };
         st.borrow_mut().follow_result = Some((gen_, status));
     });
+}
+
+// same meaning as nav2 controller: percentage of max speed, or absolute m/s; angular scaled alike
+fn apply_speed_limit((pct, lim): (bool, f64), vx_max: f64, v: f64, w: f64) -> (f64, f64) {
+    if lim <= 0.0 || vx_max <= 0.0 {
+        return (v, w);
+    }
+    let k = if pct { (lim / 100.0).min(1.0) } else { (lim / vx_max).min(1.0) };
+    (v.clamp(-vx_max * k, vx_max * k), w * k)
 }
 
 fn stop(s: &mut State, io: &Rc<Io>, cfg: &Cfg, now: &r2r::builtin_interfaces::msg::Time) {

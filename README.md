@@ -17,7 +17,7 @@ crates/
   tb4_explore/             frontier detection, goal scoring
   tb4_markers/             target position from bearing + map, multi view fusion
   tb4_scan/                scan range/median/outlier filter, motion deskew
-  tb4_slam/                own 2D SLAM: correlative matching, keyframes, loop closure, pose graph
+  tb4_slam/                own 2D SLAM: correlative matching + point-to-line ICP, keyframes, loop closure, pose graph
   tb4_planning/            C-space inflation, Lazy Theta*, A*
   tb4_control/             own MPPI, multithreaded rollouts, create3 limits
   tb4_aruco/               own ArUco detector (ARUCO_ORIGINAL), camera model

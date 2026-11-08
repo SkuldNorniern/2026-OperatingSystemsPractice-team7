@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_match_score: p.f64("min_match_score", d.min_match_score),
         loop_search_radius: p.f64("loop_search_radius", d.loop_search_radius),
         loop_prefer_oldest: p.bool("loop_prefer_oldest", d.loop_prefer_oldest),
+        icp: p.bool("icp", d.icp),
         loop_min_score: p.f64("loop_min_score", d.loop_min_score),
         ..d
     };
@@ -104,8 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_info!(&log2, "loop closure #{} ({} keyframes)", stats.loop_closures, stats.keyframes);
             }
             if stats.scans_processed % 200 == 0 {
-                log_info!(&log2, "{} scans, mean {:.1} ms, max {:.1} ms, {} fallbacks",
-                    stats.scans_processed, stats.mean_update_ms, stats.max_update_ms, stats.match_fallbacks);
+                log_info!(&log2, "{} scans, mean {:.1} ms, max {:.1} ms, {} fallbacks, icp {}/{}",
+                    stats.scans_processed, stats.mean_update_ms, stats.max_update_ms, stats.match_fallbacks,
+                    stats.icp_used, stats.icp_used + stats.icp_rejected);
             }
         }
         futures::future::ready(())

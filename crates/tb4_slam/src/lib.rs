@@ -1,4 +1,5 @@
 mod graph;
+pub mod icp;
 mod map;
 mod matcher;
 pub mod se2;
@@ -10,6 +11,7 @@ use std::time::Instant;
 use tb4_core::{Grid, GridMeta, Pose2};
 
 use crate::graph::Edge;
+use crate::icp::{IcpParams, PointMap, icp};
 use crate::map::LogOddsMap;
 use crate::matcher::{MatchField, SearchWindow, match_scan};
 use crate::se2::{apply, between, compose, inverse, wrap};
@@ -57,6 +59,10 @@ pub struct SlamParams {
     pub loop_sigma_ang: f64,
     pub loop_max_chi2: f64,
     pub opt_iterations: usize,
+    /// point-to-line icp after grid match, against raw keyframe points
+    pub icp: bool,
+    pub icp_voxel: f64,
+    pub icp_normal_radius: f64,
 }
 
 impl Default for SlamParams {
@@ -97,6 +103,9 @@ impl Default for SlamParams {
             loop_sigma_ang: 0.02,
             loop_max_chi2: 30.0,
             opt_iterations: 15,
+            icp: true,
+            icp_voxel: 0.025,
+            icp_normal_radius: 0.12,
         }
     }
 }
@@ -116,6 +125,8 @@ pub struct SlamStats {
     pub max_update_ms: f64,
     pub last_optimisation_ms: f64,
     pub last_rebuild_ms: f64,
+    pub icp_used: u64,
+    pub icp_rejected: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +162,8 @@ pub struct Slam {
     last_loop_kf: Option<usize>,
     stats: SlamStats,
     update_ms_sum: f64,
+    /// point map for icp, tagged with (keyframe count, loop count) it was built at
+    points: Option<((usize, u64), PointMap)>,
 }
 
 fn ms(t: Instant) -> f64 {
@@ -184,6 +197,7 @@ impl Slam {
             last_loop_kf: None,
             stats: SlamStats::default(),
             update_ms_sum: 0.0,
+            points: None,
         }
     }
 
@@ -293,12 +307,45 @@ impl Slam {
         match result {
             Some(m) => {
                 self.stats.last_score = m.score;
-                m.pose
+                self.refine_icp(m.pose, &q)
             }
             None => {
                 self.stats.last_score = 0.0;
                 self.stats.match_fallbacks += 1;
                 pred
+            }
+        }
+    }
+
+    /// grid match is limited by cell size and lets yaw random walk, icp on raw points is sub-cell
+    fn refine_icp(&mut self, pose: Pose2, q: &[(f64, f64)]) -> Pose2 {
+        if !self.p.icp || self.kfs.is_empty() {
+            return pose;
+        }
+        let tag = (self.kfs.len(), self.stats.loop_closures);
+        if self.points.as_ref().is_none_or(|(t, _)| *t != tag) {
+            let r = self.p.max_range;
+            let pts = self
+                .kfs
+                .iter()
+                .filter(|k| k.pose.distance_to(pose.x, pose.y) <= r)
+                .flat_map(|k| {
+                    k.scans.iter().flat_map(move |s| {
+                        let t = compose(k.pose, s.rel);
+                        s.points.iter().map(move |&(x, y)| apply(t, (x as f64, y as f64)))
+                    })
+                });
+            self.points = Some((tag, PointMap::new(pts, self.p.icp_voxel, self.p.icp_normal_radius)));
+        }
+        let map = &self.points.as_ref().unwrap().1;
+        match icp(map, q, pose, &IcpParams::default()) {
+            Some(r) if r.distance_to(pose.x, pose.y) < 2.0 * self.p.resolution && wrap(r.yaw - pose.yaw).abs() < 0.05 => {
+                self.stats.icp_used += 1;
+                r
+            }
+            _ => {
+                self.stats.icp_rejected += 1;
+                pose
             }
         }
     }

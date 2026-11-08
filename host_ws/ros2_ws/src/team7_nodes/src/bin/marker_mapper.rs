@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             range_ratio_gate: p.f64("range_ratio_gate", 3.0),
             allow_pnp_fallback: p.bool("allow_pnp_fallback", true),
             max_abs_bearing_z: p.f64("max_abs_bearing_z", 0.8),
+            wall_fit_radius: p.f64("wall_fit_radius", 0.2),
         };
         let track = TrackParams {
             min_views: p.i64("min_views", 5) as usize,
@@ -59,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale_min_samples: p.i64("scale_min_samples", 3) as usize,
             min_view_move: p.f64("min_view_move", 0.05),
             min_view_turn: p.f64("min_view_turn", 0.05),
+            bearing_sigma: p.f64("bearing_sigma", 0.012),
+            wall_sigma: p.f64("wall_sigma", 0.03),
+            pnp_sigma: p.f64("pnp_sigma", 0.08),
         };
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {

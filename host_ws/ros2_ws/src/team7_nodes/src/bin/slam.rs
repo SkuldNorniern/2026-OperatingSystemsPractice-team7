@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_range: p.f64("max_range", d.max_range),
         min_match_score: p.f64("min_match_score", d.min_match_score),
         loop_search_radius: p.f64("loop_search_radius", d.loop_search_radius),
+        loop_prefer_oldest: p.bool("loop_prefer_oldest", d.loop_prefer_oldest),
         loop_min_score: p.f64("loop_min_score", d.loop_min_score),
         ..d
     };

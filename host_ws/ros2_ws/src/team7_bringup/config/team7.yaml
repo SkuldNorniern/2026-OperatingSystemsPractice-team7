@@ -78,6 +78,7 @@ slam:
     base_frame: base_link
     resolution: 0.05
     min_travel_dist: 0.1
+    loop_prefer_oldest: false  # loop edge to oldest keyframe in radius, matched on its own scans
     min_travel_yaw: 0.1
     max_range: 8.0
     map_publish_period: 1.0

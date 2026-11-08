@@ -42,6 +42,8 @@ pub struct SlamParams {
     pub seq_sigma_lin: f64,
     pub seq_sigma_ang: f64,
     pub loop_search_radius: f64,
+    /// link loops to oldest keyframe in radius, not nearest: ties global yaw back to start
+    pub loop_prefer_oldest: bool,
     /// keyframes between the current one and any loop candidate
     pub loop_min_gap: usize,
     pub loop_search_lin: f64,
@@ -83,6 +85,7 @@ impl Default for SlamParams {
             seq_sigma_lin: 0.02,
             seq_sigma_ang: 0.01,
             loop_search_radius: 2.5,
+            loop_prefer_oldest: false,
             loop_min_gap: 20,
             loop_search_lin: 0.8,
             loop_search_ang: 0.4,
@@ -336,10 +339,13 @@ impl Slam {
         let cur = self.kfs[c].pose;
         let old = &self.kfs[..=c - p.loop_min_gap];
         let dist = |k: &Keyframe| k.pose.distance_to(cur.x, cur.y);
-        let Some(anchor) = (0..old.len())
-            .filter(|&j| dist(&old[j]) <= p.loop_search_radius)
-            .min_by(|&a, &b| dist(&old[a]).total_cmp(&dist(&old[b])))
-        else {
+        let mut near = (0..old.len()).filter(|&j| dist(&old[j]) <= p.loop_search_radius);
+        let found = if p.loop_prefer_oldest {
+            near.next()
+        } else {
+            near.min_by(|&a, &b| dist(&old[a]).total_cmp(&dist(&old[b])))
+        };
+        let Some(anchor) = found else {
             self.pending = None;
             return;
         };
@@ -356,7 +362,9 @@ impl Slam {
         ];
         let mut hits = Vec::new();
         let mut bb = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
-        for k in old.iter().filter(|k| dist(k) <= 1.5 * p.loop_search_radius) {
+        // oldest anchor: match only its own scans so the edge really ties to it, not to drifted neighbours
+        let local = |j: usize| !p.loop_prefer_oldest || (anchor..anchor + 4).contains(&j);
+        for (_, k) in old.iter().enumerate().filter(|&(j, k)| local(j) && dist(k) <= 1.5 * p.loop_search_radius) {
             for s in &k.scans {
                 let t = compose(k.pose, s.rel);
                 for &(x, y) in &s.points {

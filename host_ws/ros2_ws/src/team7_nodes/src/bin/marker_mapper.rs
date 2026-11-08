@@ -54,7 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let track = TrackParams {
             min_views: p.i64("min_views", 5) as usize,
-            max_spread: p.f64("max_spread", 0.25),
+            max_spread: p.f64("max_spread", 0.08),
+            max_consistency: p.f64("max_consistency", 3.0),
             max_history: p.i64("max_history", 200) as usize,
             scale_tolerance: p.f64("scale_tolerance", 0.25),
             scale_min_samples: p.i64("scale_min_samples", 3) as usize,
@@ -156,7 +157,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.slow_until = Some(Instant::now() + slow.hold);
         }
         for t in targets.iter().filter(|t| t.confirmed && !before.contains(&t.id)) {
-            log_info!(&log2, "CONFIRMED target id={} at ({:.2}, {:.2}) from {} views", t.id, t.x, t.y, t.views);
+            let [r, n, k] = s.tracker.sources(t.id);
+            log_info!(&log2, "CONFIRMED target id={} at ({:.2}, {:.2}) from {} views (ray {r} scaled {k} pnp {n}, scale {:.2})",
+                t.id, t.x, t.y, t.views, s.tracker.scale(t.id).unwrap_or(f64::NAN));
+        }
+        for t in targets.iter().filter(|t| !t.confirmed && before.contains(&t.id)) {
+            log_warn!(&log2, "LOST target id={} at ({:.2}, {:.2}), {} views, sigma {:.3}", t.id, t.x, t.y, t.views, t.spread);
         }
         let confirmed: Vec<Target> = targets.iter().filter(|t| t.confirmed).cloned().collect();
         let csv = tb4_markers::to_csv(&confirmed);

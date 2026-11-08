@@ -102,8 +102,6 @@ pub fn wall_hit(g: &Grid, origin: (f64, f64), dir: (f64, f64), hit_range: f64, p
     let (cx, cy) = g.world_to_cell_signed(hx, hy);
     let n = (r / res).ceil() as i64;
     let occ = |x: i64, y: i64| g.cell_checked(x, y).is_some_and(|c| g.get(c) >= p.occupied_threshold);
-    let free = |x: i64, y: i64| g.cell_checked(x, y).is_some_and(|c| (0..p.occupied_threshold).contains(&g.get(c)));
-    // (x, y, has free 4-neighbour on camera side)
     let mut cells = Vec::new();
     for y in cy - n..=cy + n {
         for x in cx - n..=cx + n {
@@ -112,15 +110,30 @@ pub fn wall_hit(g: &Grid, origin: (f64, f64), dir: (f64, f64), hit_range: f64, p
             }
             let (wx, wy) = g.cell_to_world(g.cell_checked(x, y).unwrap());
             if (wx - hx).hypot(wy - hy) <= r {
-                let surface = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
-                    .iter()
-                    .any(|&(ex, ey)| (ex as f64 * dir.0 + ey as f64 * dir.1) < 0.0 && free(x + ex, y + ey));
-                cells.push((wx, wy, surface));
+                cells.push((wx, wy));
             }
         }
     }
-    // orientation from surface cells only, so far face of a thick wall cant tilt it
-    let front: Vec<(f64, f64)> = cells.iter().filter(|c| c.2).map(|c| (c.0, c.1)).collect();
+    // visible face: first occupied cell of a fan of rays from camera. works whether space in
+    // front of wall is mapped free or still unknown, and never picks far face of thick wall
+    let range = hit_range.max(0.3);
+    let half = (r / range).atan();
+    let step = 0.5 * res / range;
+    let base = dir.1.atan2(dir.0);
+    let mut front: Vec<(f64, f64)> = Vec::new();
+    let mut a = -half;
+    while a <= half {
+        let (s, c) = (base + a).sin_cos();
+        if let Some(h) = g.raycast(origin.0, origin.1, c, s, range + r, p.occupied_threshold) {
+            if let Some(cell) = g.world_to_cell(h.x + c * 0.5 * res, h.y + s * 0.5 * res) {
+                let w = g.cell_to_world(cell);
+                if (w.0 - hx).hypot(w.1 - hy) <= r && !front.contains(&w) {
+                    front.push(w);
+                }
+            }
+        }
+        a += step;
+    }
     if front.len() < 4 {
         return None;
     }
@@ -155,13 +168,38 @@ pub fn wall_hit(g: &Grid, origin: (f64, f64), dir: (f64, f64), hit_range: f64, p
     let band: Vec<f64> = cells.iter().map(|c| c.0 * nx + c.1 * ny).filter(|d| (-1.5 * res..=0.5 * res).contains(&(d - d0))).collect();
     let d = band.iter().sum::<f64>() / band.len() as f64;
     let t = (d - (origin.0 * nx + origin.1 * ny)) / (dir.0 * nx + dir.1 * ny);
-    ((t - hit_range).abs() <= 1.5 * res).then_some((t, cos_inc))
+    // raw hit can be a stray speck a cell or two in front of the wall line
+    ((t - hit_range).abs() <= 2.5 * res).then_some((t, cos_inc))
+}
+
+/// rays a little left and right of bearing must land on same surface. a jump means the ray clips
+/// an edge in front of the marker (or misses past it), so the hit says nothing about the marker
+pub fn flat_around(g: &Grid, origin: (f64, f64), ang: f64, range: f64, p: &LocateParams) -> bool {
+    let res = g.meta.resolution;
+    // about one marker half width at this range, at least a couple of cells
+    let half = (0.06f64).max(2.0 * res);
+    let da = (half / range.max(0.3)).atan();
+    let mut rs = [range; 2];
+    for (i, side) in [-1.0, 1.0].iter().enumerate() {
+        let a = ang + side * da;
+        match g.raycast(origin.0, origin.1, a.cos(), a.sin(), p.max_range, p.occupied_threshold) {
+            Some(h) => rs[i] = h.range,
+            None => return false,
+        }
+    }
+    // on a plane the two side ranges straddle the centre one, steeper incidence = bigger spread
+    let mid = 0.5 * (rs[0] + rs[1]);
+    let spread = (rs[0] - rs[1]).abs();
+    (mid - range).abs() <= 2.0 * res + 0.1 * spread && spread <= 4.0 * half + 2.0 * res
 }
 
 #[derive(Debug, Clone)]
 pub struct TrackParams {
     pub min_views: usize,
+    /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
+    /// median mahalanobis distance of views must be below this, else views disagree
+    pub max_consistency: f64,
     pub max_history: usize,
     /// raycast is trusted only if its ray/pnp ratio is within this fraction of the marker's median ratio
     pub scale_tolerance: f64,
@@ -181,7 +219,8 @@ impl Default for TrackParams {
     fn default() -> Self {
         Self {
             min_views: 5,
-            max_spread: 0.25,
+            max_spread: 0.08,
+            max_consistency: 3.0,
             max_history: 200,
             scale_tolerance: 0.25,
             scale_min_samples: 3,
@@ -212,11 +251,12 @@ pub struct Tracker {
     scales: BTreeMap<i64, Vec<f64>>,
     /// per id: camera xy and bearing angle of the last view used
     last_view: BTreeMap<i64, (f64, f64, f64)>,
+    sticky: std::collections::BTreeSet<i64>,
 }
 
 impl Tracker {
     pub fn new(params: TrackParams) -> Self {
-        Self { params, estimates: BTreeMap::new(), scales: BTreeMap::new(), last_view: BTreeMap::new() }
+        Self { params, ..Default::default() }
     }
 
     /// marker size is unknown but fixed, so ray/pnp ratio is constant per id. learn it, then reject
@@ -248,17 +288,22 @@ impl Tracker {
             sigma_along: along,
             sigma_across: across(r),
         };
+        // (range, sigma along, clean)
         let hit = grid.and_then(|g| {
             let h = g.raycast(o.camera.0, o.camera.1, dx, dy, p.max_range, p.occupied_threshold)?;
+            if !flat_around(g, (o.camera.0, o.camera.1), ang, h.range, p) {
+                return None;
+            }
             Some(match wall_hit(g, (o.camera.0, o.camera.1), (dx, dy), h.range, p) {
                 // bearing error slides the hit along a slanted wall by tan(incidence)
-                Some((range, c)) => (range, tp.wall_sigma / c + across(range) * (1.0 - c * c).sqrt() / c),
+                Some((range, c)) => (range, tp.wall_sigma / c + across(range) * (1.0 - c * c).sqrt() / c, true),
                 // no clean wall line: cell face, unknown incidence
-                None => (h.range, 2.0 * (tp.wall_sigma + g.meta.resolution)),
+                None => (h.range, 2.0 * (tp.wall_sigma + g.meta.resolution), false),
             })
         });
         let ratio = hit.map(|h| h.0 / pnp).filter(|r| *r <= p.range_ratio_gate && *r >= 1.0 / p.range_ratio_gate);
-        if let Some(r) = ratio {
+        // only clean wall hits teach the scale
+        if let Some(r) = ratio.filter(|_| hit.is_some_and(|h| h.2)) {
             let v = self.scales.entry(o.id).or_default();
             v.push(r);
             if v.len() > self.params.max_history {
@@ -272,9 +317,9 @@ impl Tracker {
             .map(|v| median(v.clone()));
         let tp = &self.params;
         let est = match (hit, ratio, learned) {
-            (Some((r, along)), Some(q), Some(k)) if (q / k - 1.0).abs() <= tp.scale_tolerance => Some(at(r, Source::Raycast, along)),
+            (Some((r, along, _)), Some(q), Some(k)) if (q / k - 1.0).abs() <= tp.scale_tolerance => Some(at(r, Source::Raycast, along)),
             (_, _, Some(k)) => (pnp * k <= p.max_range).then(|| at(pnp * k, Source::ScaledPnp, pnp * k * tp.pnp_sigma)),
-            (Some((r, along)), Some(_), None) => Some(at(r, Source::Raycast, along)),
+            (Some((r, along, _)), Some(_), None) => Some(at(r, Source::Raycast, along)),
             // unknown marker size: range barely constrained, bearing still counts
             _ => (p.allow_pnp_fallback && pnp <= p.max_range).then(|| at(pnp, Source::PnpRange, pnp * 0.5)),
         };
@@ -282,6 +327,15 @@ impl Tracker {
             self.add(o.id, e);
         }
         est
+    }
+
+    /// views per source, in Source order: raycast, pnp, scaled pnp
+    pub fn sources(&self, id: i64) -> [usize; 3] {
+        let mut n = [0; 3];
+        for e in self.estimates.get(&id).into_iter().flatten() {
+            n[e.source as usize] += 1;
+        }
+        n
     }
 
     /// learned ray/pnp scale of a marker, if enough samples
@@ -296,19 +350,27 @@ impl Tracker {
             let excess = v.len() - self.params.max_history;
             v.drain(..excess);
         }
+        let ok = self.target(id).is_some_and(|t| t.confirmed);
+        if ok {
+            self.sticky.insert(id);
+        } else {
+            self.sticky.remove(&id);
+        }
     }
 
     pub fn target(&self, id: i64) -> Option<Target> {
         let v = self.estimates.get(&id)?;
-        let (mx, my) = fuse(v);
-        let spread = median(v.iter().map(|p| (p.x - mx).hypot(p.y - my)).collect());
+        let f = fuse(v);
+        // once confirmed, keep it unless views clearly fall apart (mission already counted it)
+        let loose = if self.sticky.contains(&id) { 2.0 } else { 1.0 };
+        let p = &self.params;
         Some(Target {
             id,
-            x: mx,
-            y: my,
+            x: f.x,
+            y: f.y,
             views: v.len(),
-            spread,
-            confirmed: v.len() >= self.params.min_views && spread <= self.params.max_spread,
+            spread: f.sigma,
+            confirmed: v.len() >= p.min_views && f.sigma <= loose * p.max_spread && f.consistency <= loose * p.max_consistency,
         })
     }
 
@@ -323,10 +385,21 @@ impl Tracker {
 
 /// robust weighted least squares over views, each a point with its own along/across ray sigma.
 /// starts from coordinate median, huber reweighting drops bad views
-pub fn fuse(v: &[Estimate]) -> (f64, f64) {
+#[derive(Debug, Clone, Copy)]
+pub struct Fused {
+    pub x: f64,
+    pub y: f64,
+    /// 1 sigma of fused position along its worst axis (m)
+    pub sigma: f64,
+    /// median mahalanobis distance of views to fused position, ~1 when views agree
+    pub consistency: f64,
+}
+
+pub fn fuse(v: &[Estimate]) -> Fused {
     let mut x = (median(v.iter().map(|p| p.x).collect()), median(v.iter().map(|p| p.y).collect()));
     if v.len() < 2 {
-        return x;
+        let s = v.first().map_or(f64::INFINITY, |e| e.sigma_along.max(e.sigma_across));
+        return Fused { x: x.0, y: x.1, sigma: s, consistency: 0.0 };
     }
     let info = |e: &Estimate| {
         let (ux, uy) = e.dir;
@@ -335,14 +408,18 @@ pub fn fuse(v: &[Estimate]) -> (f64, f64) {
         (a * ux * ux + c * uy * uy, (a - c) * ux * uy, a * uy * uy + c * ux * ux)
     };
     const K: f64 = 2.0;
+    let mut cov = (f64::INFINITY, 0.0, f64::INFINITY);
+    let mut ds = Vec::with_capacity(v.len());
     // huber first, then drop views past 3K so far outliers stop pulling at all
     for it in 0..25 {
+        ds.clear();
         let hard = it >= 15;
         let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for e in v {
             let (j11, j12, j22) = info(e);
             let (ex, ey) = (x.0 - e.x, x.1 - e.y);
             let d = (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt();
+            ds.push(d);
             let w = if d <= K { 1.0 } else if hard && d > 3.0 * K { 0.0 } else { K / d };
             a11 += w * j11;
             a12 += w * j12;
@@ -354,6 +431,7 @@ pub fn fuse(v: &[Estimate]) -> (f64, f64) {
         if det.abs() < 1e-12 {
             break;
         }
+        cov = (a22 / det, -a12 / det, a11 / det);
         let nx = ((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det);
         let step = (nx.0 - x.0).hypot(nx.1 - x.1);
         x = nx;
@@ -361,7 +439,9 @@ pub fn fuse(v: &[Estimate]) -> (f64, f64) {
             break;
         }
     }
-    x
+    let tr = cov.0 + cov.2;
+    let l = tr / 2.0 + ((cov.0 - cov.2).powi(2) / 4.0 + cov.1 * cov.1).sqrt();
+    Fused { x: x.0, y: x.1, sigma: l.max(0.0).sqrt(), consistency: median(ds) }
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -524,6 +604,22 @@ mod tests {
     }
 
     #[test]
+    fn wall_fit_works_with_unknown_in_front() {
+        // live slam map: cell right in front of a wall hit is never cleared
+        let mut g = wall_map();
+        for cy in 0..140 {
+            g.set(g.world_to_cell(2.96, -3.0 + cy as f64 * 0.05 + 0.01).unwrap(), -1);
+        }
+        let p = LocateParams::default();
+        let (dx, dy) = (3.0f64, 0.7f64);
+        let n = dx.hypot(dy);
+        let u = (dx / n, dy / n);
+        let h = g.raycast(0.0, 0.0, u.0, u.1, 5.0, 65).unwrap();
+        let (t, _) = wall_hit(&g, (0.0, 0.0), u, h.range, &p).expect("fit with unknown in front");
+        assert!((t * u.0 - 3.025).abs() < 0.01, "{}", t * u.0);
+    }
+
+    #[test]
     fn wall_fit_uses_near_face_of_thick_wall() {
         // both faces of a 15 cm partition mapped, x = 3.0 and x = 3.15, inside never seen
         let mut g = wall_map();
@@ -541,6 +637,24 @@ mod tests {
         let (t, _) = wall_hit(&g, (0.0, 0.0), u, h.range, &p).unwrap();
         // cell holding x = 3.01 spans 3.00..3.05, its center is the surface estimate
         assert!((t * u.0 - 3.025).abs() < 0.01, "{}", t * u.0);
+    }
+
+    #[test]
+    fn ray_clipping_obstacle_end_is_not_trusted() {
+        // wall at x = 3, short obstacle at x = 1.5 for y in [0.3, 0.6)
+        let mut g = wall_map();
+        for cy in 0..6 {
+            g.set(g.world_to_cell(1.51, 0.31 + cy as f64 * 0.05).unwrap(), 100);
+        }
+        let p = LocateParams::default();
+        let at = |y: f64| {
+            let a = y.atan2(1.5);
+            let h = g.raycast(0.0, 0.0, a.cos(), a.sin(), 5.0, 65).unwrap();
+            flat_around(&g, (0.0, 0.0), a, h.range, &p)
+        };
+        assert!(at(-0.5), "open wall");
+        assert!(!at(0.58), "end of obstacle");
+        assert!(!at(0.62), "just past obstacle end");
     }
 
     #[test]
@@ -562,8 +676,33 @@ mod tests {
         // truth (2, 0). view A looks along x: range poor, across fine. view B looks along y: same
         let a = Estimate { x: 2.3, y: 0.01, source: Source::PnpRange, dir: (1.0, 0.0), sigma_along: 0.3, sigma_across: 0.02 };
         let b = Estimate { x: 2.01, y: -0.3, source: Source::PnpRange, dir: (0.0, 1.0), sigma_along: 0.3, sigma_across: 0.02 };
-        let (x, y) = fuse(&[a, b, a, b]);
+        let Fused { x, y, sigma, .. } = fuse(&[a, b, a, b]);
+        assert!(sigma < 0.03, "{sigma}");
         assert!((x - 2.0).abs() < 0.03 && y.abs() < 0.03, "{x} {y}");
+    }
+
+    #[test]
+    fn weak_views_do_not_block_confirmation() {
+        let mut t = Tracker::new(TrackParams::default());
+        let good = |y: f64| {
+            let r: f64 = 3.0f64.hypot(y);
+            Estimate { x: 3.0, y: 0.0, source: Source::Raycast, dir: (3.0 / r, -y / r), sigma_along: 0.03, sigma_across: 0.03 }
+        };
+        // pnp with wrong marker size: 25% short, but straight along the ray
+        let weak = |y: f64| {
+            let r: f64 = 3.0f64.hypot(y);
+            let u = (3.0 / r, -y / r);
+            Estimate { x: 0.0 + u.0 * 0.75 * r, y: y + u.1 * 0.75 * r, source: Source::PnpRange, dir: u, sigma_along: 0.5 * r, sigma_across: 0.03 }
+        };
+        for y in [-0.6, -0.3, 0.0, 0.3, 0.6, 0.9] {
+            t.add(1, &weak(y));
+        }
+        for y in [-0.5, 0.2, 0.7] {
+            t.add(1, &good(y));
+        }
+        let tg = t.target(1).unwrap();
+        assert!(tg.confirmed, "{tg:?}");
+        assert!((tg.x - 3.0).abs() < 0.03 && tg.y.abs() < 0.03, "{tg:?}");
     }
 
     #[test]

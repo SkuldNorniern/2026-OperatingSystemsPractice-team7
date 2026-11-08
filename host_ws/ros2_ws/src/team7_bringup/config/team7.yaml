@@ -13,7 +13,8 @@ marker_mapper:
     allow_pnp_fallback: true
     max_abs_bearing_z: 0.8
     min_views: 5
-    max_spread: 0.25
+    max_spread: 0.08          # m, fused position 1 sigma
+    max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
     max_history: 200
     scale_tolerance: 0.25     # learned per marker: ray/pnp range ratio, rejects rays that hit something in front
     scale_min_samples: 3

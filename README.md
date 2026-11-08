@@ -46,7 +46,9 @@ Laptop  slam_toolbox  -> /map, map->odom
 marker size can change on demo day so PnP range from one marker is not reliable. direction from camera is still right.
 so marker_mapper casts that direction through the SLAM map and takes first occupied cell. PnP range is only fallback.
 first occupied cell is up to one cell short, so it fits a line to wall cells around the hit and uses where ray meets that line.
+if rays a bit left and right of the marker land at different depth, ray is clipping an edge in front of it and is not used.
 each id needs a few views that agree before it counts. views are fused by weighted least squares, each view trusted along ray by how good its range is (head on wall hit good, grazing or PnP bad) and across ray by bearing error.
+confirmed when fused position is tight and views agree, and stays confirmed unless views clearly fall apart.
 
 every part has stock ROS version and ours, switch with launch args (host_ws/README.md):
 aruco_opencv or our detector, slam_toolbox or our SLAM, Nav2 NavFn+MPPI or our Lazy Theta* with Nav2 MPPI or with our MPPI.

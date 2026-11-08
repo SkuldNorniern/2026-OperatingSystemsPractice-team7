@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node = r2r::Node::create(ctx, "marker_mapper", "")?;
     let log = node.logger().to_owned();
 
-    let (state, detections_topic, map_topic, tf_topic, tf_static_topic, slow, time_offset) = {
+    let (state, detections_topic, map_topic, tf_topic, tf_static_topic, slow, time_offset, origin_shift) = {
         let p = Params(&node);
         let locate = LocateParams {
             max_range: p.f64("max_range", 4.0),
@@ -92,6 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p.string("tf_static_topic", "/tf_static"),
             slow,
             (p.f64("image_time_offset", 0.0) * 1e9) as i64,
+            // known grid origin error of the slam backend (m, both axes)
+            p.f64("map_origin_shift", 0.0),
         )
     };
     log_info!(&log, "writing confirmed targets to {}", state.borrow().csv_path.display());
@@ -105,7 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map_sub = node.subscribe::<OccupancyGrid>(&map_topic, QosProfile::default().reliable().transient_local())?;
     let st = state.clone();
     spawner.spawn_local(map_sub.for_each(move |m| {
-        st.borrow_mut().grid = grid_from_msg(&m);
+        st.borrow_mut().grid = grid_from_msg(&m).map(|mut g| {
+            g.meta.origin_x += origin_shift;
+            g.meta.origin_y += origin_shift;
+            g
+        });
         futures::future::ready(())
     }))?;
 

@@ -1,5 +1,6 @@
 # launch sets per mode, dont set here: output_dir, time_limit, expected_targets, nav_action,
-# costmap_topic, scan_topic (slam), mode and cmd_vel_topic (navigator), image_topic, marker_size
+# costmap_topic, scan_topic (slam), mode and cmd_vel_topic (navigator), image_topic, marker_size,
+# map_origin_shift (marker_mapper, mission)
 
 marker_mapper:
   ros__parameters:

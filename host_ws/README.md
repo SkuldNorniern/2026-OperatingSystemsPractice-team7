@@ -86,7 +86,7 @@ run_demo.sh nav:=team7 slam_backend:=team7 aruco:=team7       # all ours, Nav2 n
 | arg | values | |
 |---|---|---|
 | `nav` | `nav2`, `lazy_nav2`, `team7` | team7 publishes /cmd_vel itself, no Nav2 running |
-| `slam_backend` | `toolbox`, `team7` | both publish /map and map->odom |
+| `slam_backend` | `toolbox`, `team7` | both publish /map and map->odom. slam_toolbox grid is half cell off, marker_mapper and saved map.yaml get -0.025 m |
 | `aruco` | `opencv`, `team7` | both publish /aruco_detections |
 | `scan_filter` | `true` | /scan -> /scan_filtered (range, median, outlier, deskew) for SLAM |
 

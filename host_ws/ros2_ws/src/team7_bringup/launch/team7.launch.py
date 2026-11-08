@@ -95,11 +95,13 @@ def setup(context):
                                 'marker_size': ParameterValue(arg('marker_size'), value_type=float)}],
                             output='screen'))
 
+    # slam_toolbox grid sits half a cell (+0.025 m in x and y) off its own map frame, measured in sim
+    shift = {'map_origin_shift': -0.025 if slam_be == 'toolbox' else 0.0}
     actions.append(Node(package='team7_nodes', executable='marker_mapper', name='marker_mapper',
-                        parameters=[team7_yaml, out_dir], output='screen'))
+                        parameters=[team7_yaml, out_dir, shift], output='screen'))
     if on('mission'):
         actions.append(Node(package='team7_nodes', executable='mission', name='mission',
-                            parameters=[team7_yaml, out_dir, {
+                            parameters=[team7_yaml, out_dir, shift, {
                                 'nav_action': nav_action,
                                 'time_limit': ParameterValue(arg('time_limit'), value_type=float),
                                 'expected_targets': ParameterValue(arg('expected_targets'), value_type=int)}],

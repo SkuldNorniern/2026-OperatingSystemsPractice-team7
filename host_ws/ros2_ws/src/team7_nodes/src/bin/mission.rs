@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map_name = p.string("map_name", "map");
     let map_topic = p.string("map_topic", "/map");
     let nav_action = p.string("nav_action", "/navigate_to_pose");
+    let origin_shift = p.f64("map_origin_shift", 0.0);
     std::fs::create_dir_all(&out_dir)?;
 
     let pub_state = node.create_publisher::<r2r::std_msgs::msg::String>("/team7/mission_state", LATCHED)?;
@@ -87,7 +88,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = c.wait();
                 }
                 match save_map(&out_dir, &map_name, &map_topic).and_then(|mut c| c.wait()) {
-                    Ok(s) if s.success() => log_info!(&log, "map saved to {}", out_dir.join(&map_name).display()),
+                    Ok(s) if s.success() => {
+                        shift_origin(&out_dir.join(format!("{map_name}.yaml")), origin_shift, &log);
+                        log_info!(&log, "map saved to {}", out_dir.join(&map_name).display())
+                    }
                     Ok(s) => log_error!(&log, "map_saver_cli exited with {s}"),
                     Err(e) => log_error!(&log, "map_saver_cli failed to start: {e}"),
                 }
@@ -106,6 +110,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     team7_nodes::run(node, pool, || false);
     Ok(())
+}
+
+/// fix slam backend's known grid origin error in saved yaml, same shift marker_mapper uses
+fn shift_origin(yaml: &Path, shift: f64, log: &str) {
+    if shift == 0.0 {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(yaml) else { return };
+    let out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let Some(rest) = l.strip_prefix("origin: [") else { return l.to_string() };
+            let v: Vec<f64> = rest.trim_end_matches(']').split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() < 3 {
+                return l.to_string();
+            }
+            format!("origin: [{:.3}, {:.3}, {}]", v[0] + shift, v[1] + shift, v[2])
+        })
+        .collect();
+    if let Err(e) = team7_nodes::write_atomic(yaml, &(out.join("\n") + "\n")) {
+        log_warn!(log, "cannot shift origin in {}: {e}", yaml.display());
+    }
 }
 
 fn save_map(dir: &Path, name: &str, map_topic: &str) -> std::io::Result<Child> {

@@ -37,16 +37,24 @@ Visualization Manager:
       Color Scheme: costmap
       Alpha: 0.5
       Value: false
+    # base_link axes instead of mesh model: tb4 .dae meshes are ~37 MB, slow rviz start
+    - Class: rviz_default_plugins/Axes
+      Name: Robot axes
+      Enabled: true
+      Reference Frame: base_link
+      Length: 0.3
+      Radius: 0.03
+      Value: true
     - Class: rviz_default_plugins/RobotModel
       Name: Robot
-      Enabled: true
+      Enabled: false
       Description Source: Topic
       Description Topic:
         Value: /robot_description
         Durability Policy: Transient Local
         Reliability Policy: Reliable
         Depth: 1
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/LaserScan
       Name: Scan
       Enabled: true

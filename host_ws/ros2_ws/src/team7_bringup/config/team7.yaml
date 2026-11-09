@@ -23,16 +23,29 @@ explorer:
     map_frame: map
     base_frame: base_link
     period: 1.0
-    goal_timeout: 60.0
-    progress_timeout: 15.0
+    goal_timeout: 120.0
+    progress_timeout: 30.0
     progress_epsilon: 0.1
-    frontier_gone_radius: 0.5
+    retry_delay: 5.0
+    blacklist_duration: 45.0
+    turn_weight: 0.5
+    goal_standoff: 0.3
     free_threshold: 50
+    traversable_threshold: 99
+    frontier_segment_length: 1.2
     min_frontier_cells: 8
     size_weight: 1.0
-    distance_weight: 1.0
-    blacklist_radius: 0.5
-    min_goal_distance: 0.3
+    distance_weight: 1.5
+    blacklist_radius: 0.7
+    min_goal_distance: 0.65
+
+velocity_guard:
+  ros__parameters:
+    input_topic: /cmd_vel_filtered
+    output_topic: /cmd_vel
+    max_forward: 0.18
+    max_turn: 0.5
+    command_timeout: 0.5
 
 mission:
   ros__parameters:

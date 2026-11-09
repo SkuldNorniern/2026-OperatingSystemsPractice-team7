@@ -128,10 +128,45 @@ do_restore() {
   echo "restored stock chrony configuration"
 }
 
+# Measure (RPi clock - /odom header stamp). /odom is stamped by the Create3,
+# so a large value means the Create3 clock is not following the RPi.
+do_check_create3() {
+  if [ -z "${ROS_DISTRO:-}" ]; then
+    set +u; source /opt/ros/jazzy/setup.bash; set -u
+  fi
+  local off
+  off=$(/usr/bin/python3 - <<'PY' 2>/dev/null
+import time, rclpy
+from nav_msgs.msg import Odometry
+rclpy.init(); n = rclpy.create_node('tb4_create3_clock')
+d = []
+def cb(m):
+    s = m.header.stamp
+    d.append(time.time() - (s.sec + s.nanosec * 1e-9))
+n.create_subscription(Odometry, '/odom', cb, 10)
+end = time.time() + 5
+while time.time() < end and len(d) < 10:
+    rclpy.spin_once(n, timeout_sec=0.1)
+print(f"{sorted(d)[len(d)//2]:.3f}" if d else "nan")
+PY
+)
+  if [ -z "$off" ] || [ "$off" = "nan" ]; then
+    echo "Create3 clock: no /odom received (Create3 application may be stopped)"
+    return 1
+  fi
+  if awk -v d="$off" -v m="$MAX_OFFSET" 'BEGIN{exit !(d>=-m && d<=m)}'; then
+    echo "Create3 clock: OK (offset $off s)"
+  else
+    echo "Create3 clock: OFF by $off s. Restart the Create3 application (web UI http://192.168.186.2)."
+    return 1
+  fi
+}
+
 case "${1:-}" in
   setup)   shift; do_setup "$@" ;;
   sync)    do_sync ;;
-  status)  do_status ;;
+  status)  do_status; echo; do_check_create3 || true ;;
+  check)   do_check_create3 ;;
   restore) do_restore ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>team7_wired_udp</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>192.168.185.10</address>
+          <address>127.0.0.1</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+      <transport_descriptor>
+        <transport_id>team7_shared_memory</transport_id>
+        <type>SHM</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="team7_wired" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>team7_wired_udp</transport_id>
+          <transport_id>team7_shared_memory</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

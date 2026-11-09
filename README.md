@@ -51,7 +51,7 @@ each id needs a few views that agree before it counts. views are fused by weight
 confirmed when fused position is tight and views agree, and stays confirmed unless views clearly fall apart.
 
 every part has stock ROS version and ours, switch with launch args (host_ws/README.md):
-aruco_opencv or our detector, slam_toolbox or our SLAM, Nav2 NavFn+MPPI or our Lazy Theta* with Nav2 MPPI or with our MPPI.
+aruco_opencv or our detector, slam_toolbox or our SLAM, Nav2 NavFn+RPP or our Lazy Theta* with Nav2 RPP or with our MPPI.
 
 ## start
 

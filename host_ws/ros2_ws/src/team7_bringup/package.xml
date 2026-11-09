@@ -18,6 +18,9 @@
   <exec_depend>aruco_opencv</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rosbag2_transport</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

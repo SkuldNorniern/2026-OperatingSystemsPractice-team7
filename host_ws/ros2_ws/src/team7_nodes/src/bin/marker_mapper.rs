@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,8 @@ struct State {
     tf_failures: u64,
     stats: [u64; 2],
     slow_until: Option<Instant>,
+    /// every detection in map frame, for replaying tracker offline (tb4_markers example replay)
+    obs_log: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +80,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tf_failures: 0,
             stats: [0, 0],
             slow_until: None,
+            obs_log: p.bool("observation_log", true).then(|| {
+                let path = out_dir.join("observations.csv");
+                std::fs::create_dir_all(&out_dir).ok()?;
+                let mut f = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
+                writeln!(f, "stamp,id,cam_x,cam_y,cam_z,bear_x,bear_y,bear_z,pnp_range").ok()?;
+                Some(f)
+            }).flatten(),
         };
         // slow down while an unconfirmed marker is in view: less motion blur, faster confirm
         let slow = Slow {
@@ -151,6 +161,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let b = cam.rotation * (t_cam / range);
             let obs = Observation { id, camera: (origin.x, origin.y, origin.z), bearing: (b.x, b.y, b.z), pnp_range: range };
             let st = &mut *s;
+            if let Some(f) = st.obs_log.as_mut() {
+                let _ = writeln!(f, "{:.3},{id},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4}", t_img.0 as f64 * 1e-9,
+                    origin.x, origin.y, origin.z, b.x, b.y, b.z, range);
+            }
             if let Some(e) = st.tracker.observe(st.grid.as_ref(), &obs, &st.locate) {
                 st.stats[(e.source != Source::Raycast) as usize] += 1;
             }
@@ -177,6 +191,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => s.last_csv = csv,
                 Err(e) => log_warn!(&log2, "cannot write {}: {e}", s.csv_path.display()),
             }
+        }
+        if let Some(f) = s.obs_log.as_mut() {
+            let _ = f.flush();
         }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
         futures::future::ready(())

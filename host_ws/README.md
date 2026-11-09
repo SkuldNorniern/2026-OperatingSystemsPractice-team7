@@ -108,6 +108,7 @@ run_demo.sh nav:=team7 slam_backend:=team7 aruco:=team7       # all ours, Nav2 n
 
 aruco_opencv needs reliable camera_info, our detector takes both reliable and best effort.
 our detector reads `<camera_topic>/compressed` (jpeg) by default like aruco_opencv, `marker_dict` in team7.yaml must match aruco.yaml (6X6_250 for test markers 10, 11, ARUCO_ORIGINAL in task sheet).
+marker_mapper writes every detection to `observations.csv` in output dir.
 
 in nav:=team7 our MPPI still goes through nav2 velocity_smoother, collision_monitor and velocity_guard (cmd_vel_nav -> cmd_vel_filtered -> cmd_vel), same as nav2 controller. navigator vx_max/wz_max match guard (0.18 m/s, 0.5 rad/s).
 collision_monitor uses config/collision_monitor_team7.yaml there because there is no local costmap footprint.

@@ -2,6 +2,8 @@
 pub struct Dictionary {
     pub bits: usize,
     pub codes: Vec<u64>,
+    /// most bit errors corrected: random square pattern matches some code with < 2% chance
+    pub max_correction: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,31 +16,43 @@ pub struct Match {
 impl Dictionary {
     pub fn new(bits: usize, codes: Vec<u64>) -> Self {
         assert!(bits * bits <= 64, "marker grid must fit in u64");
-        Self { bits, codes }
+        let n = bits * bits;
+        // expected codes (x4 rotations) within t bits of a random pattern
+        let mut ball = 0.0;
+        let mut choose = 1.0;
+        let mut max_correction = 0;
+        for t in 0..=n {
+            if t > 0 {
+                choose = choose * (n + 1 - t) as f64 / t as f64;
+            }
+            ball += choose;
+            if 4.0 * codes.len() as f64 * ball / 2f64.powi(n as i32) > 0.02 {
+                break;
+            }
+            max_correction = t as u32;
+        }
+        Self { bits, codes, max_correction }
     }
 
     pub fn aruco_original() -> Self {
         Self::new(5, ARUCO_ORIGINAL.iter().map(|&c| c as u64).collect())
     }
 
-    /// OpenCV name without `DICT_`: `ARUCO_ORIGINAL`, or `4X4_50` .. `7X7_250` (NxN with 50, 100 or 250 ids)
+    /// OpenCV name with or without `DICT_`, any case: `ARUCO_ORIGINAL`, `4X4_50` .. `7X7_1000`,
+    /// `APRILTAG_16H5`, `APRILTAG_25H9`, `APRILTAG_36H10`, `APRILTAG_36H11`
     pub fn by_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_uppercase();
         let name = name.strip_prefix("DICT_").unwrap_or(&name);
         if name == "ARUCO_ORIGINAL" {
             return Some(Self::aruco_original());
         }
-        let (size, count) = name.split_once('_')?;
-        let table: &[u64] = match size {
-            "4X4" => &crate::dict_tables::DICT_4X4,
-            "5X5" => &crate::dict_tables::DICT_5X5,
-            "6X6" => &crate::dict_tables::DICT_6X6,
-            "7X7" => &crate::dict_tables::DICT_7X7,
-            _ => return None,
-        };
-        let count: usize = count.parse().ok().filter(|c| [50, 100, 250].contains(c))?;
-        let bits = (size.as_bytes()[0] - b'0') as usize;
+        let &(_, bits, table, count) = crate::dict_tables::NAMED.iter().find(|d| d.0 == name)?;
         Some(Self::new(bits, table[..count].to_vec()))
+    }
+
+    /// every name `by_name` takes
+    pub fn names() -> Vec<&'static str> {
+        std::iter::once("ARUCO_ORIGINAL").chain(crate::dict_tables::NAMED.iter().map(|d| d.0)).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -102,7 +116,7 @@ impl Dictionary {
                 second = dmin;
             }
         }
-        if best.hamming > max_hamming || (best.hamming > 0 && second <= best.hamming) {
+        if best.hamming > max_hamming.min(self.max_correction) || (best.hamming > 0 && second <= best.hamming) {
             return None;
         }
         Some(best)
@@ -253,7 +267,23 @@ mod tests {
         assert_eq!(d.codes[0] >> 30, 0b000111);
         assert_eq!(Dictionary::by_name("dict_4x4_50").map(|d| (d.bits, d.len())), Some((4, 50)));
         assert_eq!(Dictionary::by_name("ARUCO_ORIGINAL").map(|d| d.len()), Some(1024));
-        assert!(Dictionary::by_name("6X6_1000").is_none() && Dictionary::by_name("8X8_50").is_none());
+        assert_eq!(Dictionary::by_name("APRILTAG_36h11").map(|d| (d.bits, d.len())), Some((6, 587)));
+        assert_eq!(Dictionary::by_name("7X7_1000").map(|d| d.len()), Some(1000));
+        assert!(Dictionary::by_name("8X8_50").is_none() && Dictionary::by_name("6X6_500").is_none());
+        assert_eq!(Dictionary::names().len(), 21);
+        for name in Dictionary::names() {
+            let d = Dictionary::by_name(name).unwrap();
+            let mut seen = std::collections::HashSet::new();
+            assert!(d.codes.iter().all(|c| seen.insert(*c)), "{name} has duplicate codes");
+        }
+    }
+
+    #[test]
+    fn correction_capped_where_random_squares_would_match() {
+        let cap = |n: &str| Dictionary::by_name(n).unwrap().max_correction;
+        assert_eq!(cap("4X4_1000"), 0);
+        assert_eq!(cap("ARUCO_ORIGINAL"), 1);
+        assert!(cap("6X6_250") >= 2 && cap("APRILTAG_36H11") >= 2);
     }
 
     #[test]

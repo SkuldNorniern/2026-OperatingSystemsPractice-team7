@@ -475,7 +475,7 @@ impl Detector {
             let v = self.sharp[(i / nb + bb) * n + i % nb + bb];
             self.weights.push(((v - thr).abs() / contrast).min(1.0));
         }
-        let (id, s, hamming) = soft_identify(&self.rot_codes, code, &self.weights, p)?;
+        let (id, s, hamming) = soft_identify(&self.rot_codes, code, &self.weights, p.max_hamming.min(dict.max_correction), p.min_decode_margin)?;
         let corners = [0, 1, 2, 3].map(|k| quad[(k + s) % 4]);
         Some(Candidate {
             marker: Marker {
@@ -511,11 +511,12 @@ fn soft_identify(
     rot_codes: &[[u64; 4]],
     code: u64,
     weights: &[f64],
-    p: &DetectorParams,
+    max_hamming: u32,
+    min_margin: f64,
 ) -> Option<(u32, usize, u32)> {
     let mut best = (f64::MAX, u32::MAX, 0usize, u32::MAX);
     let mut second = f64::MAX;
-    let reach = p.max_hamming + 2;
+    let reach = max_hamming + 2;
     for (id, rots) in rot_codes.iter().enumerate() {
         let mut idbest = (f64::MAX, 0usize, u32::MAX);
         // Visit rotations in OpenCV's order so 180-degree-symmetric codes get the same orientation.
@@ -546,10 +547,10 @@ fn soft_identify(
         }
     }
     let (cost, id, j, h) = best;
-    if h > p.max_hamming {
+    if h > max_hamming {
         return None;
     }
-    if h > 0 && second - cost < p.min_decode_margin {
+    if h > 0 && second - cost < min_margin {
         return None;
     }
     Some((id, j, h))

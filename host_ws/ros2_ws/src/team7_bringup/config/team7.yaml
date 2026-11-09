@@ -127,9 +127,9 @@ navigator:
 
 aruco_detector:
   ros__parameters:
-    marker_dict: 6X6_250      # same as aruco.yaml; ARUCO_ORIGINAL or 4X4_50 .. 7X7_250
+    marker_dict: 6X6_250      # same as aruco.yaml. ARUCO_ORIGINAL, 4X4_50 .. 7X7_1000, APRILTAG_16H5/25H9/36H10/36H11
     image_transport: compressed  # compressed | raw
-    max_hamming: 1
+    max_hamming: 1            # bit errors corrected, capped per dictionary
     min_side_px: 8.0
     refine_corners: true
     debug_every: 3

@@ -265,3 +265,22 @@ fn single_bit_error_is_corrected() {
     };
     assert!(Detector::new(strict).detect(&img, &dict).is_empty());
 }
+
+#[test]
+fn every_dictionary_detects_its_own_markers() {
+    for name in Dictionary::names() {
+        let dict = Dictionary::by_name(name).unwrap();
+        // first, middle and last id, rotated so orientation decoding is exercised too
+        let ids = [0, dict.len() as u32 / 2, dict.len() as u32 - 1];
+        let ms: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(k, &id)| (id, square_corners(60.0 + 110.0 * k as f64, 70.0, 70.0, 0.3 * k as f64)))
+            .collect();
+        let img = render(340, 140, &dict, &ms, 4);
+        let found = Detector::new(DetectorParams::default()).detect(&img, &dict);
+        let mut got: Vec<u32> = found.iter().map(|m| m.id).collect();
+        got.sort();
+        assert_eq!(got, ids.to_vec(), "{name}");
+    }
+}

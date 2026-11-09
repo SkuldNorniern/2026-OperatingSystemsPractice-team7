@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compressed = p.string("image_transport", "compressed") == "compressed";
     let dict_name = p.string("marker_dict", "6X6_250");
     let Some(dict) = Dictionary::by_name(&dict_name) else {
-        return Err(format!("unknown marker_dict {dict_name}").into());
+        return Err(format!("unknown marker_dict {dict_name}, one of {}", Dictionary::names().join(" ")).into());
     };
     let marker_size = p.f64("marker_size", 0.10);
     let debug_every = p.i64("debug_every", 3).max(0) as u64;
@@ -56,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         refine_corners: p.bool("refine_corners", d.refine_corners),
         ..d
     };
-    log_info!(&log, "{image_topic}{} (+ {info_topic}), {dict_name}, marker {marker_size} m, max_hamming {}",
-        if compressed { "/compressed" } else { "" }, dp.max_hamming);
+    log_info!(&log, "{image_topic}{} (+ {info_topic}), {dict_name} ({} ids, corrects {} bits), marker {marker_size} m",
+        if compressed { "/compressed" } else { "" }, dict.len(), dp.max_hamming.min(dict.max_correction));
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();

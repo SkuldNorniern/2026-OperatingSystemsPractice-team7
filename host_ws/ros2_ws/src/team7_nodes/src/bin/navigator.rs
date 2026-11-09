@@ -165,7 +165,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maps = node.subscribe::<OccupancyGrid>(&map_topic, QosProfile::default().reliable().transient_local())?;
     spawner.spawn_local(maps.for_each(move |m| {
         let mut s = st.borrow_mut();
-        if let Some(g) = grid_from_msg(&m) {
+        // slam republishes same grid every period, rebuild cspace only on change
+        if let Some(g) = grid_from_msg(&m)
+            && !s.map.as_ref().is_some_and(|o| o.meta == g.meta && o.data == g.data)
+        {
             s.map = Some(g);
             s.map_dirty = true;
         }
@@ -315,7 +318,7 @@ fn tick(
         s.cspace = Some(cs);
         s.map_dirty = false;
     }
-    if cfg.mode == Mode::Mppi && s.last_obstacles.elapsed() >= cfg.obstacle_period {
+    if cfg.mode == Mode::Mppi && s.goal.is_some() && s.last_obstacles.elapsed() >= cfg.obstacle_period {
         s.last_obstacles = Instant::now();
         if let Some(m) = s.map.as_ref() {
             let mut g = m.clone();

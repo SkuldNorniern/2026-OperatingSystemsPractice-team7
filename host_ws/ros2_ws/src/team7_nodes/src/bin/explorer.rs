@@ -35,6 +35,7 @@ struct State {
     blacklist: Vec<((f64, f64), Instant)>,
     next_goal_after: Instant,
     grid_received: Instant,
+    costmap_stale: bool,
     done: bool,
     finished_exploring: bool,
     result: Option<((f64, f64), GoalStatus)>,
@@ -112,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         blacklist: Vec::new(),
         next_goal_after: Instant::now(),
         grid_received: Instant::now(),
+        costmap_stale: false,
         done: false,
         finished_exploring: false,
         result: None,
@@ -230,6 +232,10 @@ fn tick(
     s.blacklist.retain(|(_, at)| now.duration_since(*at) < cfg.blacklist_duration);
     // Do not navigate using a costmap that stopped updating.
     if s.grid_received.elapsed() > Duration::from_secs(5) {
+        if !s.costmap_stale {
+            s.costmap_stale = true;
+            log_warn!(log, "no costmap for 5 s, exploration paused");
+        }
         if let Some(a) = s.active.as_mut().filter(|a| !a.cancelling) {
             if let Some(h) = &a.handle {
                 let _ = h.cancel();
@@ -238,6 +244,10 @@ fn tick(
             }
         }
         return;
+    }
+    if s.costmap_stale {
+        s.costmap_stale = false;
+        log_info!(log, "costmap back, exploration resumed");
     }
 
     let Some(grid) = s.grid.as_ref() else {

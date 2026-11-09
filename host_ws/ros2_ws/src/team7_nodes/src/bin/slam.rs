@@ -20,6 +20,8 @@ struct State {
     slam: Slam,
     map_dirty: bool,
     last_map: Instant,
+    /// last published grid, sent again when nothing changed so consumers see map is alive
+    grid: Option<OccupancyGrid>,
     last_stamp: r2r::builtin_interfaces::msg::Time,
     tf_failures: u64,
 }
@@ -61,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slam: Slam::new(sp),
         map_dirty: false,
         last_map: Instant::now(),
+        grid: None,
         last_stamp: Default::default(),
         tf_failures: 0,
     }));
@@ -144,11 +147,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             t.transform.rotation = pm.orientation;
             let _ = tf_pub.publish(&TFMessage { transforms: vec![t] });
 
-            if s.map_dirty && s.last_map.elapsed() >= map_period {
-                s.map_dirty = false;
+            if s.last_map.elapsed() >= map_period {
                 s.last_map = Instant::now();
-                let _ = map_pub.publish(&grid_msg(&s.slam.occupancy(), &map_frame, &now));
-                let _ = graph_pub.publish(&graph_markers(&s.slam, &map_frame));
+                if s.map_dirty || s.grid.is_none() {
+                    s.map_dirty = false;
+                    s.grid = Some(grid_msg(&s.slam.occupancy(), &map_frame, &now));
+                    let _ = graph_pub.publish(&graph_markers(&s.slam, &map_frame));
+                }
+                if let Some(g) = s.grid.as_mut() {
+                    g.header.stamp = now.clone();
+                    let _ = map_pub.publish(g);
+                }
             }
         }
     })?;

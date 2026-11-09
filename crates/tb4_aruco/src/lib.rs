@@ -1,6 +1,7 @@
 mod camera;
 mod detect;
 mod dict;
+mod dict_tables;
 mod geom;
 mod image;
 mod refine;

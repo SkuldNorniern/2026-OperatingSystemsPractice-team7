@@ -6,10 +6,13 @@ use futures::StreamExt;
 use futures::executor::LocalPool;
 use futures::task::LocalSpawnExt;
 use r2r::aruco_opencv_msgs::msg::{ArucoDetection, MarkerPose};
-use r2r::sensor_msgs::msg::{CameraInfo, Image};
+use r2r::sensor_msgs::msg::{CameraInfo, CompressedImage, Image};
 use r2r::{QosProfile, log_info, log_warn};
 use tb4_aruco::{CameraModel, Detector, DetectorParams, Dictionary, GrayImage, Marker};
 use team7_nodes::Params;
+use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
+use zune_jpeg::zune_core::options::DecoderOptions;
 
 struct State {
     cam: Option<CameraModel>,
@@ -38,6 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         info_topic
     };
+    // compressed: subscribe <image_topic>/compressed (jpeg), less wifi load than raw
+    let compressed = p.string("image_transport", "compressed") == "compressed";
+    let dict_name = p.string("marker_dict", "6X6_250");
+    let Some(dict) = Dictionary::by_name(&dict_name) else {
+        return Err(format!("unknown marker_dict {dict_name}").into());
+    };
     let marker_size = p.f64("marker_size", 0.10);
     let debug_every = p.i64("debug_every", 3).max(0) as u64;
     let d = DetectorParams::default();
@@ -47,7 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         refine_corners: p.bool("refine_corners", d.refine_corners),
         ..d
     };
-    log_info!(&log, "{image_topic} (+ {info_topic}), marker {marker_size} m, max_hamming {}", dp.max_hamming);
+    log_info!(&log, "{image_topic}{} (+ {info_topic}), {dict_name}, marker {marker_size} m, max_hamming {}",
+        if compressed { "/compressed" } else { "" }, dp.max_hamming);
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
@@ -56,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cam: None,
         img: GrayImage::new(1, 1),
         det: Detector::new(dp),
-        dict: Dictionary::aruco_original(),
+        dict,
         markers: Vec::new(),
         frames: 0,
         total_ms: 0.0,
@@ -75,32 +85,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let det_pub = node.create_publisher::<ArucoDetection>("/aruco_detections", QosProfile::default())?;
     let dbg_pub = node.create_publisher::<Image>("/team7/aruco/debug", QosProfile::sensor_data())?;
-    let images = node.subscribe::<Image>(&image_topic, QosProfile::sensor_data())?;
-    let st = state.clone();
-    spawner.spawn_local(images.for_each(move |m| {
-        let mut guard = st.borrow_mut();
-        let s = &mut *guard;
+    let log_in = log.clone();
+    let handle = move |s: &mut State, header: &r2r::std_msgs::msg::Header| {
         let Some(cam) = s.cam else {
             if !s.warned {
                 log_warn!(&log, "no camera_info yet on {info_topic}");
                 s.warned = true;
             }
-            return futures::future::ready(());
+            return;
         };
-        let (w, h, step) = (m.width as usize, m.height as usize, m.step as usize);
-        let ok = match m.encoding.as_str() {
-            "mono8" => s.img.set_mono8(w, h, step, &m.data),
-            "bgr8" => s.img.set_color(w, h, step, &m.data, true),
-            "rgb8" => s.img.set_color(w, h, step, &m.data, false),
-            _ => false,
-        };
-        if !ok {
-            if !s.warned {
-                log_warn!(&log, "unsupported image {} {}x{}", m.encoding, w, h);
-                s.warned = true;
-            }
-            return futures::future::ready(());
-        }
         let t0 = Instant::now();
         s.det.detect_into(&s.img, &s.dict, &mut s.markers);
         s.total_ms += t0.elapsed().as_secs_f64() * 1e3;
@@ -109,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             log_info!(&log, "{} frames, mean detect {:.2} ms", s.frames, s.total_ms / s.frames as f64);
         }
 
-        let mut out = ArucoDetection { header: m.header.clone(), ..Default::default() };
+        let mut out = ArucoDetection { header: header.clone(), ..Default::default() };
         for mk in &s.markers {
             let ray = tb4_aruco::marker_bearing(mk, &cam);
             let mut range = tb4_aruco::estimate_range(mk, &cam, marker_size);
@@ -126,13 +119,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = det_pub.publish(&out);
 
         if debug_every > 0 && s.frames % debug_every == 0 {
-            let _ = dbg_pub.publish(&debug_image(&s.img, &s.markers, &m.header));
+            let _ = dbg_pub.publish(&debug_image(&s.img, &s.markers, header));
         }
-        futures::future::ready(())
-    }))?;
+    };
+
+    let st = state.clone();
+    if compressed {
+        let images = node.subscribe::<CompressedImage>(&format!("{image_topic}/compressed"), QosProfile::sensor_data())?;
+        let mut bad = false;
+        spawner.spawn_local(images.for_each(move |m| {
+            let mut guard = st.borrow_mut();
+            let s = &mut *guard;
+            match decode_jpeg_gray(&m.data) {
+                Some((w, h, gray)) if s.img.set_mono8(w, h, w, &gray) => handle(s, &m.header),
+                _ if !bad => {
+                    bad = true;
+                    log_warn!(&log_in, "cannot decode compressed image format '{}'", m.format);
+                }
+                _ => {}
+            }
+            futures::future::ready(())
+        }))?;
+    } else {
+        let images = node.subscribe::<Image>(&image_topic, QosProfile::sensor_data())?;
+        let mut bad = false;
+        spawner.spawn_local(images.for_each(move |m| {
+            let mut guard = st.borrow_mut();
+            let s = &mut *guard;
+            let (w, h, step) = (m.width as usize, m.height as usize, m.step as usize);
+            let ok = match m.encoding.as_str() {
+                "mono8" => s.img.set_mono8(w, h, step, &m.data),
+                "bgr8" => s.img.set_color(w, h, step, &m.data, true),
+                "rgb8" => s.img.set_color(w, h, step, &m.data, false),
+                _ => false,
+            };
+            if ok {
+                handle(s, &m.header);
+            } else if !bad {
+                bad = true;
+                log_warn!(&log_in, "unsupported image {} {}x{}", m.encoding, w, h);
+            }
+            futures::future::ready(())
+        }))?;
+    }
 
     team7_nodes::run(node, pool, || false);
     Ok(())
+}
+
+/// jpeg straight to luma, no colour conversion needed for detection
+fn decode_jpeg_gray(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::Luma);
+    let mut dec = JpegDecoder::new_with_options(std::io::Cursor::new(data), opts);
+    let gray = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    (gray.len() == w * h).then_some((w, h, gray))
 }
 
 /// gray copy with marker outlines in white and the first corner in black

@@ -126,6 +126,8 @@ navigator:
 
 aruco_detector:
   ros__parameters:
+    marker_dict: 6X6_250      # same as aruco.yaml; ARUCO_ORIGINAL or 4X4_50 .. 7X7_250
+    image_transport: compressed  # compressed | raw
     max_hamming: 1
     min_side_px: 8.0
     refine_corners: true

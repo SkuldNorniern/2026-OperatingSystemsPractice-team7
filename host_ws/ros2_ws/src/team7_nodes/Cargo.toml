@@ -20,6 +20,7 @@ tb4_planning = { path = "../../../../crates/tb4_planning" }
 tb4_control = { path = "../../../../crates/tb4_control" }
 tb4_slam = { path = "../../../../crates/tb4_slam" }
 tb4_aruco = { path = "../../../../crates/tb4_aruco" }
+zune-jpeg = "0.5.15"                # decode compressed camera images
 
 [profile.colcon]
 inherits = "release"

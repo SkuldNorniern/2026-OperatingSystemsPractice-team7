@@ -20,7 +20,7 @@ crates/
   tb4_slam/                own 2D SLAM: correlative matching + point-to-line ICP, keyframes, loop closure, pose graph
   tb4_planning/            C-space inflation, Lazy Theta*, A*
   tb4_control/             own MPPI, multithreaded rollouts, create3 limits
-  tb4_aruco/               own ArUco detector (ARUCO_ORIGINAL), camera model
+  tb4_aruco/               own ArUco detector (ARUCO_ORIGINAL, 4X4..7X7), camera model with rational_polynomial
 host_ws/                   laptop (Ubuntu 24.04, Jazzy), runs everything heavy
   ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector
   ros2_ws/src/team7_bringup/ launch, params, RViz config

@@ -21,6 +21,26 @@ impl Dictionary {
         Self::new(5, ARUCO_ORIGINAL.iter().map(|&c| c as u64).collect())
     }
 
+    /// OpenCV name without `DICT_`: `ARUCO_ORIGINAL`, or `4X4_50` .. `7X7_250` (NxN with 50, 100 or 250 ids)
+    pub fn by_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_uppercase();
+        let name = name.strip_prefix("DICT_").unwrap_or(&name);
+        if name == "ARUCO_ORIGINAL" {
+            return Some(Self::aruco_original());
+        }
+        let (size, count) = name.split_once('_')?;
+        let table: &[u64] = match size {
+            "4X4" => &crate::dict_tables::DICT_4X4,
+            "5X5" => &crate::dict_tables::DICT_5X5,
+            "6X6" => &crate::dict_tables::DICT_6X6,
+            "7X7" => &crate::dict_tables::DICT_7X7,
+            _ => return None,
+        };
+        let count: usize = count.parse().ok().filter(|c| [50, 100, 250].contains(c))?;
+        let bits = (size.as_bytes()[0] - b'0') as usize;
+        Some(Self::new(bits, table[..count].to_vec()))
+    }
+
     pub fn len(&self) -> usize {
         self.codes.len()
     }
@@ -224,6 +244,17 @@ pub(crate) const ARUCO_ORIGINAL: [u32; 1024] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictionaries_by_name() {
+        let d = Dictionary::by_name("6X6_250").unwrap();
+        assert_eq!((d.bits, d.len()), (6, 250));
+        // opencv DICT_6X6_250 id 0, first row 000111 (white = 1)
+        assert_eq!(d.codes[0] >> 30, 0b000111);
+        assert_eq!(Dictionary::by_name("dict_4x4_50").map(|d| (d.bits, d.len())), Some((4, 50)));
+        assert_eq!(Dictionary::by_name("ARUCO_ORIGINAL").map(|d| d.len()), Some(1024));
+        assert!(Dictionary::by_name("6X6_1000").is_none() && Dictionary::by_name("8X8_50").is_none());
+    }
 
     #[test]
     fn table_matches_opencv_layout() {

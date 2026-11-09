@@ -76,6 +76,8 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       transform_tolerance: 0.5
+      # wait for odom tf on activate, default gives up after few s and aborts whole bringup
+      initial_transform_timeout: 60.0
       rolling_window: true
       width: 3
       height: 3
@@ -122,6 +124,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       transform_tolerance: 0.5
+      # wait for odom tf on activate, default gives up after few s and aborts whole bringup
+      initial_transform_timeout: 60.0
       footprint: "[[ 0.189,  0.000],
                   [ 0.134, -0.134],
                   [ 0.000, -0.189],

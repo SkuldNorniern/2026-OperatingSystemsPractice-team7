@@ -1,14 +1,15 @@
 use crate::Marker;
 use crate::geom::{Homography, diag_intersection};
 
-// Pinhole + plumb_bob distortion (k1, k2, p1, p2, k3) as in sensor_msgs/CameraInfo.
+// Pinhole + distortion as in sensor_msgs/CameraInfo: plumb_bob (k1, k2, p1, p2, k3) or
+// rational_polynomial (k1, k2, p1, p2, k3, k4, k5, k6), OAK-D reports the second.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraModel {
     pub fx: f64,
     pub fy: f64,
     pub cx: f64,
     pub cy: f64,
-    pub dist: [f64; 5],
+    pub dist: [f64; 8],
 }
 
 impl CameraModel {
@@ -18,13 +19,13 @@ impl CameraModel {
             fy,
             cx,
             cy,
-            dist: [0.0; 5],
+            dist: [0.0; 8],
         }
     }
 
-    // Only the first five coefficients of `d` are used.
+    // Up to eight coefficients of `d` are used, missing ones are zero.
     pub fn from_k_d(k: &[f64; 9], d: &[f64]) -> Self {
-        let mut dist = [0.0; 5];
+        let mut dist = [0.0; 8];
         for (o, v) in dist.iter_mut().zip(d) {
             *o = *v;
         }
@@ -37,35 +38,38 @@ impl CameraModel {
         }
     }
 
+    fn radial(&self, r2: f64) -> f64 {
+        let [k1, k2, _, _, k3, k4, k5, k6] = self.dist;
+        (1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))) / (1.0 + r2 * (k4 + r2 * (k5 + r2 * k6)))
+    }
+
     pub fn distort_normalized(&self, x: f64, y: f64) -> (f64, f64) {
-        let [k1, k2, p1, p2, k3] = self.dist;
+        let [_, _, p1, p2, ..] = self.dist;
         let r2 = x * x + y * y;
-        let rad = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+        let rad = self.radial(r2);
         (
             x * rad + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x),
             y * rad + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y,
         )
     }
 
+    // Newton with numeric jacobian, starts from the distorted point.
     pub fn undistort_normalized(&self, xd: f64, yd: f64) -> (f64, f64) {
         if self.dist.iter().all(|&v| v == 0.0) {
             return (xd, yd);
         }
-        let [k1, k2, p1, p2, k3] = self.dist;
         let (mut x, mut y) = (xd, yd);
+        let h = 1e-7;
         for _ in 0..30 {
             let (fx, fy) = self.distort_normalized(x, y);
             let (ex, ey) = (fx - xd, fy - yd);
             if ex.abs() < 1e-14 && ey.abs() < 1e-14 {
                 break;
             }
-            let r2 = x * x + y * y;
-            let rad = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
-            let drad = k1 + r2 * (2.0 * k2 + 3.0 * k3 * r2);
-            let a = rad + 2.0 * x * x * drad + 2.0 * p1 * y + 6.0 * p2 * x;
-            let b = 2.0 * x * y * drad + 2.0 * p1 * x + 2.0 * p2 * y;
-            let c = 2.0 * x * y * drad + 2.0 * p1 * x + 2.0 * p2 * y;
-            let d = rad + 2.0 * y * y * drad + 6.0 * p1 * y + 2.0 * p2 * x;
+            let (ax, ay) = self.distort_normalized(x + h, y);
+            let (bx, by) = self.distort_normalized(x, y + h);
+            let (a, c) = ((ax - fx) / h, (ay - fy) / h);
+            let (b, d) = ((bx - fx) / h, (by - fy) / h);
             let det = a * d - b * c;
             if det.abs() < 1e-12 {
                 break;

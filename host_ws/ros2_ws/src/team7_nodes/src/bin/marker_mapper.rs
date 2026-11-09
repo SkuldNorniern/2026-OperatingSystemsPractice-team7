@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bearing_sigma: p.f64("bearing_sigma", 0.012),
             wall_sigma: p.f64("wall_sigma", 0.03),
             pnp_sigma: p.f64("pnp_sigma", 0.08),
+            edge_ratio_gate: p.f64("edge_ratio_gate", 1.5),
         };
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {

@@ -134,7 +134,8 @@ pub fn wall_hit(g: &Grid, origin: (f64, f64), dir: (f64, f64), hit_range: f64, p
         }
         a += step;
     }
-    if front.len() < 4 {
+    // 3 cells is a box face ~15 cm wide, still a line
+    if front.len() < 3 {
         return None;
     }
     let k = front.len() as f64;
@@ -172,25 +173,62 @@ pub fn wall_hit(g: &Grid, origin: (f64, f64), dir: (f64, f64), hit_range: f64, p
     ((t - hit_range).abs() <= 2.5 * res).then_some((t, cos_inc))
 }
 
-/// rays a little left and right of bearing must land on same surface. a jump means the ray clips
-/// an edge in front of the marker (or misses past it), so the hit says nothing about the marker
-pub fn flat_around(g: &Grid, origin: (f64, f64), ang: f64, range: f64, p: &LocateParams) -> bool {
+/// what the rays a little left and right of the bearing see
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// both land on same surface as centre ray
+    Flat,
+    /// one side agrees, other runs past: centre is near end of a surface (box face, wall end)
+    Edge,
+    /// a side is nearer, or none agree: ray clips something in front of marker
+    Clip,
+}
+
+/// rays a little left and right of bearing should land on same surface. a jump means the hit is
+/// at an edge: marker on a small box face, or ray clipping something in front of the marker
+pub fn surface_around(g: &Grid, origin: (f64, f64), ang: f64, range: f64, p: &LocateParams) -> Surface {
     let res = g.meta.resolution;
     // about one marker half width at this range, at least a couple of cells
     let half = (0.06f64).max(2.0 * res);
-    let da = (half / range.max(0.3)).atan();
-    let mut rs = [range; 2];
-    for (i, side) in [-1.0, 1.0].iter().enumerate() {
-        let a = ang + side * da;
-        match g.raycast(origin.0, origin.1, a.cos(), a.sin(), p.max_range, p.occupied_threshold) {
-            Some(h) => rs[i] = h.range,
-            None => return false,
+    let sides = |half: f64| {
+        let da = (half / range.max(0.3)).atan();
+        [-1.0, 1.0].map(|side: f64| {
+            let a = ang + side * da;
+            g.raycast(origin.0, origin.1, a.cos(), a.sin(), p.max_range, p.occupied_threshold).map(|h| h.range)
+        })
+    };
+    let rs = sides(half);
+    if let [Some(a), Some(b)] = rs {
+        // on a plane the two side ranges straddle the centre one, steeper incidence = bigger spread
+        let (mid, spread) = (0.5 * (a + b), (a - b).abs());
+        if (mid - range).abs() <= 2.0 * res + 0.1 * spread && spread <= 4.0 * half + 2.0 * res {
+            return Surface::Flat;
         }
     }
-    // on a plane the two side ranges straddle the centre one, steeper incidence = bigger spread
-    let mid = 0.5 * (rs[0] + rs[1]);
-    let spread = (rs[0] - rs[1]).abs();
-    (mid - range).abs() <= 2.0 * res + 0.1 * spread && spread <= 4.0 * half + 2.0 * res
+    let agrees = |r: Option<f64>| r.is_some_and(|r| (r - range).abs() <= 2.0 * res + 2.0 * half);
+    let past = |r: Option<f64>| r.is_none_or(|r| r > range + 2.0 * res);
+    if (agrees(rs[0]) && past(rs[1])) || (agrees(rs[1]) && past(rs[0])) {
+        return Surface::Edge;
+    }
+    // narrow face (small box): falls off both ends at marker width but holds within a cell
+    let inner = sides(res);
+    let close = |r: Option<f64>| r.is_some_and(|r| (r - range).abs() <= 1.5 * res);
+    if close(inner[0]) && close(inner[1]) && past(rs[0]) && past(rs[1]) {
+        Surface::Edge
+    } else {
+        Surface::Clip
+    }
+}
+
+pub fn flat_around(g: &Grid, origin: (f64, f64), ang: f64, range: f64, p: &LocateParams) -> bool {
+    surface_around(g, origin, ang, range, p) == Surface::Flat
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    Clean,
+    Unfit,
+    Edge,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +251,8 @@ pub struct TrackParams {
     pub wall_sigma: f64,
     /// pnp range error, fraction of range
     pub pnp_sigma: f64,
+    /// edge hit before any scale is learned: ray/pnp must be within this factor
+    pub edge_ratio_gate: f64,
 }
 
 impl Default for TrackParams {
@@ -229,6 +269,7 @@ impl Default for TrackParams {
             bearing_sigma: 0.012,
             wall_sigma: 0.03,
             pnp_sigma: 0.08,
+            edge_ratio_gate: 1.5,
         }
     }
 }
@@ -288,22 +329,28 @@ impl Tracker {
             sigma_along: along,
             sigma_across: across(r),
         };
-        // (range, sigma along, clean)
+        // (range, sigma along, kind)
         let hit = grid.and_then(|g| {
             let h = g.raycast(o.camera.0, o.camera.1, dx, dy, p.max_range, p.occupied_threshold)?;
-            if !flat_around(g, (o.camera.0, o.camera.1), ang, h.range, p) {
-                return None;
-            }
-            Some(match wall_hit(g, (o.camera.0, o.camera.1), (dx, dy), h.range, p) {
-                // bearing error slides the hit along a slanted wall by tan(incidence)
-                Some((range, c)) => (range, tp.wall_sigma / c + across(range) * (1.0 - c * c).sqrt() / c, true),
+            let surface = surface_around(g, (o.camera.0, o.camera.1), ang, h.range, p);
+            let fit = wall_hit(g, (o.camera.0, o.camera.1), (dx, dy), h.range, p);
+            // bearing error slides the hit along a slanted wall by tan(incidence)
+            let along = |c: f64, r: f64| tp.wall_sigma / c + across(r) * (1.0 - c * c).sqrt() / c;
+            match (surface, fit) {
+                (Surface::Flat, Some((r, c))) => Some((r, along(c, r), Hit::Clean)),
                 // no clean wall line: cell face, unknown incidence
-                None => (h.range, 2.0 * (tp.wall_sigma + g.meta.resolution), false),
-            })
+                (Surface::Flat, None) => Some((h.range, 2.0 * (tp.wall_sigma + g.meta.resolution), Hit::Unfit)),
+                // near end of a surface: fine if marker is on it, wrong if ray clips past an
+                // obstacle in front. needs a straight face and pnp range that agrees (below)
+                (Surface::Edge, Some((r, c))) => Some((r, along(c, r) + g.meta.resolution, Hit::Edge)),
+                // box corner in view: no single line, cell face
+                (Surface::Edge, None) => Some((h.range, 2.0 * (tp.wall_sigma + g.meta.resolution), Hit::Edge)),
+                (Surface::Clip, _) => None,
+            }
         });
         let ratio = hit.map(|h| h.0 / pnp).filter(|r| *r <= p.range_ratio_gate && *r >= 1.0 / p.range_ratio_gate);
         // only clean wall hits teach the scale
-        if let Some(r) = ratio.filter(|_| hit.is_some_and(|h| h.2)) {
+        if let Some(r) = ratio.filter(|_| hit.is_some_and(|h| h.2 == Hit::Clean)) {
             let v = self.scales.entry(o.id).or_default();
             v.push(r);
             if v.len() > self.params.max_history {
@@ -316,6 +363,16 @@ impl Tracker {
             .filter(|v| v.len() >= self.params.scale_min_samples)
             .map(|v| median(v.clone()));
         let tp = &self.params;
+        // edge hit: check against this marker's scale, else any marker's (same print size), else
+        // marker size close to configured one
+        let hit = hit.filter(|h| {
+            h.2 != Hit::Edge
+                || ratio.is_some_and(|q| match learned.or_else(|| self.any_scale()) {
+                    Some(k) => (q / k - 1.0).abs() <= tp.scale_tolerance,
+                    None => (1.0 / tp.edge_ratio_gate..=tp.edge_ratio_gate).contains(&q),
+                })
+        });
+        let ratio = ratio.filter(|_| hit.is_some());
         let est = match (hit, ratio, learned) {
             (Some((r, along, _)), Some(q), Some(k)) if (q / k - 1.0).abs() <= tp.scale_tolerance => Some(at(r, Source::Raycast, along)),
             (_, _, Some(k)) => (pnp * k <= p.max_range).then(|| at(pnp * k, Source::ScaledPnp, pnp * k * tp.pnp_sigma)),
@@ -336,6 +393,17 @@ impl Tracker {
             n[e.source as usize] += 1;
         }
         n
+    }
+
+    /// views kept for one id, oldest first
+    pub fn estimates(&self, id: i64) -> &[Estimate] {
+        self.estimates.get(&id).map_or(&[], |v| v.as_slice())
+    }
+
+    /// median ray/pnp scale over all markers, they are printed same size
+    pub fn any_scale(&self) -> Option<f64> {
+        let all: Vec<f64> = self.scales.values().flatten().copied().collect();
+        (all.len() >= self.params.scale_min_samples).then(|| median(all))
     }
 
     /// learned ray/pnp scale of a marker, if enough samples
@@ -396,10 +464,10 @@ pub struct Fused {
 }
 
 pub fn fuse(v: &[Estimate]) -> Fused {
-    let mut x = (median(v.iter().map(|p| p.x).collect()), median(v.iter().map(|p| p.y).collect()));
+    let med = (median(v.iter().map(|p| p.x).collect()), median(v.iter().map(|p| p.y).collect()));
     if v.len() < 2 {
         let s = v.first().map_or(f64::INFINITY, |e| e.sigma_along.max(e.sigma_across));
-        return Fused { x: x.0, y: x.1, sigma: s, consistency: 0.0 };
+        return Fused { x: med.0, y: med.1, sigma: s, consistency: 0.0 };
     }
     let info = |e: &Estimate| {
         let (ux, uy) = e.dir;
@@ -408,19 +476,22 @@ pub fn fuse(v: &[Estimate]) -> Fused {
         (a * ux * ux + c * uy * uy, (a - c) * ux * uy, a * uy * uy + c * ux * ux)
     };
     const K: f64 = 2.0;
-    let mut cov = (f64::INFINITY, 0.0, f64::INFINITY);
-    let mut ds = Vec::with_capacity(v.len());
-    // huber first, then drop views past 3K so far outliers stop pulling at all
-    for it in 0..25 {
-        ds.clear();
-        let hard = it >= 15;
+    let dist = |x: (f64, f64), e: &Estimate| {
+        let (j11, j12, j22) = info(e);
+        let (ex, ey) = (x.0 - e.x, x.1 - e.y);
+        (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt()
+    };
+    // weighted least squares step, weight per view from its distance (None = all 1)
+    let step = |x: Option<(f64, f64)>, hard: bool| {
         let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for e in v {
             let (j11, j12, j22) = info(e);
-            let (ex, ey) = (x.0 - e.x, x.1 - e.y);
-            let d = (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt();
-            ds.push(d);
-            let w = if d <= K { 1.0 } else if hard && d > 3.0 * K { 0.0 } else { K / d };
+            let w = match x.map(|x| dist(x, e)) {
+                None => 1.0,
+                Some(d) if d <= K => 1.0,
+                Some(d) if hard && d > 3.0 * K => 0.0,
+                Some(d) => K / d,
+            };
             a11 += w * j11;
             a12 += w * j12;
             a22 += w * j22;
@@ -428,19 +499,44 @@ pub fn fuse(v: &[Estimate]) -> Fused {
             b2 += w * (j12 * e.x + j22 * e.y);
         }
         let det = a11 * a22 - a12 * a12;
-        if det.abs() < 1e-12 {
-            break;
+        (det.abs() >= 1e-12).then(|| (((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det), (a22 / det, -a12 / det, a11 / det)))
+    };
+    // huber first, then drop views past 3K so far outliers stop pulling at all
+    let solve = |mut x: (f64, f64)| {
+        let mut cov = (f64::INFINITY, 0.0, f64::INFINITY);
+        for it in 0..25 {
+            let hard = it >= 15;
+            let Some((nx, c)) = step(Some(x), hard) else { break };
+            cov = c;
+            let moved = (nx.0 - x.0).hypot(nx.1 - x.1);
+            x = nx;
+            if moved < 1e-5 && hard {
+                break;
+            }
         }
-        cov = (a22 / det, -a12 / det, a11 / det);
-        let nx = ((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det);
-        let step = (nx.0 - x.0).hypot(nx.1 - x.1);
-        x = nx;
-        if step < 1e-5 && hard {
-            break;
+        // robust cost: huber, flat past 3K
+        let cost: f64 = v
+            .iter()
+            .map(|e| match dist(x, e) {
+                d if d <= K => 0.5 * d * d,
+                d => K * (d.min(3.0 * K) - 0.5 * K),
+            })
+            .sum();
+        (x, cov, cost)
+    };
+    // median start lets many weak views outvote few precise ones, plain weighted start the reverse.
+    // try both, keep the better fit
+    let mut best = solve(med);
+    if let Some((x, _)) = step(None, false) {
+        let other = solve(x);
+        if other.2 < best.2 - 1e-9 {
+            best = other;
         }
     }
+    let (x, cov, _) = best;
     let tr = cov.0 + cov.2;
     let l = tr / 2.0 + ((cov.0 - cov.2).powi(2) / 4.0 + cov.1 * cov.1).sqrt();
+    let ds: Vec<f64> = v.iter().map(|e| dist(x, e)).collect();
     Fused { x: x.0, y: x.1, sigma: l.max(0.0).sqrt(), consistency: median(ds) }
 }
 
@@ -655,6 +751,64 @@ mod tests {
         assert!(at(-0.5), "open wall");
         assert!(!at(0.58), "end of obstacle");
         assert!(!at(0.62), "just past obstacle end");
+        let kind = |y: f64| {
+            let a = y.atan2(1.5);
+            let h = g.raycast(0.0, 0.0, a.cos(), a.sin(), 5.0, 65).unwrap();
+            surface_around(&g, (0.0, 0.0), a, h.range, &p)
+        };
+        assert_eq!(kind(0.55), Surface::Edge, "near obstacle end, rest of face beside");
+        assert_eq!(kind(0.64), Surface::Clip, "wall seen past obstacle end");
+    }
+
+    /// box face 15 cm wide at x = 1.8, wall at x = 3 behind. markers sit on face near its ends
+    fn box_map() -> Grid {
+        let mut g = wall_map();
+        for cy in 0..3 {
+            g.set(g.world_to_cell(1.81, 0.41 + cy as f64 * 0.05).unwrap(), 100);
+            g.set(g.world_to_cell(1.86, 0.41 + cy as f64 * 0.05).unwrap(), 100);
+        }
+        g
+    }
+
+    fn view_of(y: f64, pnp_scale: f64, cam_y: f64) -> Observation {
+        let (dx, dy) = (1.8f64, y - cam_y);
+        let r = dx.hypot(dy);
+        Observation { id: 3, camera: (0.0, cam_y, 0.25), bearing: (dx / r, dy / r, 0.0), pnp_range: r * pnp_scale }
+    }
+
+    #[test]
+    fn marker_on_small_box_face_uses_raycast() {
+        let g = box_map();
+        let p = LocateParams::default();
+        let mut t = Tracker::new(TrackParams::default());
+        // camera moves sideways, marker at y = 0.45 near low end of face, marker printed 20% bigger
+        for k in 0..8 {
+            let e = t.observe(Some(&g), &view_of(0.45, 0.8, -0.2 + 0.06 * k as f64), &p).unwrap();
+            assert_eq!(e.source, Source::Raycast, "view {k}");
+        }
+        let tg = t.target(3).unwrap();
+        assert!(tg.confirmed, "{tg:?}");
+        assert!((tg.x - 1.825).abs() < 0.03 && (tg.y - 0.45).abs() < 0.03, "{tg:?}");
+    }
+
+    #[test]
+    fn edge_hit_with_wrong_pnp_range_is_dropped() {
+        // ray ends at box edge but pnp says marker is 2x farther: wall behind, ray clips box
+        let g = box_map();
+        let p = LocateParams::default();
+        let mut t = Tracker::new(TrackParams::default());
+        for k in 0..8 {
+            let e = t.observe(Some(&g), &view_of(0.42, 2.0, -0.2 + 0.06 * k as f64), &p);
+            assert!(e.is_none_or(|e| e.source != Source::Raycast), "view {k}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn few_precise_views_beat_more_weak_ones() {
+        let ray = Estimate { x: 2.0, y: 0.0, source: Source::Raycast, dir: (1.0, 0.0), sigma_along: 0.04, sigma_across: 0.02 };
+        let weak = |x: f64| Estimate { x, source: Source::PnpRange, sigma_along: 0.8, ..ray };
+        let f = fuse(&[ray, weak(1.3), weak(1.4), ray, weak(1.2)]);
+        assert!((f.x - 2.0).abs() < 0.03, "{f:?}");
     }
 
     #[test]

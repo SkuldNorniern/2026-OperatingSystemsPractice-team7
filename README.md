@@ -46,7 +46,8 @@ Laptop  slam_toolbox  -> /map, map->odom
 marker size can change on demo day so PnP range from one marker is not reliable. direction from camera is still right.
 so marker_mapper casts that direction through the SLAM map and takes first occupied cell. PnP range is only fallback.
 first occupied cell is up to one cell short, so it fits a line to wall cells around the hit and uses where ray meets that line.
-if rays a bit left and right of the marker land at different depth, ray is clipping an edge in front of it and is not used.
+if rays a bit left and right of the marker land at different depth, hit is at an edge. if something nearer is beside it, ray clips an obstacle and is not used.
+if one side runs past (marker near end of small box face), hit is used only when PnP range agrees with it, so a ray clipping past the end of a wall in front is still dropped.
 each id needs a few views that agree before it counts. views are fused by weighted least squares, each view trusted along ray by how good its range is (head on wall hit good, grazing or PnP bad) and across ray by bearing error.
 confirmed when fused position is tight and views agree, and stays confirmed unless views clearly fall apart.
 

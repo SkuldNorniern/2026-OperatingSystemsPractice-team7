@@ -31,7 +31,12 @@ impl RobotState {
     }
 }
 
+#[inline]
 pub fn wrap_angle(a: f64) -> f64 {
+    // rollouts call this every step with angles already in range, skip fmod then
+    if (-PI..PI).contains(&a) {
+        return a;
+    }
     let a = (a + PI).rem_euclid(TAU) - PI;
     if a < -PI { a + TAU } else { a }
 }

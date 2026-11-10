@@ -97,10 +97,15 @@ if [ "$RECORD" = true ]; then
 fi
 
 echo "[*] checking robot topics"
-if ! timeout 15 ros2 topic list --no-daemon --spin-time 3 | grep -qx "/scan"; then
+TOPICS=$(timeout 15 ros2 topic list --no-daemon --spin-time 3 || true)
+if ! grep -qx "/scan" <<<"$TOPICS"; then
   echo "error: /scan not visible. Is the robot on, and are ROS_DOMAIN_ID / RMW_IMPLEMENTATION the same as on the Pi?" >&2
   exit 1
 fi
+# run still works without these, but no markers / no odom means wasted 10 min, so say it now
+for topic in /odom /oakd/rgb/preview/image_raw/compressed /oakd/rgb/preview/camera_info; do
+  grep -qx "$topic" <<<"$TOPICS" || echo "warning: $topic not visible; check the robot camera / create3 bridge" >&2
+done
 
 if [ "$PREPARE_ROBOT" = true ]; then
   if timeout 5 ros2 topic echo --once /dock_status 2>/dev/null | grep -q "is_docked: true"; then

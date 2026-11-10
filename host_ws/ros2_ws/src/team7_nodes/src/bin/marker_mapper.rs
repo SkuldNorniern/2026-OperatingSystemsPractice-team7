@@ -26,6 +26,7 @@ struct State {
     ignore_ids: Vec<i64>,
     csv_path: PathBuf,
     last_csv: String,
+    out_dir: PathBuf,
     tf_failures: u64,
     stats: [u64; 2],
     slow_until: Option<Instant>,
@@ -78,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ignore_ids: p.i64_list("ignore_ids"),
             csv_path: out_dir.join(p.string("csv_name", "targets.csv")),
             last_csv: String::new(),
+            out_dir: out_dir.clone(),
             tf_failures: 0,
             stats: [0, 0],
             slow_until: None,
@@ -107,7 +109,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p.f64("map_origin_shift", 0.0),
         )
     };
-    log_info!(&log, "writing confirmed targets to {}", state.borrow().csv_path.display());
+    {
+        // header right away: file exists even with 0 confirmed, old run's targets in same dir gone
+        let mut s = state.borrow_mut();
+        let csv = tb4_markers::to_csv(&[]);
+        match team7_nodes::write_atomic(&s.csv_path, &csv) {
+            Ok(()) => s.last_csv = csv,
+            Err(e) => log_warn!(&log, "cannot write {}: {e}", s.csv_path.display()),
+        }
+        log_info!(&log, "writing confirmed targets to {}", s.csv_path.display());
+    }
 
     let pool = LocalPool::new();
     let spawner = pool.spawner();
@@ -197,6 +208,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = f.flush();
         }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
+        futures::future::ready(())
+    }))?;
+
+    // mission DONE: dump unconfirmed estimates too, so time-limit run still has a best guess
+    let mission = node.subscribe::<r2r::std_msgs::msg::String>(
+        "/team7/mission_state",
+        QosProfile::default().keep_last(1).reliable().transient_local(),
+    )?;
+    let st = state.clone();
+    let log4 = log.clone();
+    let mut dumped = false;
+    spawner.spawn_local(mission.for_each(move |m| {
+        if m.data == "DONE" && !dumped {
+            dumped = true;
+            let s = st.borrow();
+            let tentative: Vec<Target> = s.tracker.targets().into_iter().filter(|t| !t.confirmed && t.views >= 2).collect();
+            for t in &tentative {
+                log_warn!(&log4, "UNCONFIRMED target id={} at ({:.2}, {:.2}) from {} views, sigma {:.3}", t.id, t.x, t.y, t.views, t.spread);
+            }
+            let path = s.out_dir.join("targets_tentative.csv");
+            if let Err(e) = team7_nodes::write_atomic(&path, &tb4_markers::to_csv(&tentative)) {
+                log_warn!(&log4, "cannot write {}: {e}", path.display());
+            }
+        }
         futures::future::ready(())
     }))?;
 

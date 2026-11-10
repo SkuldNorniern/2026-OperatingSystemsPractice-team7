@@ -182,8 +182,12 @@ run stops when 3 ids are confirmed or `time_limit` (590 s) is over. mission canc
 
 ```
 ~/team7_runs/<timestamp>/map.pgm, map.yaml    final map, map_autosave.* every 60 s
-~/team7_runs/<timestamp>/targets.csv          id,x,y in map frame (m)
+~/team7_runs/<timestamp>/targets.csv          id,x,y in map frame (m), confirmed only, header written at start
+~/team7_runs/<timestamp>/targets_tentative.csv  not confirmed at end (>= 2 views), best guess only
 ```
+
+map frame origin = robot pose at `/reset_pose`, so coordinates are relative to wherever robot starts.
+run_demo.sh warns before start if `/odom` or camera topics are missing.
 
 in RViz confirmed targets are green with `ID n (x, y)`, not confirmed yet are yellow `ID n? kv`.
 our parts show up too: Lazy Theta* path (cyan), MPPI predicted trajectory (magenta), SLAM keyframes and loop closures (orange/pink), aruco debug image, filtered scan (off by default).

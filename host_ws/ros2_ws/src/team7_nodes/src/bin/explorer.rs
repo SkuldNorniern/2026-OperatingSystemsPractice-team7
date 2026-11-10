@@ -151,8 +151,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client: ActionClient<Nav> = node.create_action_client::<Nav>(&nav_action)?;
     let available = r2r::Node::is_available(&client)?;
-    let pub_frontiers = node.create_publisher::<MarkerArray>("/team7/frontiers", QosProfile::default())?;
-    let pub_goal = node.create_publisher::<r2r::geometry_msgs::msg::PoseStamped>("/team7/goal", QosProfile::default())?;
+    let pubs = Pubs {
+        frontiers: node.create_publisher::<MarkerArray>("/team7/frontiers", QosProfile::default())?,
+        goal: node.create_publisher::<r2r::geometry_msgs::msg::PoseStamped>("/team7/goal", QosProfile::default())?,
+    };
     let mut timer = node.create_wall_timer(period)?;
 
     // what the camera saw, 5 Hz
@@ -183,12 +185,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if timer.tick().await.is_err() {
                 return;
             }
-            tick(&log, &cfg, &state, &tf.borrow(), &client, &sp, &pub_frontiers, &pub_goal);
+            tick(&log, &cfg, &state, &tf.borrow(), &client, &sp, &pubs);
         }
     })?;
 
     team7_nodes::run(node, pool, || false);
     Ok(())
+}
+
+struct Pubs {
+    frontiers: r2r::Publisher<MarkerArray>,
+    goal: r2r::Publisher<r2r::geometry_msgs::msg::PoseStamped>,
 }
 
 fn tick(
@@ -198,8 +205,7 @@ fn tick(
     tf: &TfBuffer,
     client: &ActionClient<Nav>,
     spawner: &futures::executor::LocalSpawner,
-    pub_frontiers: &r2r::Publisher<MarkerArray>,
-    pub_goal: &r2r::Publisher<r2r::geometry_msgs::msg::PoseStamped>,
+    pubs: &Pubs,
 ) {
     let mut s = state.borrow_mut();
 
@@ -277,7 +283,7 @@ fn tick(
             .collect(),
         _ => Vec::new(),
     };
-    let _ = pub_frontiers.publish(&frontier_markers(&cfg.map_frame, &frontiers, &views));
+    let _ = pubs.frontiers.publish(&frontier_markers(&cfg.map_frame, &frontiers, &views));
 
     let mut abandon = None;
     if let Some(a) = s.active.as_mut() {
@@ -337,7 +343,7 @@ fn tick(
     let mut msg = NavigateToPose::Goal::default();
     msg.pose.header.frame_id = cfg.map_frame.clone();
     msg.pose.pose = pose_msg(goal.0, goal.1, yaw);
-    let _ = pub_goal.publish(&msg.pose);
+    let _ = pubs.goal.publish(&msg.pose);
     s.active = Some(Active {
         goal,
         view_target,

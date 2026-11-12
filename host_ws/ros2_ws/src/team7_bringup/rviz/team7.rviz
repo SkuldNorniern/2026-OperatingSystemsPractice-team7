@@ -36,7 +36,7 @@ Visualization Manager:
         Depth: 1
       Color Scheme: costmap
       Alpha: 0.5
-      Value: false
+      Value: true
     # local MPPI cost around the robot (team7 nav mode only): 100 = obstacle, 0 = >= 1 m away
     - Class: rviz_default_plugins/Map
       Name: MPPI local cost (team7)

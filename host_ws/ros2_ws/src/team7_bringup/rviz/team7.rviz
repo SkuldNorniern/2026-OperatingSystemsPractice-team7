@@ -24,7 +24,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Depth: 1
       Color Scheme: map
-      Alpha: 0.9
+      Alpha: 0.3
       Value: true
     - Class: rviz_default_plugins/Map
       Name: Global costmap

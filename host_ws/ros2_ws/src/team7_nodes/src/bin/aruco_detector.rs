@@ -23,6 +23,7 @@ struct State {
     frames: u64,
     total_ms: f64,
     warned: bool,
+    rgb: Option<(usize, usize, Vec<u8>)>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     team7_nodes::spawn_param_services(&mut node, &spawner)?;
     let state = Rc::new(RefCell::new(State {
         cam: None,
+        rgb: None,
         img: GrayImage::new(1, 1),
         det: Detector::new(dp),
         dict,
@@ -119,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = det_pub.publish(&out);
 
         if debug_every > 0 && s.frames % debug_every == 0 {
-            let _ = dbg_pub.publish(&debug_image(&s.img, &s.markers, header));
+            let _ = dbg_pub.publish(&debug_image_color(s.rgb.as_ref(), &s.img, &s.markers, header));
         }
     };
 
@@ -131,7 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut guard = st.borrow_mut();
             let s = &mut *guard;
             match decode_jpeg_gray(&m.data) {
-                Some((w, h, gray)) if s.img.set_mono8(w, h, w, &gray) => handle(s, &m.header),
+                Some((w, h, gray)) if s.img.set_mono8(w, h, w, &gray) => {
+                    s.rgb = decode_jpeg_rgb(&m.data);
+                    handle(s, &m.header)
+                }
                 _ if !bad => {
                     bad = true;
                     log_warn!(&log_in, "cannot decode compressed image format '{}'", m.format);
@@ -175,6 +180,60 @@ fn decode_jpeg_gray(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     let info = dec.info()?;
     let (w, h) = (info.width as usize, info.height as usize);
     (gray.len() == w * h).then_some((w, h, gray))
+}
+
+/// colour decode of the same JPEG, for the debug view only (detection stays on gray)
+fn decode_jpeg_rgb(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut dec = JpegDecoder::new_with_options(std::io::Cursor::new(data), opts);
+    let px = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    (px.len() == w * h * 3).then_some((w, h, px))
+}
+
+/// colour debug view: marker outlines in green, first corner in red. falls back to gray.
+fn debug_image_color(rgb: Option<&(usize, usize, Vec<u8>)>, img: &GrayImage, markers: &[Marker], header: &r2r::std_msgs::msg::Header) -> Image {
+    let Some((w, h, px)) = rgb else {
+        return debug_image(img, markers, header);
+    };
+    let (w, h) = (*w, *h);
+    if w != img.width || h != img.height || px.len() != w * h * 3 {
+        return debug_image(img, markers, header);
+    }
+    let mut data = px.clone();
+    let mut put = |x: f64, y: f64, c: [u8; 3]| {
+        let (xi, yi) = (x.round() as i64, y.round() as i64);
+        if xi >= 0 && yi >= 0 && (xi as usize) < w && (yi as usize) < h {
+            let i = (yi as usize * w + xi as usize) * 3;
+            data[i..i + 3].copy_from_slice(&c);
+        }
+    };
+    for mk in markers {
+        let c = mk.corners_f64();
+        for k in 0..4 {
+            let (a, b) = (c[k], c[(k + 1) % 4]);
+            let n = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
+            for i in 0..=n {
+                let t = i as f64 / n as f64;
+                put(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, [0, 255, 0]);
+            }
+        }
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                put(c[0][0] + dx as f64, c[0][1] + dy as f64, [255, 0, 0]);
+            }
+        }
+    }
+    Image {
+        header: header.clone(),
+        height: h as u32,
+        width: w as u32,
+        encoding: "rgb8".into(),
+        is_bigendian: 0,
+        step: (w * 3) as u32,
+        data,
+    }
 }
 
 /// gray copy with marker outlines in white and the first corner in black

@@ -191,7 +191,8 @@ def setup(context):
     # it from creating a window under XWayland; keep the ROS library paths.
     if on('rviz'):
         actions.append(Node(package='rviz2', executable='rviz2', name='rviz2',
-                            arguments=['-d', PathJoinSubstitution([bringup, 'rviz', 'team7.rviz'])],
+                            # nav2 runs the stock Nav2 displays; team7 and lazy_nav2 run ours
+                            arguments=['-d', PathJoinSubstitution([bringup, 'rviz', 'stock.rviz' if nav == 'nav2' else 'team7.rviz'])],
                             additional_env=native_env, prefix=native_prefix))
     return actions
 

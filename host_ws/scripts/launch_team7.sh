@@ -91,20 +91,36 @@ class Relay(Node):
             self.pub.publish(out)
 rclpy.init(); rclpy.spin(Relay())
 PY
+  # the bag records static TF only at its start, so read it from the bag and keep it latched
   cat > "$TMP/static_relay.py" <<'PY'
+import sys
 import rclpy
+import rosbag2_py
 from rclpy.node import Node
+from rclpy.serialization import deserialize_message
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from tf2_msgs.msg import TFMessage
 latched = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+def read_static(bag):
+    r = rosbag2_py.SequentialReader()
+    r.open(rosbag2_py.StorageOptions(uri=bag, storage_id='mcap'), rosbag2_py.ConverterOptions('', ''))
+    out = []
+    while r.has_next():
+        topic, data, _ = r.read_next()
+        if topic == '/tf_static':
+            out.append(deserialize_message(data, TFMessage))
+    return out
 class R(Node):
-    def __init__(self):
+    def __init__(self, msgs):
         super().__init__('bag_static_relay')
+        self.msgs = msgs
         self.pub = self.create_publisher(TFMessage, '/tf_static', latched)
-        self.create_subscription(TFMessage, '/old_tf_static', self.cb, latched)
-    def cb(self, msg):
-        self.pub.publish(msg)
-rclpy.init(); rclpy.spin(R())
+        self.create_timer(1.0, self.publish_all)
+    def publish_all(self):
+        for m in self.msgs:
+            self.pub.publish(m)
+rclpy.init()
+rclpy.spin(R(read_static(sys.argv[1])))
 PY
   ros2 bag play "$BAG" --clock ${OFFSET:+--start-offset "$OFFSET"} \
     --exclude-topics /map /map_updates /map_metadata /global_costmap/costmap /global_costmap/costmap_updates \
@@ -115,7 +131,7 @@ PY
       --remap /tf:=/old_tf /tf_static:=/old_tf_static > "$TMP/bag.log" 2>&1 &
   PIDS+=($!)
   python3 "$TMP/tf_relay.py" > "$TMP/tf_relay.log" 2>&1 & PIDS+=($!)
-  python3 "$TMP/static_relay.py" > "$TMP/static_relay.log" 2>&1 & PIDS+=($!)
+  python3 "$TMP/static_relay.py" "$BAG" > "$TMP/static_relay.log" 2>&1 & PIDS+=($!)
   echo "replay: $BAG on ROS_DOMAIN_ID=$ROS_DOMAIN_ID (logs in $TMP)"
   sleep 3
 fi

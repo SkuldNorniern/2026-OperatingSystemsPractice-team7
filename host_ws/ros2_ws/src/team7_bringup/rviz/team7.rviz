@@ -34,7 +34,7 @@ Visualization Manager:
         Durability Policy: Transient Local
         Reliability Policy: Reliable
         Depth: 1
-      Color Scheme: costmap
+      Color Scheme: map
       Alpha: 1
       Value: true
     # local MPPI cost around the robot (team7 nav mode only): 100 = obstacle, 0 = >= 1 m away

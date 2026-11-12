@@ -174,22 +174,6 @@ Visualization Manager:
         Durability Policy: Volatile
         Depth: 5
       Value: true
-    - Class: rviz_default_plugins/Image
-      Name: ArUco debug
-      Enabled: false
-      Topic:
-        Value: /aruco_tracker/debug
-        Reliability Policy: Best Effort
-        Durability Policy: Volatile
-        Depth: 1
-      Value: true
-  Enabled: true
-  Global Options:
-    Background Color: 48; 48; 48
-    Fixed Frame: map
-    Frame Rate: 30
-  Name: root
-  Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Measure

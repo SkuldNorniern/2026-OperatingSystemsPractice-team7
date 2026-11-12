@@ -206,7 +206,7 @@ const DIGITS: [[u8; 5]; 10] = [
     [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
 
-/// draw a marker id with the 3x5 digit font, scaled 2x, top-left at (x0, y0)
+/// draw a marker id with the 3x5 digit font, scaled 3x, top-left at (x0, y0)
 fn draw_label(put: &mut dyn FnMut(f64, f64, [u8; 3]), x0: i64, y0: i64, text: &str, c: [u8; 3]) {
     let mut cx = x0;
     for ch in text.chars() {
@@ -215,15 +215,15 @@ fn draw_label(put: &mut dyn FnMut(f64, f64, [u8; 3]), x0: i64, y0: i64, text: &s
         for (ry, row) in glyph.iter().enumerate() {
             for rx in 0..3 {
                 if row & (0b100 >> rx) != 0 {
-                    for sy in 0..2 {
-                        for sx in 0..2 {
-                            put((cx + rx as i64 * 2 + sx) as f64, (y0 + ry as i64 * 2 + sy) as f64, c);
+                    for sy in 0..3 {
+                        for sx in 0..3 {
+                            put((cx + rx as i64 * 3 + sx) as f64, (y0 + ry as i64 * 3 + sy) as f64, c);
                         }
                     }
                 }
             }
         }
-        cx += 8;
+        cx += 12;
     }
 }
 
@@ -261,7 +261,12 @@ fn debug_image_color(rgb: Option<&(usize, usize, Vec<u8>)>, img: &GrayImage, mar
             let n = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
             for i in 0..=n {
                 let t = i as f64 / n as f64;
-                put(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, [0, 255, 0]);
+                let (x, y) = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        put(x + dx as f64, y + dy as f64, [0, 255, 0]);
+                    }
+                }
             }
         }
         for dy in -1..=1 {
@@ -271,7 +276,7 @@ fn debug_image_color(rgb: Option<&(usize, usize, Vec<u8>)>, img: &GrayImage, mar
         }
         let top = c.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
         let left = c.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
-        draw_label(&mut put, left as i64, top as i64 - 12, &mk.id.to_string(), [255, 255, 0]);
+        draw_label(&mut put, left as i64, top as i64 - 22, &mk.id.to_string(), [255, 255, 0]);
     }
     Image {
         header: header.clone(),

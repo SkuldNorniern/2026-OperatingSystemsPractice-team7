@@ -374,6 +374,11 @@ fn tick(
                 }
             }
             s.obstacles = Some(DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false));
+            // publish here, not in the MPPI branch: that branch needs a valid path
+            if let (Some(df), Ok(t)) = (s.obstacles.as_ref(), tf.lookup(&cfg.map_frame, &cfg.base_frame, Stamp::LATEST)) {
+                let r = Pose2::from_isometry(&t);
+                let _ = io.local.publish(&local_cost_msg(&cfg.map_frame, df, r.x, r.y, &now));
+            }
         }
     }
 

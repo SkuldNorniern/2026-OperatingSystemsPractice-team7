@@ -1,0 +1,214 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+      Alpha: 0.3
+      Reference Frame: map
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: map
+      Alpha: 0.9
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: Global costmap
+      Enabled: false
+      Topic:
+        Value: /global_costmap/costmap
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: costmap
+      Alpha: 0.5
+      Value: false
+    # local MPPI cost around the robot (team7 nav mode only): 100 = obstacle, 0 = >= 1 m away
+    - Class: rviz_default_plugins/Map
+      Name: MPPI local cost (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/mppi/local_cost
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: costmap
+      Alpha: 0.6
+      Value: true
+    # base_link axes instead of mesh model: tb4 .dae meshes are ~37 MB, slow rviz start
+    - Class: rviz_default_plugins/Axes
+      Name: Robot axes
+      Enabled: true
+      Reference Frame: base_link
+      Length: 0.3
+      Radius: 0.03
+      Value: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: Robot
+      Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Value: false
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 5
+      Size (m): 0.03
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: Nav2 plan
+      Enabled: true
+      Topic:
+        Value: /plan
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Color: 25; 255; 0
+      Line Width: 0.03
+      Line Style: Billboards
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Frontiers (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/frontiers
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Frontiers (explore_lite)
+      Enabled: true
+      Topic:
+        Value: /explore/frontiers
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan filtered
+      Enabled: false
+      Topic:
+        Value: /scan_filtered
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 5
+      Size (m): 0.03
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 200; 0
+      Value: false
+    - Class: rviz_default_plugins/Path
+      Name: Lazy Theta* path (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Color: 0; 200; 255
+      Line Width: 0.04
+      Line Style: Billboards
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: MPPI trajectory (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/mppi/trajectory
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Color: 255; 0; 255
+      Line Width: 0.03
+      Line Style: Billboards
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SLAM graph (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/slam/graph
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: ArUco debug (team7)
+      Enabled: false
+      Topic:
+        Value: /team7/aruco/debug
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Targets
+      Enabled: true
+      Topic:
+        Value: /team7/targets
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: ArUco debug
+      Enabled: true
+      Topic:
+        Value: /aruco_tracker/debug
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 60
+      X: 0
+      Y: 0
+      Target Frame: <Fixed Frame>
+      Value: TopDownOrtho (rviz_default_plugins)
+Window Geometry:
+  Width: 1400
+  Height: 900

@@ -82,7 +82,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/Path
       Name: Nav2 plan
-      Enabled: true
+      Enabled: false
       Topic:
         Value: /plan
         Reliability Policy: Reliable
@@ -103,7 +103,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Name: Frontiers (explore_lite)
-      Enabled: true
+      Enabled: false
       Topic:
         Value: /explore/frontiers
         Reliability Policy: Reliable

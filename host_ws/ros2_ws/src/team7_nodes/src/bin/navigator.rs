@@ -409,8 +409,7 @@ fn tick(
                     g.set(c, 100);
                 }
             }
-            let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);
-            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
+            let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
             let _ = io.global.publish(&global_cost_msg(&cfg.map_frame, m, &df, &now));
             s.obstacles = Some(df);
             // publish here, not in the MPPI branch: that branch needs a valid path

@@ -50,6 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let odom_frame = p.string("odom_frame", "odom");
     let base_frame = p.string("base_frame", "base_link");
     let map_period = Duration::from_secs_f64(p.f64("map_publish_period", 1.0));
+    // off: stamp map->odom slightly ahead of the clock (current live behaviour)
+    // on: stamp it with the latest scan time, so it lines up with the odometry
+    let scan_stamp_tf = p.f64("map_odom_scan_stamp", 0.0) > 0.5;
     let tf_period = Duration::from_secs_f64(p.f64("transform_publish_period", 0.05));
     log_info!(&log, "own slam on {scan_topic}, map every {:.1}s", map_period.as_secs_f64());
 
@@ -138,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ahead.sec += 1;
             }
             let mut t = TransformStamped::default();
-            t.header.stamp = ahead;
+            t.header.stamp = if scan_stamp_tf { s.last_stamp.clone() } else { ahead };
             t.header.frame_id = map_frame.clone();
             t.child_frame_id = odom_frame.clone();
             let pm = pose_msg(m2o.x, m2o.y, m2o.yaw);

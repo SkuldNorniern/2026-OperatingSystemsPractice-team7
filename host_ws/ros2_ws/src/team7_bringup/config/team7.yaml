@@ -97,6 +97,7 @@ slam:
     min_travel_yaw: 0.1
     max_range: 8.0
     map_publish_period: 1.0
+    map_odom_scan_stamp: 0.0  # 1.0 = stamp map->odom with the scan time (test on replay first); 0.0 = current live behaviour
     transform_publish_period: 0.05
 
 navigator:

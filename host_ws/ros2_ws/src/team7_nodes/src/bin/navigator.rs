@@ -75,7 +75,51 @@ struct Io {
     cmd: r2r::Publisher<TwistStamped>,
     path: r2r::Publisher<PathMsg>,
     traj: r2r::Publisher<PathMsg>,
+    local: r2r::Publisher<OccupancyGrid>,
     follow: ActionClient<Follow>,
+}
+
+/// Local MPPI cost layer: a LOCAL_WINDOW_M square around the robot, from the obstacle
+/// distance field MPPI scores against. 100 = touching an obstacle, falls to 0 at
+/// LOCAL_COST_RANGE_M, -1 (unknown) outside the mapped area.
+const LOCAL_WINDOW_M: f64 = 4.0;
+const LOCAL_COST_RANGE_M: f64 = 1.0;
+
+fn local_cost_msg(frame: &str, df: &DistanceField, cx: f64, cy: f64, now: &r2r::builtin_interfaces::msg::Time) -> OccupancyGrid {
+    let res = df.meta.resolution;
+    let n = (LOCAL_WINDOW_M / res).round() as u32;
+    let ox = cx - LOCAL_WINDOW_M / 2.0;
+    let oy = cy - LOCAL_WINDOW_M / 2.0;
+    let m = &df.meta;
+    let mut data = Vec::with_capacity((n * n) as usize);
+    for j in 0..n {
+        for i in 0..n {
+            let x = ox + (i as f64 + 0.5) * res;
+            let y = oy + (j as f64 + 0.5) * res;
+            let inside = x >= m.origin_x && y >= m.origin_y
+                && x < m.origin_x + m.width as f64 * res
+                && y < m.origin_y + m.height as f64 * res;
+            // circular window: cells beyond half the window (from the robot) stay unknown
+            let (dx, dy) = (x - cx, y - cy);
+            let in_circle = dx * dx + dy * dy <= (LOCAL_WINDOW_M / 2.0).powi(2);
+            let v = if !inside || !in_circle {
+                -1
+            } else {
+                let d = df.at(x, y) as f64;
+                (100.0 * (1.0 - d / LOCAL_COST_RANGE_M)).clamp(0.0, 100.0).round() as i8
+            };
+            data.push(v);
+        }
+    }
+    let mut g = OccupancyGrid::default();
+    g.header.frame_id = frame.to_owned();
+    g.header.stamp = now.clone();
+    g.info.resolution = res as f32;
+    g.info.width = n;
+    g.info.height = n;
+    g.info.origin = pose_msg(ox, oy, 0.0);
+    g.data = data;
+    g
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -279,6 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cmd: node.create_publisher::<TwistStamped>(&cmd_topic, QosProfile::default())?,
         path: node.create_publisher::<PathMsg>("/team7/path", QosProfile::default())?,
         traj: node.create_publisher::<PathMsg>("/team7/mppi/trajectory", QosProfile::default())?,
+        local: node.create_publisher::<OccupancyGrid>("/team7/mppi/local_cost", QosProfile::default())?,
         follow: node.create_action_client::<Follow>(&follow_action)?,
     });
 
@@ -426,6 +471,9 @@ fn tick(
             s.obstacles = obstacles;
             let traj: Vec<(f64, f64)> = s.mppi.optimal_trajectory().iter().map(|p| (p.x, p.y)).collect();
             let _ = io.traj.publish(&path_msg(&cfg.map_frame, &traj, &now));
+            if let Some(df) = s.obstacles.as_ref() {
+                let _ = io.local.publish(&local_cost_msg(&cfg.map_frame, df, robot.x, robot.y, &now));
+            }
             if cmd.goal_reached {
                 finish(&mut s, true, "reached");
                 stop(&mut s, io, cfg, &now);

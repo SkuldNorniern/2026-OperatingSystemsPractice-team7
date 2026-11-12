@@ -97,10 +97,14 @@ fn global_cost_msg(frame: &str, map: &Grid, df: &DistanceField, now: &r2r::built
                 return -1;
             }
             let d = d as f64;
+            // obstacle core and inflation band sit in the upper part of the 0..100 range so the
+            // RViz costmap palette draws them clearly; free space stays 0
             if d <= GLOBAL_LETHAL_M {
                 100
+            } else if d <= GLOBAL_LETHAL_M + GLOBAL_INFLATE_M {
+                (60.0 + 40.0 * (1.0 - (d - GLOBAL_LETHAL_M) / GLOBAL_INFLATE_M)).round() as i8
             } else {
-                (100.0 * (1.0 - (d - GLOBAL_LETHAL_M) / GLOBAL_INFLATE_M)).clamp(0.0, 100.0).round() as i8
+                0
             }
         })
         .collect();

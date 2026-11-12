@@ -4,6 +4,7 @@
 #   --stock: the committed HEAD of this repo (rust_base), built into a cache, with the stock
 #            launch defaults (Nav2 navigation, slam_toolbox). set TEAM7_REV to pin another commit.
 #   --replay BAG_DIR: test on a recorded run instead of the robot (bag clock, TF relayed)
+#   --start-offset SEC: with --replay, start the bag SEC seconds in (e.g. where /odom starts)
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2 or explorer:=none
 set -euo pipefail
 
@@ -11,6 +12,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 WS="$HERE/../ros2_ws"
 BAG=""
+OFFSET=""
 STOCK=false
 EXTRA=()
 LAUNCH_ARGS=(use_sim_time:=false nav:=team7 slam_backend:=team7)
@@ -19,6 +21,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --stock) STOCK=true ;;
     --replay) BAG="${2:?--replay needs a bag directory}"; shift ;;
+    --start-offset) OFFSET="${2:?--start-offset needs seconds}"; shift ;;
     --help|-h) sed -n 2,8p "$0"; exit 0 ;;
     *) EXTRA+=("$1") ;;
   esac
@@ -103,7 +106,7 @@ class R(Node):
         self.pub.publish(msg)
 rclpy.init(); rclpy.spin(R())
 PY
-  ros2 bag play "$BAG" --clock \
+  ros2 bag play "$BAG" --clock ${OFFSET:+--start-offset "$OFFSET"} \
     --exclude-topics /map /map_updates /map_metadata /global_costmap/costmap /global_costmap/costmap_updates \
       /global_costmap/costmap_raw /local_costmap/costmap /local_costmap/costmap_updates /local_costmap/costmap_raw \
       /plan /received_global_plan /cmd_vel /cmd_vel_nav /cmd_vel_smoothed /cmd_vel_filtered /cmd_vel_unstamped \

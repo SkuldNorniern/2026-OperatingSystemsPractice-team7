@@ -37,6 +37,18 @@ Visualization Manager:
       Color Scheme: costmap
       Alpha: 0.5
       Value: false
+    # local MPPI cost around the robot (team7 nav mode only): 100 = obstacle, 0 = >= 1 m away
+    - Class: rviz_default_plugins/Map
+      Name: MPPI local cost (team7)
+      Enabled: true
+      Topic:
+        Value: /team7/mppi/local_cost
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: costmap
+      Alpha: 0.6
+      Value: true
     # base_link axes instead of mesh model: tb4 .dae meshes are ~37 MB, slow rviz start
     - Class: rviz_default_plugins/Axes
       Name: Robot axes

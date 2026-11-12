@@ -363,7 +363,8 @@ fn tick(
         s.cspace = Some(cs);
         s.map_dirty = false;
     }
-    if cfg.mode == Mode::Mppi && s.goal.is_some() && s.last_obstacles.elapsed() >= cfg.obstacle_period {
+    // built even without a goal, so the local MPPI layer is up from the start
+    if cfg.mode == Mode::Mppi && s.last_obstacles.elapsed() >= cfg.obstacle_period {
         s.last_obstacles = Instant::now();
         if let Some(m) = s.map.as_ref() {
             let mut g = m.clone();

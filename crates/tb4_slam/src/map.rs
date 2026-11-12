@@ -1,6 +1,8 @@
 use tb4_core::{Grid, GridMeta, Pose2, grid::UNKNOWN};
 
 const GROW_PAD: i32 = 64;
+/// half-width of the square the exported map always covers, metres around the map origin
+const EXPORT_ANCHOR_M: f64 = 10.0;
 
 /// Growable dense log-odds grid indexed by global cell (floor(x / res)).
 #[derive(Debug, Clone)]
@@ -211,10 +213,14 @@ impl LogOddsMap {
     }
 
     pub fn to_grid(&self, occ: f32, free: f32, margin: i32) -> Grid {
-        let Some(b) = self.bbox else {
-            return Grid::filled(self.meta([0, 0, 0, 0]), UNKNOWN);
+        // the exported grid always covers EXPORT_ANCHOR_M around the map origin (start pose),
+        // so its origin does not move each time the observed area grows inside that square
+        let r = (EXPORT_ANCHOR_M / self.res).ceil() as i32;
+        let base = match self.bbox {
+            Some(o) => [o[0].min(-r), o[1].min(-r), o[2].max(r), o[3].max(r)],
+            None => [-r, -r, r, r],
         };
-        let b = [b[0] - margin, b[1] - margin, b[2] + margin, b[3] + margin];
+        let b = [base[0] - margin, base[1] - margin, base[2] + margin, base[3] + margin];
         self.render(b, |v| {
             if v > occ {
                 100

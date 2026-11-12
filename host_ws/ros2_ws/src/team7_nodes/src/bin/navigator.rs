@@ -398,6 +398,11 @@ fn tick(
         finish(&mut s, false, "dropped: mission done");
     }
     let Some(g) = s.goal.as_ref() else {
+        // no goal: still show the local MPPI layer around the robot
+        if let (Some(df), Ok(t)) = (s.obstacles.as_ref(), tf.lookup(&cfg.map_frame, &cfg.base_frame, Stamp::LATEST)) {
+            let r = Pose2::from_isometry(&t);
+            let _ = io.local.publish(&local_cost_msg(&cfg.map_frame, df, r.x, r.y, &now));
+        }
         stop(&mut s, io, cfg, &now);
         return;
     };

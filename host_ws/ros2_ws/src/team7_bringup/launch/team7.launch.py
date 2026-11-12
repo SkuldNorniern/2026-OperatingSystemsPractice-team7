@@ -74,6 +74,15 @@ def native_library_environment():
         environment['QT_QPA_PLATFORM'] = 'xcb'
     return environment, prefix
 
+TEAM7_ONLY_DISPLAYS = ['MPPI local cost (team7)', 'Frontiers (team7)', 'Lazy Theta* path (team7)',
+                       'MPPI trajectory (team7)', 'SLAM graph (team7)', 'ArUco debug (team7)']
+STOCK_ONLY_DISPLAYS = ['Nav2 plan', 'Frontiers (explore_lite)', 'ArUco debug']
+
+def rviz_config_for(nav, aruco_be):
+    """Base RViz config: stock.rviz for nav2, team7.rviz otherwise. No per-run generation."""
+    base = 'stock.rviz' if nav == 'nav2' else 'team7.rviz'
+    return os.path.join(get_package_share_directory('team7_bringup'), 'rviz', base)
+
 def setup(context):
     bringup = FindPackageShare('team7_bringup')
     tb4_nav = FindPackageShare('turtlebot4_navigation')
@@ -191,8 +200,7 @@ def setup(context):
     # it from creating a window under XWayland; keep the ROS library paths.
     if on('rviz'):
         actions.append(Node(package='rviz2', executable='rviz2', name='rviz2',
-                            # nav2 runs the stock Nav2 displays; team7 and lazy_nav2 run ours
-                            arguments=['-d', PathJoinSubstitution([bringup, 'rviz', 'stock.rviz' if nav == 'nav2' else 'team7.rviz'])],
+                            arguments=['-d', rviz_config_for(nav, aruco_be)],
                             additional_env=native_env, prefix=native_prefix))
     return actions
 

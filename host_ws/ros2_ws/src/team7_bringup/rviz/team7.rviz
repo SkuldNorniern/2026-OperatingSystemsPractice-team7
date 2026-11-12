@@ -28,7 +28,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/Map
       Name: Global costmap
-      Enabled: false
+      Enabled: true
       Topic:
         Value: /global_costmap/costmap
         Durability Policy: Transient Local

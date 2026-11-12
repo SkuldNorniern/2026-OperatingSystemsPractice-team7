@@ -15,7 +15,7 @@ BAG=""
 OFFSET=""
 STOCK=false
 EXTRA=()
-LAUNCH_ARGS=(use_sim_time:=false nav:=team7 slam_backend:=team7)
+LAUNCH_ARGS=(use_sim_time:=false nav:=team7 slam_backend:=team7 aruco:=team7)
 
 while [ $# -gt 0 ]; do
   case "$1" in

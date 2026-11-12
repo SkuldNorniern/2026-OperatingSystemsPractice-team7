@@ -68,7 +68,7 @@ trap cleanup EXIT INT TERM
 
 if [ -n "$BAG" ]; then
   export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-79}"
-  LAUNCH_ARGS=("${LAUNCH_ARGS[@]/use_sim_time:=false/use_sim_time:=true}")
+  LAUNCH_ARGS=("${LAUNCH_ARGS[@]/use_sim_time:=false/use_sim_time:=true}" record:=false)
   TMP="$(mktemp -d)"
   # the recorded TF has map->odom from an old SLAM; relay it without the map frame
   # and forward the static TF, so the live SLAM owns map->odom.

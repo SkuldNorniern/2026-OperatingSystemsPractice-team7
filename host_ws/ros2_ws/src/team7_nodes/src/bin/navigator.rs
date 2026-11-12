@@ -54,6 +54,7 @@ struct State {
     cspace: Option<CSpace>,
     obstacles: Option<DistanceField>,
     last_obstacles: Instant,
+    last_global: Instant,
     scan_points: Vec<(f64, f64)>,
     v: f64,
     w: f64,
@@ -224,6 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cspace: None,
         obstacles: None,
         last_obstacles: Instant::now() - Duration::from_secs(10),
+        last_global: Instant::now() - Duration::from_secs(10),
         scan_points: Vec::new(),
         v: 0.0,
         w: 0.0,
@@ -402,6 +404,8 @@ fn tick(
     // built even without a goal, so the local MPPI layer is up from the start
     if cfg.mode == Mode::Mppi && s.last_obstacles.elapsed() >= cfg.obstacle_period {
         s.last_obstacles = Instant::now();
+        let global_due = s.last_global.elapsed() >= Duration::from_secs(1);
+        let mut global_sent = false;
         if let Some(m) = s.map.as_ref() {
             let mut g = m.clone();
             for &(x, y) in &s.scan_points {
@@ -410,13 +414,20 @@ fn tick(
                 }
             }
             let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
-            let _ = io.global.publish(&global_cost_msg(&cfg.map_frame, m, &df, &now));
+            // the costmap is big and only changes with the map: publish about once a second
+            if global_due {
+                global_sent = true;
+                let _ = io.global.publish(&global_cost_msg(&cfg.map_frame, m, &df, &now));
+            }
             s.obstacles = Some(df);
             // publish here, not in the MPPI branch: that branch needs a valid path
             if let (Some(df), Ok(t)) = (s.obstacles.as_ref(), tf.lookup(&cfg.map_frame, &cfg.base_frame, Stamp::LATEST)) {
                 let r = Pose2::from_isometry(&t);
                 let _ = io.local.publish(&local_cost_msg(&cfg.map_frame, df, r.x, r.y, &now));
             }
+        }
+        if global_sent {
+            s.last_global = Instant::now();
         }
     }
 

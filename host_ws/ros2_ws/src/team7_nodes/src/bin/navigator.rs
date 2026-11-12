@@ -76,7 +76,42 @@ struct Io {
     path: r2r::Publisher<PathMsg>,
     traj: r2r::Publisher<PathMsg>,
     local: r2r::Publisher<OccupancyGrid>,
+    global: r2r::Publisher<OccupancyGrid>,
     follow: ActionClient<Follow>,
+}
+
+/// team7 global costmap: 100 within GLOBAL_LETHAL_M of an obstacle, falling to 0 over GLOBAL_INFLATE_M,
+/// -1 where the map is unknown. Whole mapped area, same frame as /map.
+const GLOBAL_LETHAL_M: f64 = 0.2;
+const GLOBAL_INFLATE_M: f64 = 0.5;
+
+fn global_cost_msg(frame: &str, map: &Grid, df: &DistanceField, now: &r2r::builtin_interfaces::msg::Time) -> OccupancyGrid {
+    let m = &df.meta;
+    let data: Vec<i8> = df
+        .dist
+        .iter()
+        .enumerate()
+        .map(|(k, &d)| {
+            if map.data[k] < 0 {
+                return -1;
+            }
+            let d = d as f64;
+            if d <= GLOBAL_LETHAL_M {
+                100
+            } else {
+                (100.0 * (1.0 - (d - GLOBAL_LETHAL_M) / GLOBAL_INFLATE_M)).clamp(0.0, 100.0).round() as i8
+            }
+        })
+        .collect();
+    let mut g = OccupancyGrid::default();
+    g.header.frame_id = frame.to_owned();
+    g.header.stamp = now.clone();
+    g.info.resolution = m.resolution as f32;
+    g.info.width = m.width;
+    g.info.height = m.height;
+    g.info.origin = pose_msg(m.origin_x, m.origin_y, 0.0);
+    g.data = data;
+    g
 }
 
 /// Local MPPI cost layer: a LOCAL_WINDOW_M square around the robot, from the obstacle
@@ -324,6 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         path: node.create_publisher::<PathMsg>("/team7/path", QosProfile::default())?,
         traj: node.create_publisher::<PathMsg>("/team7/mppi/trajectory", QosProfile::default())?,
         local: node.create_publisher::<OccupancyGrid>("/team7/mppi/local_cost", QosProfile::default())?,
+        global: node.create_publisher::<OccupancyGrid>("/global_costmap/costmap", QosProfile::default().reliable().transient_local())?,
         follow: node.create_action_client::<Follow>(&follow_action)?,
     });
 
@@ -373,7 +409,10 @@ fn tick(
                     g.set(c, 100);
                 }
             }
-            s.obstacles = Some(DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false));
+            let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);
+            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
+            let _ = io.global.publish(&global_cost_msg(&cfg.map_frame, m, &df, &now));
+            s.obstacles = Some(df);
             // publish here, not in the MPPI branch: that branch needs a valid path
             if let (Some(df), Ok(t)) = (s.obstacles.as_ref(), tf.lookup(&cfg.map_frame, &cfg.base_frame, Stamp::LATEST)) {
                 let r = Pose2::from_isometry(&t);

@@ -154,7 +154,8 @@ def setup(context):
             Node(package='nav2_collision_monitor', executable='collision_monitor', name='collision_monitor',
                  parameters=[cfg('collision_monitor_team7.yaml'), sim], output='screen'),
             Node(package='nav2_lifecycle_manager', executable='lifecycle_manager', name='lifecycle_manager_safety',
-                 parameters=[sim, {'autostart': True, 'node_names': ['velocity_smoother', 'collision_monitor']}],
+                 parameters=[sim, {'autostart': True, 'node_names': ['velocity_smoother', 'collision_monitor'],
+                                   'bond_timeout': 10.0}],
                  output='screen'),
         ]
 

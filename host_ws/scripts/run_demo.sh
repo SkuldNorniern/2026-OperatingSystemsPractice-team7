@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
-# usage: run_demo.sh [--no-prepare] [launch args]. put robot on start pose first
+# usage: run_demo.sh [--no-prepare] [--replay BAG_DIR [--start-offset SEC]] [name:=value ...]
+#   default: live robot. put the robot on its start pose first.
+#   --replay BAG_DIR: play a recorded run instead (no robot checks, undock or odometry reset);
+#                     this runs launch_team7.sh --replay with the same name:=value args.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$HERE/../ros2_ws"
 PREPARE_ROBOT=true
+REPLAY_BAG=""
+REPLAY_OFFSET=""
 LAUNCH_ARGS=()
-for argument in "$@"; do
-  case "$argument" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-prepare) PREPARE_ROBOT=false ;;
+    --replay) REPLAY_BAG="${2:?--replay needs a bag directory}"; shift ;;
+    --start-offset) REPLAY_OFFSET="${2:?--start-offset needs seconds}"; shift ;;
     --help|-h)
-      echo 'usage: run_demo.sh [--no-prepare] [name:=value ...]'
+      echo 'usage: run_demo.sh [--no-prepare] [--replay BAG_DIR [--start-offset SEC]] [name:=value ...]'
       echo '--no-prepare skips undock/reset; use explorer:=none mission:=false for stationary diagnostics.'
+      echo '--replay runs a recorded bag through launch_team7.sh (no robot needed).'
       exit 0 ;;
-    *) LAUNCH_ARGS+=("$argument") ;;
+    *) LAUNCH_ARGS+=("$1") ;;
   esac
+  shift
 done
-set -- "${LAUNCH_ARGS[@]}"
+
+if [ -n "$REPLAY_BAG" ]; then
+  # launch_team7.sh owns the replay setup (domain 79, TF relays, excluded topics, run lock)
+  exec "$HERE/launch_team7.sh" --replay "$REPLAY_BAG" \
+    ${REPLAY_OFFSET:+--start-offset "$REPLAY_OFFSET"} ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}
+fi
+set -- ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}
 
 # Two launches would publish competing TF and velocity commands to one robot.
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/team7_demo_${UID}.lock"

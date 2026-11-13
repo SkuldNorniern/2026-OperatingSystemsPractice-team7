@@ -26,6 +26,7 @@ Use one approach or the other. Running the course script turns off chrony on the
 | `tb4_host_timeserver.sh` | Laptop | Makes the laptop an NTP server for the robot subnet |
 | `tb4_rpi_timesync.sh` | RPi | Makes the RPi follow the laptop and keep serving time to the Create3 |
 | `tb4_timecheck.sh` | Laptop | Measures `/odom` and `/scan` stamp offsets (read-only) |
+| `tb4_push_timesync.sh` | Laptop | Sets up the laptop server, sends `tb4_rpi_timesync.sh` to the RPi, runs its setup and checks it |
 
 ## Setup (once)
 
@@ -47,6 +48,17 @@ Use one approach or the other. Running the course script turns off chrony on the
    ```
 
 3. Check that the Create3 uses the RPi as its time server. In the Create3 web UI (`http://192.168.186.2`, reachable from the RPi), its NTP configuration should contain `server 192.168.186.3 iburst`. This is the TurtleBot4 default. If you change it, restart the Create3 application.
+
+### One-command setup (laptop)
+
+`tb4_push_timesync.sh` does steps 1 and 2 for you: it sets up the laptop server if needed, finds the laptop IP on the robot route, copies `tb4_rpi_timesync.sh` to the RPi, runs `setup` there, and checks the result.
+
+```bash
+./tb4_push_timesync.sh            # push + setup + check (asks for the robot password)
+./tb4_push_timesync.sh status     # check only
+```
+
+Override `TB4_HOST`, `TB4_USER` or `TB4_SUBNET` if the robot differs from the defaults. Passwords are not stored; use SSH keys to avoid prompts.
 
 ## Daily use
 

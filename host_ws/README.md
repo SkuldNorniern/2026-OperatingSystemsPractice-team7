@@ -1,12 +1,14 @@
 # host_ws
 
+장애물·끼임 관리의 담당 범위, 입출력 초안과 독립 테스트 방법은 [NAV_SAFETY.md](NAV_SAFETY.md)를 참고하세요.
+
 laptop workspace. laptop sits on the robot (Ubuntu 24.04, Jazzy) and runs SLAM, Nav2, aruco, exploration, mission and RViz.
 pi only runs factory TurtleBot 4 drivers.
 
 ```
 ros2_ws/
   team7.repos            vcs import list
-  src/team7_nodes/       rclc nodes: marker_mapper, explorer, mission. links ../../../../libtb4
+  src/team7_nodes/       rclc nodes: marker_mapper, explorer, mission, nav_safety. links ../../../../libtb4
   src/team7_bringup/     launch/team7.launch.py, config/*.yaml, rviz/team7.rviz
   src/external/          m-explore-ros2 from team7.repos (git ignored)
 scripts/run_demo.sh      undock if docked, reset odom, launch

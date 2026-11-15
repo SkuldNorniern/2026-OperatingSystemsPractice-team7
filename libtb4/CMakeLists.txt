@@ -16,7 +16,8 @@ add_library(tb4 STATIC
   src/grid.c
   src/tf.c
   src/explore.c
-  src/markers.c)
+  src/markers.c
+  src/nav_safety.c)
 add_library(tb4::tb4 ALIAS tb4)
 target_include_directories(tb4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(tb4 PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
@@ -34,4 +35,7 @@ if(TB4_BUILD_TESTS)
   add_executable(test_tb4 tests/test_tb4.c)
   target_link_libraries(test_tb4 PRIVATE tb4)
   add_test(NAME test_tb4 COMMAND test_tb4)
+  add_executable(test_nav_safety tests/test_nav_safety.c)
+  target_link_libraries(test_nav_safety PRIVATE tb4)
+  add_test(NAME test_nav_safety COMMAND test_nav_safety)
 endif()

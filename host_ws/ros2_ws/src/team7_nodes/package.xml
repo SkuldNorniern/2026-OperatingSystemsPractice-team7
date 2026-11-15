@@ -3,7 +3,7 @@
 <package format="3">
   <name>team7_nodes</name>
   <version>0.1.0</version>
-  <description>Team 7 C nodes (rclc): ArUco target mapper, frontier explorer, mission controller</description>
+  <description>Team 7 C nodes (rclc): ArUco target mapper, frontier explorer, mission controller, obstacle and stuck monitor</description>
   <maintainer email="skuldnorniern@kookmin.ac.kr">Eira</maintainer>
   <license>MIT</license>
 
@@ -18,6 +18,7 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>tf2_msgs</depend>
   <depend>action_msgs</depend>

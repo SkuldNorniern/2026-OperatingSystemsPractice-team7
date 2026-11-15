@@ -40,3 +40,21 @@ mission:
     map_name: map
     map_topic: /map
     nav_action: /navigate_to_pose
+
+# Detection only: movement manager consumes /team7/nav/safety and controls Nav2.
+nav_safety:
+  ros__parameters:
+    base_frame: base_link
+    odom_frame: odom
+    check_header_stamp: true  # hardware wall clock; false for simulation/bag replay
+    input_timeout: 1.0
+    active_timeout: 2.0
+    progress_timeout: 8.0
+    blocked_timeout: 5.0
+    progress_distance: 0.05
+    progress_angle: 0.15
+    min_linear: 0.02
+    min_angular: 0.05
+    robot_radius: 0.19
+    safety_margin: 0.05
+    lookahead: 1.2

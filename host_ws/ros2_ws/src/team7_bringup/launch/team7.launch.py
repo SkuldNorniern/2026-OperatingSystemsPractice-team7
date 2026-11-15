@@ -12,6 +12,7 @@ ARGS = [
     ('rviz', 'true', 'Start RViz'),
     ('slam', 'true', 'Start slam_toolbox (online mapping)'),
     ('nav2', 'true', 'Start Nav2'),
+    ('nav_safety', 'false', 'Start advisory monitor (requires movement-manager integration)'),
     ('mission', 'true', 'Start the mission node (timer, stop, map save)'),
     ('output_dir', '~/team7_run', 'Where map.pgm/.yaml and targets.csv are written'),
     ('camera_topic', '/oakd/rgb/preview/image_raw', 'Image topic for ArUco detection'),
@@ -57,6 +58,12 @@ def generate_launch_description():
         parameters=[team7_yaml, out_dir], output='screen',
     )
 
+    nav_safety = Node(
+        package='team7_nodes', executable='nav_safety', name='nav_safety',
+        parameters=[team7_yaml], output='screen',
+        condition=IfCondition(arg('nav_safety')),
+    )
+
     mission = Node(
         package='team7_nodes', executable='mission', name='mission',
         parameters=[team7_yaml, out_dir, {
@@ -89,5 +96,5 @@ def generate_launch_description():
 
     return LaunchDescription(
         [DeclareLaunchArgument(n, default_value=d, description=h) for n, d, h in ARGS]
-        + [sim_time, slam, nav2, aruco, marker_mapper, mission, explorers, rviz]
+        + [sim_time, slam, nav2, aruco, marker_mapper, nav_safety, mission, explorers, rviz]
     )

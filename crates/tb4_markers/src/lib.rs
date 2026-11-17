@@ -504,23 +504,31 @@ pub fn fuse(v: &[Estimate]) -> Fused {
         let s = v.first().map_or(f64::INFINITY, |e| e.sigma_along.max(e.sigma_across));
         return Fused { x: med.0, y: med.1, sigma: s, consistency: 0.0 };
     }
-    let info = |e: &Estimate| {
+    // along info divided by `shared`
+    let info = |e: &Estimate, shared: f64| {
         let (ux, uy) = e.dir;
-        let (a, c) = (1.0 / e.sigma_along.max(1e-3).powi(2), 1.0 / e.sigma_across.max(1e-3).powi(2));
+        let (a, c) = (1.0 / (shared * e.sigma_along.max(1e-3).powi(2)), 1.0 / e.sigma_across.max(1e-3).powi(2));
         // a u u^T + c n n^T with n = (-uy, ux)
         (a * ux * ux + c * uy * uy, (a - c) * ux * uy, a * uy * uy + c * ux * ux)
     };
     const K: f64 = 2.0;
     let dist = |x: (f64, f64), e: &Estimate| {
-        let (j11, j12, j22) = info(e);
+        let (j11, j12, j22) = info(e, 1.0);
         let (ex, ey) = (x.0 - e.x, x.1 - e.y);
         (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt()
     };
-    // weighted least squares step, weight per view from its distance (None = all 1)
+    // pnp range is off by the unknown marker size, the same factor in every view. more pnp views
+    // do not average that out, so for the spread all of them together count as one view along the
+    // ray: pnp alone never gets tight, bearings from different places (or a wall hit) have to.
+    // position still uses each view as before
+    let pnp_views = v.iter().filter(|e| e.source == Source::PnpRange).count().max(1) as f64;
+    // weighted least squares step, weight per view from its distance (None = all 1).
+    // returns new position and its covariance
     let step = |x: Option<(f64, f64)>, hard: bool| {
         let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut s11, mut s12, mut s22) = (0.0, 0.0, 0.0);
         for e in v {
-            let (j11, j12, j22) = info(e);
+            let (j11, j12, j22) = info(e, 1.0);
             let w = match x.map(|x| dist(x, e)) {
                 None => 1.0,
                 Some(d) if d <= K => 1.0,
@@ -532,9 +540,15 @@ pub fn fuse(v: &[Estimate]) -> Fused {
             a22 += w * j22;
             b1 += w * (j11 * e.x + j12 * e.y);
             b2 += w * (j12 * e.x + j22 * e.y);
+            let (k11, k12, k22) = info(e, if e.source == Source::PnpRange { pnp_views } else { 1.0 });
+            s11 += w * k11;
+            s12 += w * k12;
+            s22 += w * k22;
         }
         let det = a11 * a22 - a12 * a12;
-        (det.abs() >= 1e-12).then(|| (((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det), (a22 / det, -a12 / det, a11 / det)))
+        let sdet = s11 * s22 - s12 * s12;
+        let cov = if sdet.abs() >= 1e-12 { (s22 / sdet, -s12 / sdet, s11 / sdet) } else { (f64::INFINITY, 0.0, f64::INFINITY) };
+        (det.abs() >= 1e-12).then(|| (((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det), cov))
     };
     // huber first, then drop views past 3K so far outliers stop pulling at all
     let solve = |mut x: (f64, f64)| {
@@ -571,7 +585,16 @@ pub fn fuse(v: &[Estimate]) -> Fused {
     let (x, cov, _) = best;
     let tr = cov.0 + cov.2;
     let l = tr / 2.0 + ((cov.0 - cov.2).powi(2) / 4.0 + cov.1 * cov.1).sqrt();
-    let ds: Vec<f64> = v.iter().map(|e| dist(x, e)).collect();
+    // same for agreement: a pnp view short or long along its ray is the marker size, not a view
+    // that disagrees. across the ray it has to fit like any other
+    let ds: Vec<f64> = v
+        .iter()
+        .map(|e| {
+            let (j11, j12, j22) = info(e, if e.source == Source::PnpRange { pnp_views } else { 1.0 });
+            let (ex, ey) = (x.0 - e.x, x.1 - e.y);
+            (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt()
+        })
+        .collect();
     Fused { x: x.0, y: x.1, sigma: l.max(0.0).sqrt(), consistency: median(ds) }
 }
 

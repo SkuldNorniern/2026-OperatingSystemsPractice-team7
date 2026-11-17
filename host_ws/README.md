@@ -107,7 +107,7 @@ run_demo.sh nav:=team7 slam_backend:=team7 aruco:=team7       # all ours, Nav2 n
 | `scan_filter` | `true` | /scan -> /scan_filtered (range, median, outlier, deskew) for SLAM |
 
 aruco_opencv needs reliable camera_info, our detector takes both reliable and best effort.
-our detector reads `<camera_topic>/compressed` (jpeg) by default like aruco_opencv, `marker_dict` in team7.yaml must match aruco.yaml (6X6_250 for test markers 10, 11, ARUCO_ORIGINAL in task sheet). all OpenCV predefined dictionaries work, names as in OpenCV without `DICT_`. bit correction is capped per dictionary so big ones like 4X4_1000 dont match random squares.
+our detector reads `<camera_topic>/compressed` (jpeg) by default like aruco_opencv. launch arg `marker_dict` sets the dictionary of both detectors, default `ARUCO_ORIGINAL` as in task sheet. our test prints (ids 10, 11) are 6X6_250, so practice runs with them need `marker_dict:=6X6_250`. all OpenCV predefined dictionaries work, names as in OpenCV without `DICT_`. bit correction is capped per dictionary so big ones like 4X4_1000 dont match random squares.
 marker_mapper writes every detection to `observations.csv` in output dir. `cargo run --release -p tb4_markers --example replay -- <run dir> map` reruns tracker on it offline.
 
 in nav:=team7 our MPPI still goes through nav2 velocity_smoother, collision_monitor and velocity_guard (cmd_vel_nav -> cmd_vel_filtered -> cmd_vel), same as nav2 controller. navigator vx_max/wz_max match guard (0.18 m/s, 0.5 rad/s).
@@ -132,8 +132,9 @@ costmaps, compressed camera images and calibration, detections, frontier and
 selected-goal topics, navigation feedback/status, velocity commands, hazards,
 diagnostics and ROS log messages. Raw camera images are deliberately omitted
 to avoid adding a high-bandwidth Wi-Fi subscriber. The detector also uses
-compressed camera transport; its dictionary is `6X6_250` for the observed IDs
-10 and 11.
+compressed camera transport; its dictionary is the `marker_dict` launch
+argument (`ARUCO_ORIGINAL` by default, `6X6_250` for the test prints with IDs
+10 and 11).
 
 For a stationary check that records without undocking, resetting odometry, or
 sending exploration goals:
@@ -197,6 +198,7 @@ our parts show up too: Lazy Theta* path (cyan), MPPI predicted trajectory (magen
 | `explorer` | `team7` | `team7`, `explore_lite` or `none` |
 | `output_dir` | `~/team7_run` | |
 | `camera_topic` | `/oakd/rgb/preview/image_raw` | frame `oakd_rgb_camera_optical_frame` |
+| `marker_dict` | `ARUCO_ORIGINAL` | both detectors. `6X6_250` for our test prints |
 | `marker_size` | `0.10` | only for PnP fallback |
 | `time_limit` | `590.0` | seconds |
 | `expected_targets` | `3` | |

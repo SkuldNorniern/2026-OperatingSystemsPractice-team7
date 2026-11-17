@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // compressed: subscribe <image_topic>/compressed (jpeg), less wifi load than raw
     let compressed = p.string("image_transport", "compressed") == "compressed";
-    let dict_name = p.string("marker_dict", "6X6_250");
+    let dict_name = p.string("marker_dict", "ARUCO_ORIGINAL");
     let Some(dict) = Dictionary::by_name(&dict_name) else {
         return Err(format!("unknown marker_dict {dict_name}, one of {}", Dictionary::names().join(" ")).into());
     };

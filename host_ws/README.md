@@ -179,7 +179,7 @@ clears costmaps and waits; it does not back up or spin automatically. These limi
 apply to this navigation pipeline; a separate publisher directly on `/cmd_vel`
 would bypass the guard.
 
-run stops when 3 ids are confirmed or `time_limit` (590 s) is over. mission cancels Nav2 goals, stops explore_lite and saves:
+run stops when 3 ids are confirmed at the same time or `time_limit` (590 s) is over. an id marker_mapper drops again (LOST) stops counting, so "all targets found" always has 3 rows in targets.csv. mission cancels Nav2 goals, stops explore_lite and saves:
 
 ```
 ~/team7_runs/<timestamp>/map.pgm, map.yaml    final map, map_autosave.* every 60 s

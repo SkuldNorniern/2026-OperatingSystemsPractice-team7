@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use tb4_core::grid::Grid;
@@ -282,6 +282,41 @@ pub struct Target {
     pub views: usize,
     pub spread: f64,
     pub confirmed: bool,
+}
+
+/// RViz marker namespaces on /team7/targets
+pub const NS_CONFIRMED: &str = "target_confirmed";
+pub const NS_TENTATIVE: &str = "target_tentative";
+
+impl Target {
+    pub fn ns(&self) -> &'static str {
+        if self.confirmed { NS_CONFIRMED } else { NS_TENTATIVE }
+    }
+}
+
+/// ids mission counts as found, from /team7/targets. marker_mapper sends every target on each
+/// message, so the latest one replaces the set: an id whose confirmation was withdrawn (LOST)
+/// drops out and the count stays equal to the rows in targets.csv
+#[derive(Debug, Default)]
+pub struct Found(BTreeSet<i32>);
+
+impl Found {
+    /// (namespace, id) of every marker in one /team7/targets message
+    pub fn update<'a>(&mut self, markers: impl IntoIterator<Item = (&'a str, i32)>) {
+        self.0 = markers.into_iter().filter(|m| m.0 == NS_CONFIRMED).map(|m| m.1).collect();
+    }
+
+    pub fn ids(&self) -> &BTreeSet<i32> {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -857,6 +892,37 @@ mod tests {
         let tg = t.target(1).unwrap();
         assert!(tg.confirmed, "{tg:?}");
         assert!((tg.x - 3.0).abs() < 0.03 && tg.y.abs() < 0.03, "{tg:?}");
+    }
+
+    /// what mission gets from one /team7/targets message of marker_mapper
+    fn publish(t: &Tracker, found: &mut Found) {
+        found.update(t.targets().iter().map(|t| (t.ns(), t.id as i32)));
+    }
+
+    #[test]
+    fn withdrawn_confirmation_no_longer_counts_as_found() {
+        let mut t = Tracker::new(TrackParams { min_views: 3, ..Default::default() });
+        let e = |x, y| Estimate::point(x, y, Source::Raycast);
+        let mut found = Found::default();
+        for id in [1, 2] {
+            for d in [-0.01, 0.0, 0.01] {
+                t.add(id, &e(id as f64 + d, 0.0));
+            }
+        }
+        publish(&t, &mut found);
+        assert_eq!(found.len(), 2);
+        // later views of id 1 land all over the place: marker_mapper logs LOST and drops its csv row
+        for k in 0..10 {
+            t.add(1, &e(1.0 + k as f64, 3.0));
+        }
+        assert!(!t.target(1).unwrap().confirmed);
+        for d in [-0.01, 0.0, 0.01] {
+            t.add(3, &e(3.0 + d, 0.0));
+        }
+        publish(&t, &mut found);
+        // targets.csv has only 2 and 3, so mission must not stop with "3 targets found"
+        assert_eq!(found.ids().iter().copied().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(found.len(), to_csv(&t.confirmed()).lines().count() - 1);
     }
 
     #[test]

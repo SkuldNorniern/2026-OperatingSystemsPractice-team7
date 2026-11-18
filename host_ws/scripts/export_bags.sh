@@ -45,19 +45,33 @@ for src in "${SRCS[@]}"; do
     fi
   done < <(find "$src" -type d -name 'rosbag_*' -print0)
 done
-[ "${#bags[@]}" -gt 0 ] || die "no rosbag_* folders under: ${SRCS[*]}"
+# run folders with logs (live runs and replay_* runs, with or without a bag). Each is archived whole,
+# so its console.log, ros_logs/, recorder.log, summary and config go into the zip with it.
+logruns=()
+for src in "${SRCS[@]}"; do
+  [ -d "$src" ] || continue
+  while IFS= read -r -d '' d; do
+    if [ -f "$d/console.log" ] || [ -f "$d/run_info.txt" ] || [ -d "$d/ros_logs" ]; then
+      logruns+=("$d")
+    fi
+  done < <(find "$src" -mindepth 1 -maxdepth 1 -type d -print0)
+done
+[ "${#bags[@]}" -gt 0 ] || [ "${#logruns[@]}" -gt 0 ] || die "no rosbag_* folders or run logs under: ${SRCS[*]}"
 
 # a bag without metadata.yaml still plays after `ros2 bag reindex`; say so instead of hiding it
 for b in "${bags[@]}"; do
   [ -f "$b/metadata.yaml" ] || echo "warning: no metadata.yaml in $b (run: ros2 bag reindex $b)" >&2
 done
 
-total_kb=$(du -ck "${bags[@]}" | tail -1 | awk '{print $1}')
-echo "[*] ${#bags[@]} bags, about $((total_kb / 1024)) MB"
-for b in "${bags[@]}"; do
-  case "$b" in "$HOME"/*) ;; *) die "bag outside \$HOME, the archive would store an absolute path: $b" ;; esac
-  echo "    $b"
+if [ "${#bags[@]}" -gt 0 ]; then
+  total_kb=$(du -ck "${bags[@]}" | tail -1 | awk '{print $1}')
+  echo "[*] ${#bags[@]} bags, about $((total_kb / 1024)) MB"
+fi
+for b in "${bags[@]}" "${logruns[@]}"; do
+  case "$b" in "$HOME"/*) ;; *) die "folder outside \$HOME, the archive would store an absolute path: $b" ;; esac
 done
+echo "[*] run logs: ${#logruns[@]} run folder(s)"
+for d in "${logruns[@]}"; do echo "    $d"; done
 
 if $DRY; then echo "[dry-run] would write $DEST/$NAME.zip"; exit 0; fi
 
@@ -78,6 +92,10 @@ for b in "${bags[@]}"; do
   fi
   case " ${items[*]} " in *" $item "*) ;; *) items+=("$item") ;; esac
 done
+for d in "${logruns[@]}"; do
+  case " ${items[*]} " in *" $d "*) ;; *) items+=("$d") ;; esac
+done
+[ "${#items[@]}" -gt 0 ] || die "nothing to archive"
 echo "[*] archiving ${#items[@]} folder(s); run folders include their logs"
 
 # zip with the path relative to $HOME, so the archive has no absolute paths

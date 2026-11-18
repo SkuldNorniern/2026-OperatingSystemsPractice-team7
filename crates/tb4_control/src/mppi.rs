@@ -323,7 +323,10 @@ impl Mppi {
             let a = if blocked { follow } else { path.pts[path.ahead[idx]] };
             let (dx, dy) = (a.0 - pose.x, a.1 - pose.y);
             let err = if dx * dx + dy * dy > 0.0025 { wrap_angle(dy.atan2(dx) - pose.yaw).abs() } else { 0.0 };
-            if err > p.rotate_in_place_angle && !blocked {
+            // turning in place does not move the robot, so it is safe on a blocked path as long as the
+            // footprint itself is clear here. Reverse stays off (vendor: it can damage the motors).
+            let footprint_clear = df.is_none_or(|df| df.at(pose.x, pose.y) as f64 >= p.robot_radius);
+            if err > p.rotate_in_place_angle && (!blocked || footprint_clear) {
                 self.rotating = true;
             } else if err < p.rotate_exit_angle {
                 self.rotating = false;

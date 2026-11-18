@@ -14,6 +14,9 @@ scripts/run_demo.sh      undock if docked, reset odom, launch
 
 ## setup (once)
 
+Scripted: `scripts/pre-requisites.sh` does the steps below (asks before each change), then
+`scripts/prep.sh` builds the workspace.
+
 ```bash
 sudo apt install python3-colcon-common-extensions python3-vcstool python3-rosdep libclang-dev \
   ros-jazzy-turtlebot4-desktop ros-jazzy-turtlebot4-navigation ros-jazzy-slam-toolbox \

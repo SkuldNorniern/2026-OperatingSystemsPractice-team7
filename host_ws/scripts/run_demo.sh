@@ -267,5 +267,16 @@ else
   prepare_live
 fi
 
+# every run keeps its logs: live runs in their run folder (next to the bag), replays in a replay_* folder.
+# console.log is the launch output; ros_logs/ holds each node's own log. tee ignores Ctrl-C, so the
+# file still gets the last lines when the run is stopped.
+LOG_DIR="${RUN_DIR:-}"
+if [ -z "$LOG_DIR" ]; then
+  LOG_DIR="$HOME/team7_runs/replay_$(basename "${BAG%/}")_$(date +%Y%m%d_%H%M%S_%N)"
+  mkdir -p "$LOG_DIR"
+  export ROS_LOG_DIR="$LOG_DIR/ros_logs"
+fi
+echo "[*] run logs: $LOG_DIR"
+
 echo "launch: team7.launch.py ${LAUNCH_ARGS[*]}"
-ros2 launch team7_bringup team7.launch.py "${LAUNCH_ARGS[@]}"
+ros2 launch team7_bringup team7.launch.py "${LAUNCH_ARGS[@]}" 2>&1 | (trap '' INT; exec tee -a "$LOG_DIR/console.log")

@@ -2,7 +2,7 @@
 import argparse,fcntl,hashlib,os,shutil,signal,subprocess,sys,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
-ap=argparse.ArgumentParser();ap.add_argument('--version',choices=['v1','v2'],default='v1');ap.add_argument('--max-sim-seconds',type=float,default=600);ap.add_argument('--headless',action='store_true');ap.add_argument('--max-seconds',type=float,default=0);args=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--version',choices=['v1'],default='v1');ap.add_argument('--max-sim-seconds',type=float,default=600);ap.add_argument('--headless',action='store_true');ap.add_argument('--max-seconds',type=float,default=0);args=ap.parse_args()
 lock=(ROOT/'.run.lock').open('w')
 try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 except BlockingIOError:sys.exit('A native mission is already running.')

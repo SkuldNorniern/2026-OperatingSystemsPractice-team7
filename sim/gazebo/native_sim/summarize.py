@@ -2,7 +2,7 @@
 import json,sys
 from pathlib import Path
 import cv2,numpy as np
-folder=Path(sys.argv[1]) if len(sys.argv)>1 else sorted((Path(__file__).parent/'runs').glob('*'))[-1]
+folder=Path(sys.argv[1]) if len(sys.argv)>1 else sorted(p for p in (Path(__file__).parent/'runs').glob('*-v1') if p.is_dir())[-1]
 events=[json.loads(l) for l in (folder/'events.jsonl').read_text().splitlines()]
 markers=json.loads((folder/'markers.json').read_text());status=json.loads((folder/'status.json').read_text())
 summary={'version':status.get('version','legacy'),'status':status['status'],'distance_m':status.get('distance_m'),'elapsed_sim_seconds':status.get('elapsed_sim_seconds'),'detected_ids':sorted(int(k) for k in markers['markers']),

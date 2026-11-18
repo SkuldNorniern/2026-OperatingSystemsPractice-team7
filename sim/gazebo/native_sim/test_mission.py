@@ -1,7 +1,8 @@
 import math,threading,time,unittest
 from types import SimpleNamespace
 import cv2,numpy as np
-from mission import Grid,Mission,wrap,LaserScan
+from mission import Grid,Mission,wrap
+from gz.msgs10.laserscan_pb2 import LaserScan
 
 class MissionTests(unittest.TestCase):
     def stub(self):

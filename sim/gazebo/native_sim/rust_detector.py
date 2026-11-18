@@ -8,7 +8,7 @@ class Detection(C.Structure):
     _fields_=[('id',C.c_uint32),('corners',C.c_float*8),('hamming',C.c_uint32)]
 
 class RustDetector:
-    def __init__(self):
+    def __init__(self,dictionary='DICT_5X5_50'):
         repo=Path(__file__).resolve().parents[3]
         filename='libtb4_aruco_gazebo.dylib' if sys.platform=='darwin' else 'libtb4_aruco_gazebo.so'
         library=repo/'target/release'/filename
@@ -21,7 +21,9 @@ class RustDetector:
         self.lib.tb4_detector_detect.restype=C.c_int32
         self.lib.tb4_detector_destroy.argtypes=[C.c_void_p]
         self.lib.tb4_detector_destroy.restype=None
-        self.context=self.lib.tb4_detector_create()
+        self.lib.tb4_detector_create_named.restype=C.c_void_p
+        self.lib.tb4_detector_create_named.argtypes=[C.c_char_p]
+        self.context=self.lib.tb4_detector_create_named(dictionary.encode())
         if not self.context:raise RuntimeError('Rust detector initialization failed')
         self.output=(Detection*128)()
     def detectMarkers(self,gray):

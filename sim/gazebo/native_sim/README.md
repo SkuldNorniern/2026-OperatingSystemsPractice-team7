@@ -4,9 +4,7 @@
 cd ~/2026-OperatingSystemsPractice-team7/sim/gazebo
 ./setup_native.sh  # 최초 한 번: 프로젝트 가상환경과 Python 의존성 설치
 # V1: 네 모서리 순회 + 5 m마다 360° 회전
-./run_native.sh --version v1
-# V2: rust_base frontier 탐색 + camera coverage
-./run_native.sh --version v2
+./run_native.sh
 # GUI 없이 실행: ./run_native.sh --headless
 # 제한 시간(실제 초): ./run_native.sh --headless --max-seconds 600
 ```
@@ -17,29 +15,9 @@ cd ~/2026-OperatingSystemsPractice-team7/sim/gazebo
 
 `track1.sdf`를 원본으로 읽어 `native_sim/track1_native.sdf`를 만듭니다. 원본 배치를 보존하며, 사각형 순회를 위해 남쪽 출입구를 실행 복사본에서 막습니다. 마커의 XY 배치는 유지하고, 인식 가능한 DICT_5X5_50 마커를 직립시킵니다. 패널은 GUI Transform으로 이동 가능하지만 중력에 넘어지지 않도록 static으로 둡니다. ID 8/19/29와 마커 외곽 변 길이는 config.json에 기록됩니다. 원본에는 손대지 않습니다.
 
-## 버전 비교
+## 실행 결과
 
-`--version v1`과 `--version v2`는 같은 원본 track1에서 매번 새 월드를 생성해 시작합니다. 기본은 V1이고, 두 버전 모두 기본 시뮬레이션 시간 제한은 600초입니다. Ctrl-C는 실행 중인 해당 서버·GUI·제어기를 함께 종료합니다. 한 버전이 끝난 뒤 다음 버전을 실행하세요.
-
-```sh
-# 같은 시뮬레이션 시간 예산으로 비교 (GUI 포함)
-./run_native.sh --version v1 --max-sim-seconds 600
-./run_native.sh --version v2 --max-sim-seconds 600
-# 마지막 V1/V2 실행 요약 비교
-.venv/bin/python native_sim/compare.py
-# 화면 없이 같은 비교: 각 실행에 --headless 추가
-```
-
-결과는 `native_sim/runs/날짜-시간-v1/`, `날짜-시간-v2/`로 구분됩니다. `compare.py`는 각 버전의 최신 결과에서 상태, 시뮬레이션 경과 시간, 이동 거리, 알려진 지도 셀 수, 검출 ID, 방문 ID/순서를 출력하고 `runs/comparison.json`에 저장합니다. `time_limit`나 `blocked`를 미션 성공으로 해석하지 마세요. `run_info.json`에는 버전, 시간 제한, 공통 설정과 생성된 월드 SHA-256이 기록됩니다. 같은 조건인지 확인할 때 월드 해시와 시간 예산도 비교하세요. `--max-seconds`는 실제 경과 시간 제한이므로 성능 비교에는 `--max-sim-seconds`를 사용합니다.
-
-| 항목 | V1 | V2 |
-|---|---|---|
-| 다음 목표 선택 | 알려진 사각형 크기와 라이다로 경계 추정, 네 모서리 순회 | Rust `find_frontiers`, `select_goal_with_heading`로 미탐색 경계 선택 |
-| 카메라 탐색 | 주행 누적 5 m마다 360° 회전 | Rust `Coverage`가 아직 보지 못한 벽면의 관측 위치·방향 선택 |
-| 탐색 종료 | 모서리 순회 후 시작 벽 복귀 | 도달 가능한 frontier·미관측 벽면 목표가 더 없을 때 |
-| 공통 처리 | Rust ArUco, 같은 카메라·라이다, 정확한 Gazebo 위치, A* 이동, 지도·마커 저장, 탐색 후 가까운 마커 정면 방문 | 동일 |
-
-V2는 `rust_base`의 `tb4_core`·`tb4_explore` 원본 소스를 수정 없이 가져와 C ABI로 호출합니다. ROS `explorer.rs` 전체를 실행하는 것은 아닙니다. 목표 수명 관리·실패 목표의 45초 blacklist·목표 방향 정렬을 Gazebo 어댑터에서 수행합니다. V2의 A*는 알려진 자유 공간만 통과하도록 하며, V1의 방 크기를 사용하지 않습니다. 기존 Nav2/MPPI/SLAM을 비교하는 실험은 아닙니다. 마커 방문 단계는 두 버전 모두 기존 공통 코드를 사용하므로, 기존 마커 정면 목표가 막히는 한계도 공유합니다.
+기본 시뮬레이션 시간 제한은 600초입니다. `--max-sim-seconds 600`으로 시뮬레이션 시간 제한을, `--max-seconds 600`으로 실제 경과 시간 제한을 지정할 수 있습니다. 실행 결과는 `native_sim/runs/날짜-시간-v1/`에 저장됩니다. 이전 `--version v1` 명령도 호환되지만 현재 실행 가능한 알고리즘은 V1뿐입니다.
 
 ## V1 미션
 
@@ -56,11 +34,11 @@ V2는 `rust_base`의 `tb4_core`·`tb4_explore` 원본 소스를 수정 없이 �
 
 `native_sim/runs/날짜-시간/`에 events.jsonl, map.pgm/map.yaml, markers.json, status.json, 검출 시 camera_latest.jpg가 저장됩니다. marker_detected 시 해당 위치와 관측 횟수가 기록되며 저장 파일은 주기적으로 갱신됩니다. 좌표는 ideal_odometry가 제공하는 Gazebo 월드 좌표입니다.
 
-이번 버전은 사용자가 설명한 미션을 별도로 구현한 Gazebo 전용 검증기입니다. Git 저장소의 C/Rust ROS 노드를 실행한 결과가 아닙니다. 로봇은 Gazebo VelocityControl로 속도를 직접 적용하는 간소화한 TurtleBot4 형태의 운동학 모델이고 카메라는 RGB 단안 카메라입니다. 실제 OAK-D RGB-D 전체 구성을 재현하지 않습니다. 위치는 Gazebo OdometryPublisher의 정확한 시뮬레이션 위치를 사용합니다. 지도는 라이다 스캔을 그 위치에 합성한 점유격자이며, 위치 오차를 보정하는 SLAM/루프클로저는 구현하지 않았습니다. 실물 이식 시 SLAM/TF 입력 어댑터와 주행 검증이 필요합니다. ArUco PnP는 설정에 저장된 각 마커의 실제 크기를 사용합니다.
+이번 버전은 사용자가 설명한 미션을 별도로 구현한 Gazebo 전용 검증기입니다. Git 저장소의 C/Rust ROS 노드를 실행한 결과가 아닙니다. 로봇은 Gazebo VelocityControl로 속도를 직접 적용하는 간소화한 TurtleBot4 형태의 운동학 모델이고 카메라는 RGB 단안 카메라입니다. 실제 OAK-D RGB-D 전체 구성을 재현하지 않습니다. 위치는 Gazebo OdometryPublisher의 정확한 시뮬레이션 위치를 사용합니다. 지도는 라이다 스캔을 그 위치에 합성한 점유격자이며, 위치 오차를 보정하는 SLAM/루프클로저는 구현하지 않았습니다. 실물 입력은 별도의 `host_ws/robot_runtime` ROS 2 어댑터로 연결하며, 실제 주행 검증은 아직 필요합니다. ArUco PnP는 설정에 저장된 각 마커의 실제 크기를 사용합니다.
 
 ## 설치
 
-Rust 1.89 이상이 필요합니다 (`brew install rust`). `setup_native.sh`가 저장소 루트의 Cargo workspace에서 `tb4_aruco_gazebo` 공유 라이브러리를 빌드합니다. V2의 tb4_core는 nalgebra를 사용하므로 최초 빌드에는 Cargo 의존성 다운로드가 필요합니다. Cargo.lock으로 버전을 고정합니다.
+Rust 1.89 이상이 필요합니다 (`brew install rust`). `setup_native.sh`가 저장소 루트의 Cargo workspace에서 `tb4_aruco_gazebo` 공유 라이브러리를 빌드합니다. Rust 인식기와 C ABI 연결 계층만 빌드하며 외부 crate 의존성은 없습니다.
 
 이 통합본의 실행 대상은 Homebrew Gazebo Harmonic을 설치한 macOS입니다. Homebrew `gz.transport13` 네이티브 바인딩과 ABI가 맞는 Python 3.14를 사용합니다. 다른 호환 Python 경로는 `GAZEBO_PYTHON=/path/to/python ./setup_native.sh`로 지정할 수 있습니다. `.venv`에는 OpenCV/numpy/protobuf만 설치하고 Gazebo 바인딩은 Homebrew 설치에서 가져옵니다.
 
@@ -75,8 +53,6 @@ Rust 1.89 이상이 필요합니다 (`brew install rust`). `setup_native.sh`가 
 Gazebo RGB 영상 → 회색조 변환 → **Rust의 ID·모서리 검출** → 기존 위치 추정·매핑 순서입니다. 인식 사전은 `5X5_50`입니다. 실행 시작 로그에 `detector: rust_base/tb4_aruco`가 기록되며, 라이브러리가 없으면 오류로 중단합니다. OpenCV 인식기로 자동 전환하지 않습니다. OpenCV는 마커 이미지 생성, 영상 변환, PnP 위치 추정과 지도 이미지 처리에 계속 사용됩니다.
 
 ## 검증 상태
-
-V1/V2 선택 기능 추가 후, Rust 단위 테스트 46개와 Python 테스트 14개를 통과했습니다. 같은 track1에서 각 버전을 60 시뮬레이션 초씩 실행해 V1의 벽 접근·5 m 회전·첫 모서리 도착과 V2의 frontier 목표 선택·도착을 확인했습니다. V2의 미관측 벽면 목표 생성은 알려진 지도를 사용한 단위 테스트로 확인했습니다. 이 짧은 시험은 전체 미션 성공이나 두 버전의 성능 우열을 입증하지 않습니다.
 
 Rust 전환 후 원본 Rust 테스트 20개, Python 연결·미션 테스트 9개를 통과했습니다. 짧은 실제 Gazebo 실행에서 Rust 검출기로 ID 8/19/29 모두 검출, 벽 접근, 5 m 회전과 첫 모서리 도착을 확인했습니다. Rust 전환 후 전체 마커 방문 미션은 아직 끝까지 재검증하지 않았습니다.
 

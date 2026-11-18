@@ -25,6 +25,15 @@ class RustDetectorTests(unittest.TestCase):
         transform=cv2.getPerspectiveTransform(np.float32([[0,0],[279,0],[279,279],[0,279]]),np.float32([[25,5],[270,30],[240,270],[10,250]]))
         image=cv2.warpPerspective(image,transform,(300,300),borderValue=255)
         _,ids,_=self.detector.detectMarkers(image);self.assertIsNotNone(ids);self.assertIn(19,ids.flatten())
+    def test_robot_dictionary_selection(self):
+        for name in ['DICT_6X6_250','DICT_ARUCO_ORIGINAL']:
+            d=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,name))
+            image=cv2.copyMakeBorder(cv2.aruco.generateImageMarker(d,10,210),35,35,35,35,cv2.BORDER_CONSTANT,value=255)
+            detector=RustDetector(name)
+            try:self.assertIn(10,detector.detectMarkers(image)[1].flatten())
+            finally:detector.close()
+    def test_invalid_dictionary_is_rejected(self):
+        with self.assertRaises(RuntimeError):RustDetector('NOT_A_DICTIONARY')
     def test_blank_frame_has_no_marker(self):
         self.assertIsNone(self.detector.detectMarkers(np.full((480,640),255,np.uint8))[1])
     def test_invalid_input_and_repeated_close(self):

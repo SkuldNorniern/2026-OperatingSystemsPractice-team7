@@ -1,0 +1,10 @@
+{
+  "dictionary": "DICT_5X5_50",
+  "marker_sizes": {},
+  "expected_targets": 3,
+  "room_width": 0,
+  "room_height": 0,
+  "wall_standoff": 0.8,
+  "scan_every_m": 5.0,
+  "marker_standoff": 0.8
+}

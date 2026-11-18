@@ -12,8 +12,7 @@ Rust 1.89 이상과 Homebrew Gazebo Harmonic이 필요합니다.
 ```sh
 cd sim/gazebo
 ./setup_native.sh
-./run_native.sh --version v1  # 네 모서리 순회 + 5 m 회전
-./run_native.sh --version v2  # rust_base frontier + camera coverage
+./run_native.sh  # V1: 네 모서리 순회 + 5 m 회전
 ```
 
 설치 조건, 알고리즘, 실행 결과와 한계는 [시뮬레이션 안내](sim/gazebo/native_sim/README.md)를 참고하세요.
@@ -23,3 +22,7 @@ cd sim/gazebo
 
 - [Host workspace](host_ws/ros2_ws/README.md)
 - [Robot workspace](rpi4_ws/ros2_ws/README.md)
+
+## 실제 TurtleBot4 실행
+
+ROS 2가 설치된 Ubuntu/로봇에서 `host_ws/scripts/run_robot.sh`로 라이다·카메라·SLAM 입력을 받아 V1를 실행할 수 있도록 어댑터를 추가했습니다. 먼저 `--check`로 입력을 확인하고 실제 주행 시 `--execute`를 지정합니다. Linux 호스트 빌드와 실행 명령은 [실물 실행 안내](host_ws/robot_runtime/README.md)에 있습니다. 실제 하드웨어 주행은 아직 미검증입니다.

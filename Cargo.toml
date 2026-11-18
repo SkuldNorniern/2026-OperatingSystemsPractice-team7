@@ -1,14 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/tb4_aruco", "crates/tb4_core", "crates/tb4_explore", "sim/gazebo/rust_aruco_bridge"]
+members = ["crates/tb4_aruco", "sim/gazebo/rust_aruco_bridge"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-
-[workspace.dependencies]
-nalgebra = "0.35"
 
 [profile.release]
 opt-level = 3

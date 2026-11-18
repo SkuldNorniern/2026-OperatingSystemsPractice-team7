@@ -10,5 +10,3 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tb4_aruco = { path = "../../../crates/tb4_aruco" }
-tb4_core = { path = "../../../crates/tb4_core" }
-tb4_explore = { path = "../../../crates/tb4_explore" }

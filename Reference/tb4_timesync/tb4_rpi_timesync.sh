@@ -157,7 +157,7 @@ PY
   if awk -v d="$off" -v m="$MAX_OFFSET" 'BEGIN{exit !(d>=-m && d<=m)}'; then
     echo "Create3 clock: OK (offset $off s)"
   else
-    echo "Create3 clock: OFF by $off s. Restart the Create3 application (web UI http://192.168.186.2)."
+    echo "Create3 clock: OFF by $off s. Reboot the Create3 (take it off the dock, hold the power button until off, power on, dock). A reboot fixed it before; the web UI restart is not reachable without its login."
     return 1
   fi
 }

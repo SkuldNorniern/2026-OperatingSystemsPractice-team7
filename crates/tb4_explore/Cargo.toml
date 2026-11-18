@@ -1,0 +1,10 @@
+[package]
+name = "tb4_explore"
+version = "0.1.0"
+description = "Frontier detection and exploration goal selection on occupancy grids (no ROS)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tb4_core = { path = "../tb4_core" }

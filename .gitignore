@@ -66,3 +66,14 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Native Gazebo simulator dependencies and generated output
+sim/gazebo/.venv/
+sim/gazebo/native_sim/.run.lock
+sim/gazebo/native_sim/config.json
+sim/gazebo/native_sim/track1_native.sdf
+sim/gazebo/native_sim/runs/
+__pycache__/
+*.py[cod]
+.DS_Store
+/target/

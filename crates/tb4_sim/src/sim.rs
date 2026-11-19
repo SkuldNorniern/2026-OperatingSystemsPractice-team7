@@ -310,6 +310,11 @@ impl Sim {
         compose(self.slam.map_to_odom(), self.odom)
     }
 
+    /// the explorer policy (frontiers, views, coverage, blacklist of the last tick)
+    pub fn explorer(&self) -> &ExplorerPolicy {
+        &self.explorer
+    }
+
     pub fn log(&self) -> &[(f64, String)] {
         &self.log
     }
@@ -580,6 +585,9 @@ impl Sim {
             self.m.time_no_goal += dt;
         }
         let stalled = goal.is_some() && motion == Motion::Still;
+        if stalled {
+            self.m.time_still_with_goal += dt;
+        }
         let cause = if stalled { self.stall_cause() } else { String::new() };
         self.stalls.update(t, dt, stalled, &cause, goal);
         while self.area_next < AREA_TIMES.len() && t + 1e-9 >= AREA_TIMES[self.area_next] {

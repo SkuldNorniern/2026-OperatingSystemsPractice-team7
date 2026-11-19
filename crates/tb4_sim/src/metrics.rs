@@ -112,6 +112,8 @@ pub struct Metrics {
     pub time_still: f64,
     /// no navigation goal active
     pub time_no_goal: f64,
+    /// goal active and robot still, stops of any length (stalls are the ones over STALL_MIN)
+    pub time_still_with_goal: f64,
     /// (time, known free area m^2) at AREA_TIMES that were reached, and at the end
     pub area: Vec<(f64, f64)>,
     pub final_area: f64,
@@ -192,7 +194,8 @@ impl Metrics {
         let _ = writeln!(w, "  final   {:6.1}", self.final_area);
         let _ = writeln!(w, "distance {:.1} m  driving {:.0} s  turning in place {:.0} s  still {:.0} s  no goal {:.0} s",
             self.distance, self.time_driving, self.time_turning, self.time_still, self.time_no_goal);
-        let _ = writeln!(w, "stalls {} episodes, {:.0} s", self.stalls.len(), self.stall_time());
+        let _ = writeln!(w, "still with a goal {:.0} s, of that stalls (> {STALL_MIN:.0} s) {} episodes, {:.0} s",
+            self.time_still_with_goal, self.stalls.len(), self.stall_time());
         for (c, (n, t)) in self.stall_causes() {
             let _ = writeln!(w, "  {c:<28} {n:>3} x {t:6.1} s");
         }
@@ -232,6 +235,7 @@ impl Metrics {
         let _ = writeln!(w, "  \"time_turning_s\": {:.3},", self.time_turning);
         let _ = writeln!(w, "  \"time_still_s\": {:.3},", self.time_still);
         let _ = writeln!(w, "  \"time_no_goal_s\": {:.3},", self.time_no_goal);
+        let _ = writeln!(w, "  \"time_still_with_goal_s\": {:.3},", self.time_still_with_goal);
         let area: Vec<String> = self.area.iter().map(|(t, a)| format!("{{\"t\": {t:.1}, \"m2\": {a:.3}}}")).collect();
         let _ = writeln!(w, "  \"mapped_area\": [{}],", area.join(", "));
         let _ = writeln!(w, "  \"final_area_m2\": {:.3},", self.final_area);

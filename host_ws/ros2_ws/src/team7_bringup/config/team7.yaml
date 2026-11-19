@@ -56,10 +56,12 @@ explorer:
     camera_coverage: true     # after frontiers, drive to look at walls the camera has not seen
     coverage_map_topic: /map
     camera_half_fov: 0.52     # rad, OAK-D preview is ~60 deg wide
-    camera_range: 2.5         # m, where markers still get detected
-    view_standoff: 1.6
+    camera_range: 1.5         # m, head-on distance a marker is still read: 250 px preview, fx 201 px, 10 cm marker = 13 px
+                              # (8 px detector floor at 2.5 m); seen at an angle counts as range / cos(incidence)
+    camera_max_incidence: 1.3 # rad, wall seen further off its normal than this does not count as seen
+    view_standoff: 1.0        # m from the wall when looking at it (also inside the 2 m scoring radius)
     view_max_cells: 32        # wall piece per view (cells)
-    view_detour: 0.0          # m, take a close camera view during frontier phase, 0 = off
+    view_detour: 1.0          # m, take a camera view of an unseen wall this close during the frontier phase, 0 = off
     preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one (no stop)
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
     retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once

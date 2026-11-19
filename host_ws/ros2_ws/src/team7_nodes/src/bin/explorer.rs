@@ -105,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             range: p.f64("camera_range", 2.5),
             standoff: p.f64("view_standoff", 1.6),
             max_cluster_cells: p.i64("view_max_cells", 32) as usize,
+            max_incidence: p.f64("camera_max_incidence", 1.3),
             ..CoverageParams::default()
         }),
         view_detour: p.f64("view_detour", 0.0),

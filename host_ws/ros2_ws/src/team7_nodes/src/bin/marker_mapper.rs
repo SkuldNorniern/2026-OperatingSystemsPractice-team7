@@ -59,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let track = TrackParams {
             min_views: p.i64("min_views", 5) as usize,
             min_wall_views: p.i64("min_wall_views", 3) as usize,
+            min_wall_fraction: p.f64("min_wall_fraction", 0.25),
             max_spread: p.f64("max_spread", 0.08),
             max_consistency: p.f64("max_consistency", 3.0),
             max_history: p.i64("max_history", 200) as usize,

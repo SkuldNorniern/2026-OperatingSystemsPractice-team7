@@ -21,6 +21,8 @@ crates/
   tb4_planning/            C-space inflation, Lazy Theta*, A*
   tb4_control/             own MPPI, multithreaded rollouts, create3 limits
   tb4_aruco/               own ArUco detector (all OpenCV dictionaries), camera model with rational_polynomial
+  tb4_sim/                 headless closed-loop sim: 2D world, lidar, camera, our slam + navigator + explorer
+  tb4_viewer/              live window for tb4_sim (aurea, needs GTK3 dev libs)
 host_ws/                   laptop (Ubuntu 24.04, Jazzy), runs everything heavy
   ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector
   ros2_ws/src/team7_bringup/ launch, params, RViz config
@@ -62,3 +64,16 @@ cargo test
 
 laptop setup, build and run is in [host_ws/README.md](host_ws/README.md).
 robot setup and network is in [rpi4_ws/README.md](rpi4_ws/README.md).
+
+## sim viewer
+
+runs tb4_sim in a window and draws the slam map, true walls/glass, robot, path, MPPI trajectory,
+frontiers, camera views, markers and bumps, with run stats on the right. needs `libgtk-3-dev libx11-xcb-dev`.
+plain `cargo build` / `cargo test` skip it (workspace `default-members`).
+
+```bash
+cargo run --release -p tb4_viewer -- --world studio --seed 1 [--perfect-pose] [--set name=value] [--speed 4x]
+```
+
+keys: space pause, 1-4 speed (1x 4x 16x max), r reset, w next world, [ ] seed, s step 0.1 s while paused, q quit.
+16x and max run as fast as the CPU allows; the panel shows the real speed.

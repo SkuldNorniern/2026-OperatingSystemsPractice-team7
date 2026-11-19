@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         isolated_dist: p.f64("isolated_dist", 0.15) as f32,
         deskew: p.bool("deskew", true),
         stamp_at_end: p.bool("stamp_at_end", false),
+        keep_foreground_spikes: p.bool("keep_foreground_spikes", false),
+        spike_margin: p.f64("spike_margin", 0.15) as f32,
+        spike_max_range: p.f64("spike_max_range", 3.0) as f32,
     };
     let in_topic = p.string("scan_topic", "/scan");
     let out_topic = p.string("output_topic", "/scan_filtered");

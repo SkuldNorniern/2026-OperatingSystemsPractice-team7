@@ -16,6 +16,8 @@ pub struct ExplorerParams {
     /// s to wait after a failed or cancelled goal; a success chains on at once
     pub retry_delay: f64,
     pub blacklist_duration: f64,
+    /// s, cap for a spot that keeps failing: its ban doubles with every failure up to this
+    pub blacklist_max_duration: f64,
     pub turn_weight: f64,
     /// s, exploration pauses when the costmap is older than this
     pub costmap_timeout: f64,
@@ -46,6 +48,7 @@ impl Default for ExplorerParams {
             progress_epsilon: 0.1,
             retry_delay: 5.0,
             blacklist_duration: 45.0,
+            blacklist_max_duration: 300.0,
             turn_weight: 0.5,
             costmap_timeout: 5.0,
             explore: ExploreParams {
@@ -205,7 +208,10 @@ pub struct ExplorerPolicy {
     coverage: Coverage,
     visited_views: Vec<(f64, f64)>,
     active: Option<Active>,
+    /// banned goals with the time the ban ends
     blacklist: Vec<((f64, f64), f64)>,
+    /// failures per spot over the run, so a spot that keeps failing is banned longer
+    strikes: Vec<((f64, f64), u32)>,
     /// goals switched away from, with the time
     recent: Vec<((f64, f64), f64)>,
     next_goal_after: f64,
@@ -229,6 +235,7 @@ impl ExplorerPolicy {
             visited_views: Vec::new(),
             active: None,
             blacklist: Vec::new(),
+            strikes: Vec::new(),
             recent: Vec::new(),
             next_goal_after: now,
             costmap_stale: false,
@@ -264,6 +271,25 @@ impl ExplorerPolicy {
     /// frontiers and camera views of the last tick that got that far, and a counter that changes with them
     pub fn viz(&self) -> (&[Frontier], &[View], u64) {
         (&self.frontiers, &self.views, self.viz_seq)
+    }
+
+    /// Bans a failed goal. Three goals failing in turn outlasted a fixed 45 s ban and cycled
+    /// to the end of the 183647 replay, so each new failure at the same spot doubles the ban.
+    fn ban(&mut self, goal: (f64, f64), now: f64) {
+        let r = self.p.explore.blacklist_radius;
+        let n = match self.strikes.iter_mut().find(|(g, _)| dist(*g, goal) < r) {
+            Some((_, n)) => {
+                *n += 1;
+                *n
+            }
+            None => {
+                self.strikes.push((goal, 1));
+                1
+            }
+        };
+        let cap = self.p.blacklist_max_duration.max(self.p.blacklist_duration);
+        let secs = (self.p.blacklist_duration * 2f64.powi(n as i32 - 1)).min(cap);
+        self.blacklist.push((goal, now + secs));
     }
 
     pub fn blacklist(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
@@ -458,13 +484,13 @@ impl ExplorerPolicy {
                 NavStatus::Canceled => self.stats.canceled += 1,
                 NavStatus::Aborted => {
                     self.stats.aborted += 1;
-                    self.blacklist.push((goal, now));
+                    self.ban(goal, now);
                 }
             }
         }
 
         let p = &self.p;
-        self.blacklist.retain(|(_, at)| now - *at < p.blacklist_duration);
+        self.blacklist.retain(|(_, until)| now < *until);
         // Do not navigate using a costmap that stopped updating.
         if now - input.costmap_stamp > p.costmap_timeout {
             if !self.costmap_stale {
@@ -551,7 +577,7 @@ impl ExplorerPolicy {
             };
             out.push(Action::Info(format!("cancelling goal ({:.2}, {:.2}): {text}; waiting for terminal result", goal.0, goal.1)));
             if bad {
-                self.blacklist.push((goal, now));
+                self.ban(goal, now);
             }
             self.cancel_active(why, out);
         }
@@ -782,6 +808,25 @@ mod tests {
         assert!(sent(&e.tick(5.5, input(&g, r, None, 5.5))).is_none());
         let again = sent(&e.tick(6.5, input(&g, r, None, 6.5))).expect("goal after retry_delay");
         assert!((again.x - goal.x).hypot(again.y - goal.y) > e.params().explore.blacklist_radius);
+    }
+
+    #[test]
+    fn repeated_failures_at_one_spot_ban_longer() {
+        let mut e = ExplorerPolicy::new(params(), 0.0);
+        let d = e.params().blacklist_duration;
+        e.ban((1.0, 1.0), 0.0);
+        assert!((e.blacklist[0].1 - d).abs() < 1e-9);
+        e.blacklist.clear();
+        e.ban((1.1, 1.0), 100.0);
+        assert!((e.blacklist[0].1 - (100.0 + 2.0 * d)).abs() < 1e-9);
+        for t in 0..5 {
+            e.ban((1.0, 1.1), 200.0 + t as f64);
+        }
+        let cap = e.params().blacklist_max_duration;
+        assert!(e.blacklist.iter().all(|(_, until)| *until <= 204.0 + cap + 1e-9));
+        // another spot starts at the base ban again
+        e.ban((5.0, 5.0), 300.0);
+        assert!((e.blacklist.last().unwrap().1 - (300.0 + d)).abs() < 1e-9);
     }
 
     #[test]

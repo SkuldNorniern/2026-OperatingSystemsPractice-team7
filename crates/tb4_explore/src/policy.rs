@@ -25,8 +25,12 @@ pub struct ExplorerParams {
     pub view_detour: f64,
     /// in-place turns (120 deg each) when nothing is left to explore, so SLAM gets new keyframes
     pub look_around_turns: u32,
-    /// a frontier goal this close is replaced by the next one, so the robot does not stop at it
+    /// a frontier goal this close whose frontier has started to disappear is replaced by the next
+    /// one, so the robot does not stop at it. With the frontier still open the goal is finished:
+    /// switching then made two goals swap for 8 min in the sim studio.
     pub preempt_distance: f64,
+    /// s a goal switched away from cannot be picked again
+    pub switch_cooldown: f64,
 }
 
 impl Default for ExplorerParams {
@@ -50,6 +54,7 @@ impl Default for ExplorerParams {
                 goal_standoff: 0.25,
                 traversable_threshold: 99,
                 frontier_segment_length: 1.2,
+                min_unknown_area: 1.0,
             },
             coverage: Some({
                 let mut c = CoverageParams::default();
@@ -59,6 +64,7 @@ impl Default for ExplorerParams {
             view_detour: 0.0,
             look_around_turns: 3,
             preempt_distance: 0.5,
+            switch_cooldown: 20.0,
         }
     }
 }
@@ -159,6 +165,8 @@ struct Active {
     progress_pose: (f64, f64, f64),
     last_progress: f64,
     cancelling: bool,
+    /// cancelled for a reason that is not a failure (its wall got seen on the way)
+    cancel_ok: bool,
 }
 
 /// active goal as seen from outside
@@ -178,6 +186,8 @@ pub struct ExplorerPolicy {
     visited_views: Vec<(f64, f64)>,
     active: Option<Active>,
     blacklist: Vec<((f64, f64), f64)>,
+    /// goals switched away from, with the time
+    recent: Vec<((f64, f64), f64)>,
     next_goal_after: f64,
     costmap_stale: bool,
     finished_exploring: bool,
@@ -196,6 +206,7 @@ impl ExplorerPolicy {
             visited_views: Vec::new(),
             active: None,
             blacklist: Vec::new(),
+            recent: Vec::new(),
             next_goal_after: now,
             costmap_stale: false,
             finished_exploring: false,
@@ -271,6 +282,7 @@ impl ExplorerPolicy {
             && a.accepted
         {
             a.cancelling = true;
+            a.cancel_ok = why == CancelReason::WallSeen;
             out.push(Action::Cancel(why));
             let s = &mut self.stats;
             match why {
@@ -295,13 +307,16 @@ impl ExplorerPolicy {
         if let Some((goal, status)) = input.result
             && self.active.as_ref().is_some_and(|a| a.goal == goal)
         {
+            let ok = status == NavStatus::Succeeded || (status == NavStatus::Canceled && self.active.as_ref().is_some_and(|a| a.cancel_ok));
             // a reached view whose wall still counts as unseen must not be picked again
             if let Some(t) = self.active.take().and_then(|a| a.view_target) {
                 self.visited_views.push(t);
             }
             // field runs lost about 5 s at every goal: chain straight on after a success,
             // wait only after a failure so the map / blacklist can change first
-            self.next_goal_after = if status == NavStatus::Succeeded { now } else { now + p.retry_delay };
+            // a view cancelled because its wall got seen on the way is done, not failed (sim studio:
+            // 23 such cancels cost 5 s each)
+            self.next_goal_after = if ok { now } else { now + p.retry_delay };
             out.push(Action::Info(format!("goal ({:.2}, {:.2}) finished: {status:?}", goal.0, goal.1)));
             match status {
                 NavStatus::Succeeded => self.stats.succeeded += 1,
@@ -344,7 +359,9 @@ impl ExplorerPolicy {
         };
         let p = self.p.clone();
         let frontiers = find_frontiers(grid, (robot.x, robot.y), &p.explore);
-        let blacklist: Vec<_> = self.blacklist.iter().map(|(goal, _)| *goal).collect();
+        self.recent.retain(|(_, at)| now - at < p.switch_cooldown);
+        // goals switched away from lately are skipped like blacklisted ones (no ping-pong)
+        let blacklist: Vec<_> = self.blacklist.iter().chain(&self.recent).map(|(goal, _)| *goal).collect();
         let pick = || select_goal_with_heading(&frontiers, &blacklist, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight);
         let need_views = p.view_detour > 0.0
             || self.active.as_ref().is_some_and(|a| a.view_target.is_some())
@@ -359,6 +376,16 @@ impl ExplorerPolicy {
                 .collect(),
             _ => Vec::new(),
         };
+        // nearest first doubled back along the walls (sim studio); like frontiers, prefer views
+        // ahead: cost = distance + turn_weight * |turn to the view| (m-equivalent)
+        let mut views = views;
+        views.sort_by(|a, b| {
+            let cost = |v: &View| {
+                let ang = (v.y - robot.y).atan2(v.x - robot.x) - robot.yaw;
+                v.distance + p.turn_weight * ang.sin().atan2(ang.cos()).abs()
+            };
+            cost(a).total_cmp(&cost(b))
+        });
 
         let mut abandon = None;
         if let Some(a) = self.active.as_mut() {
@@ -406,7 +433,7 @@ impl ExplorerPolicy {
             }
             if a.frontier_missing >= 2 {
                 preempt = Some((a.goal, "its frontier is explored"));
-            } else if robot.distance_to(a.goal.0, a.goal.1) < p.preempt_distance {
+            } else if a.frontier_missing >= 1 && robot.distance_to(a.goal.0, a.goal.1) < p.preempt_distance {
                 preempt = Some((a.goal, "almost there"));
             }
         }
@@ -489,6 +516,7 @@ impl ExplorerPolicy {
             progress_pose: (robot.x, robot.y, robot.yaw),
             last_progress: now,
             cancelling: false,
+            cancel_ok: false,
         });
         let s = &mut self.stats;
         s.sent += 1;
@@ -497,8 +525,9 @@ impl ExplorerPolicy {
             GoalKind::View => s.sent_view += 1,
             GoalKind::Turn => s.sent_turn += 1,
         }
-        if preempt.is_some() {
+        if let Some((current, _)) = preempt {
             s.switched += 1;
+            self.recent.push((current, now));
         }
         out.push(Action::SendGoal(GoalRequest {
             x: goal.0,
@@ -642,14 +671,29 @@ mod tests {
     }
 
     #[test]
-    fn frontier_goal_is_switched_when_almost_there() {
-        let g = map();
+    fn frontier_goal_is_finished_while_its_frontier_is_open_then_switched_once_it_goes() {
+        let mut g = map();
         let mut e = ExplorerPolicy::new(params(), 0.0);
         let goal = sent(&e.tick(0.0, input(&g, Pose2::new(1.0, 1.0, 0.0), None, 0.0))).unwrap();
         e.goal_accepted((goal.x, goal.y));
+        // almost there but the frontier is still open: keep the goal (sim studio ping-pong)
         let near = Pose2::new(goal.x - 0.1, goal.y, 0.0);
-        let next = sent(&e.tick(1.0, input(&g, near, None, 1.0))).expect("switch");
+        assert!(sent(&e.tick(1.0, input(&g, near, None, 1.0))).is_none(), "no switch while the frontier is open");
+        assert_eq!(e.stats().switched, 0);
+        // the frontier at the goal gets mapped (free all round it): switch on, and not back for a while
+        let (cx, cy) = ((goal.x / 0.05) as i64, (goal.y / 0.05) as i64);
+        for y in (cy - 30).max(1)..(cy + 30).min(80) {
+            for x in (cx - 30).max(1)..(cx + 30).min(80) {
+                g.set(Cell { x: x as u32, y: y as u32 }, 0);
+            }
+        }
+        let mut next = None;
+        for k in 2..5 {
+            next = next.or(sent(&e.tick(k as f64, input(&g, near, None, k as f64))));
+        }
+        let next = next.expect("switch once the frontier is explored");
         assert!(next.preempts);
         assert_eq!(e.stats().switched, 1);
+        assert!((next.x - goal.x).hypot(next.y - goal.y) > 0.5, "a different goal");
     }
 }

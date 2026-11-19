@@ -26,7 +26,7 @@ crates/
   tb4_viewer/              live window for tb4_sim (aurea, needs GTK3 dev libs)
 host_ws/                   laptop (Ubuntu 24.04, Jazzy), runs everything heavy
   ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector
-  ros2_ws/src/team7_viz/     read-only map viewer for live runs and replays (r2r + aurea), RViz replacement
+  ros2_ws/src/team7_viz/     map viewer for team7 and stock runs, live or replay (r2r + aurea), RViz replacement
   ros2_ws/src/team7_bringup/ launch, params, RViz config
   ros2_ws/team7.repos        explore_lite source
   scripts/run_demo.sh        undock, reset odom, launch

@@ -213,11 +213,13 @@ node params are in `src/team7_bringup/config/team7.yaml`. nav2.yaml and slam.yam
 ## map viewer (team7_viz)
 
 RViz replacement for the demo, drawn with aurea (same toolkit and colours as the sim viewer, shared
-code in `crates/tb4_draw`). Read-only by default: it only subscribes, so it is safe next to a live
-run or a replay. Needs Rust >= 1.90 and `libgtk-3-dev libx11-xcb-dev`.
+code in `crates/tb4_draw`). Works with the team7 launch and the stock launch (`run_demo.sh --stock`):
+each layer takes its data from the team7 topic or the stock topic, whichever is published.
+Read-only by default: it only subscribes. Needs Rust >= 1.90 and `libgtk-3-dev libx11-xcb-dev`;
+aurea comes from git (`SkuldNorniern/aurea`, rev ed32453) for the Linux sizing fixes.
 
-It is its own colcon package (`src/team7_viz`) and not part of team7_nodes, so the GTK and Rust 1.90
-needs never block the node build; `run_demo.sh` builds only team7_nodes and team7_bringup, so build
+It is its own colcon package (`src/team7_viz`), not part of team7_nodes, so the GTK and Rust 1.90
+needs never block the node build. `run_demo.sh` builds only team7_nodes and team7_bringup, so build
 the viewer once yourself (prep.sh builds it too, with everything else):
 
 ```bash
@@ -227,57 +229,63 @@ colcon build --packages-select team7_viz
 source install/setup.bash
 ros2 run team7_viz team7_viz                          # live run (same ROS_DOMAIN_ID as the robot)
 ROS_DOMAIN_ID=79 ros2 run team7_viz team7_viz         # replay from run_demo.sh --replay
-ros2 run team7_viz team7_viz --allow-goals            # 2D Goal sends NavigateToPose to /team7/navigate_to_pose
+ros2 run team7_viz team7_viz --allow-goals            # 2D Goal sends NavigateToPose
 ```
 
 Or without colcon: `cd src/team7_viz && cargo run --release -- [options]` (ROS sourced). Options:
-`--allow-goals`, `--output-dir DIR` (run folder the mission panel checks, default the newest folder in
-`~/team7_runs`), `--screens-dir DIR` (quick screenshots, default `~/team7_runs/screens`), `--light`
-(keep the desktop GTK theme, default dark), `--verbose` (message counts every 2 s), `--exit-after SEC`,
-`--dump-frame out.png` (saves the map canvas, and `out.ref.png` drawn offscreen, on exit).
+`--allow-goals` (to `/team7/navigate_to_pose` or `/navigate_to_pose`, whichever server exists),
+`--output-dir DIR` (run folder the Targets panel checks, default the most recently active folder in
+`~/team7_runs`, re-checked every 5 s), `--screens-dir DIR` (default `~/team7_runs/screens`),
+`--verbose` (message counts every 2 s), `--exit-after SEC`, `--dump-frame out.png` (saves the canvas,
+and `out.ref.png` drawn offscreen, on exit). On exit it prints paint time p50/p95 and camera frames
+received vs shown.
 
-Window: menu bar (File: screenshot, screenshot as, quit; View: follow, fit, rotate, layers, panels;
-Tools: interact, measure, 2D goal), toolbar with the same actions and a READ-ONLY / GOALS ON mark,
-a dock on the left (drag the divider to resize; click a section title to close or open it), the map on
-the right, and a status bar (sim or wall time, fps, ROS_DOMAIN_ID, frame, cursor position, tool, hints).
+The window, top to bottom:
+- menu bar: File (screenshot, screenshot as, quit), View (panel, follow, fit, health), Tools.
+- toolbar: tools (Interact, Measure, 2D Goal), view (- + Fit Follow North up), Screenshot; on the
+  right the detected stack (team7, stock or mixed), READ-ONLY or GOALS ON, and Panel (the dock).
+- header strip, always visible: mission clock (counts down from 10:00 at the first RUNNING on
+  `/team7/mission_state`; shows the time used once DONE or when the data stops; "not started"
+  before), the first three targets (green confirmed, amber tentative, with position and views), and
+  one status light. When no scan, odom or tf has come for 3 s it turns into one red banner:
+  "no data for N - replay ended or robot off".
+- dock (drag its edge to resize, `D` or Panel to hide it), sections open and close by their title:
+  - Layers: a row per layer with its symbol and the topic it is bound to; click the row or the box.
+    Layers whose topics nobody publishes are listed as "Not published". Costmaps get an opacity
+    slider when on.
+  - Camera: `/team7/aruco/debug` or `/aruco_tracker/debug`, scaled to the dock; grey and marked
+    "stale" when older than 3 s; click it (or `C`) for the big view over the map.
+  - Targets: all targets (id, x, y, state with view count), the last 2D goal result, the run folder
+    and whether `targets.csv` and `map.pgm` are written.
+  - Health (folded): rates against what the robot normally gives, TF age, scan delay.
+- map, and a status bar (sim or wall time, ROS_DOMAIN_ID, cursor position, mouse and key hints).
 
-Dock sections:
-- Mission: 10:00 countdown from the first RUNNING on `/team7/mission_state` (frozen at DONE), state,
-  targets table (id, x, y, tentative or confirmed, views), result of the last 2D goal, and whether
-  `targets.csv` and `map.pgm` exist in the run folder and when they were written.
-- Camera: `/team7/aruco/debug` with its size and age; Enlarge (or `C`) shows it big over the map.
-- Health: rates of scan (5-10 Hz), odom (~20 Hz), tf (>10 Hz), map (~1 Hz) and the camera image
-  (>3 Hz), the age of TF map -> base_link, and the scan delay (ROS now minus the scan stamp, which also
-  shows clock skew between machines). Green ok, amber low, red stopped or late, grey never seen.
-- Layers: a checkbox per layer with its symbol, a one-line legend, and opacity for the costmaps.
+| layer [key] | team7 topic | stock topic | look | at start |
+|---|---|---|---|---|
+| Map [1] | `/map` | `/map` | light free, dark wall, grey unknown | on |
+| Scan [2] | `/scan` | `/scan` | red points | on |
+| Plan [3] | `/team7/path` | `/plan` | green line | on |
+| Local plan [4] | `/team7/mppi/trajectory` | `/local_plan` | magenta line | on |
+| Frontiers [5] | `/team7/frontiers` | `/explore/frontiers` | blue dots | on |
+| Goal [6] | `/team7/goal` | `/goal_pose` | yellow ring with cross | on |
+| Targets [7] | `/team7/targets` | `/team7/targets` | amber `ID n?`, green `ID n` | on |
+| Global costmap [8] | `/global_costmap/costmap` | same | blue .. red, cyan inscribed, purple lethal | off |
+| Local cost [9] | `/team7/mppi/local_cost` | `/local_costmap/costmap` | same ramp | off |
+| Robot | TF map -> base_link | same | white disc, red x and green y axes | on |
+| Camera views | `/team7/frontiers` | - | orange squares | on |
+| SLAM graph | `/team7/slam/graph` | `/slam_toolbox/graph_visualization` | thin edges, small nodes | on |
+| Grid | | | 1 m lines | on |
+| Trail | | | teal line where it drove | on |
 
-| layer [key] | topic | look | on at start |
-|---|---|---|---|
-| Map [1] | `/map` | light free, black occupied, grey unknown | yes |
-| Global costmap [2] | `/global_costmap/costmap` | blue low .. red high, cyan inscribed, purple lethal | no |
-| MPPI local cost [3] | `/team7/mppi/local_cost` | same ramp, 4 m disc | yes, faint |
-| Scan [4] | `/scan` in the map frame (TF at the scan stamp) | red points | yes |
-| Path [5] | `/team7/path` | green line | yes |
-| MPPI trajectory [6] | `/team7/mppi/trajectory` | magenta line | yes |
-| Frontiers [7] | `/team7/frontiers` ns frontier_goals | blue dots | yes |
-| Goal [8] | `/team7/goal` | yellow ring with cross | yes |
-| Targets [9] | `/team7/targets` | amber `ID n?` tentative, green `ID n` confirmed | yes |
-| Camera views | `/team7/frontiers` ns camera_views | orange squares | yes |
-| SLAM graph | `/team7/slam/graph` | thin edges, small nodes, marker colours | yes |
-| Robot | TF map -> base_link | white disc r = 0.171 m, red x and green y axes | yes |
-| Grid | | 1 m lines | yes |
-| Trail | | teal line where the robot has been | yes |
-
-Walls stay readable: the occupied cells of `/map` are drawn again over the costmaps and the grid, and
-the scan and robot come last.
+Walls stay readable: the occupied cells of `/map` are drawn again over the costmaps and the grid,
+and the scan and robot come last. Costmaps start at opacity 0.35.
 
 Mouse and keys: left drag pans (Interact) or uses the tool, middle drag pans, right drag rotates,
-wheel zooms at the pointer. `F` follow robot (on at start), `0`/`R` fit the map and north up, `[` `]`
-rotate 15 deg, `+`/`-` zoom, `1`-`9` layers, `M` measure (drag: distance and angle), `G` 2D goal (drag:
-position, then heading), `I`/Esc interact, `C` camera big, `P` or Ctrl+S quick screenshot, Ctrl+Q quit.
-Without `--allow-goals` the 2D goal is only drawn and nothing is sent.
+wheel zooms at the pointer. `F` follow robot, `0`/`R` fit the map and north up, `[` `]` rotate 15 deg,
+`+`/`-` zoom, `1`-`9` layers, `D` dock, `H` health, `M` measure, `G` 2D goal, `I`/Esc interact,
+`C` camera big, `P` or Ctrl+S screenshot, Ctrl+Q quit, Tab moves between the dock's controls.
 Colours are defined once in `crates/tb4_draw/src/palette.rs`.
-`TEAM7_VIZ_DEBUG_INPUT=1` prints mouse events and the canvas position to stderr.
+`TEAM7_VIZ_DEBUG_INPUT=1` prints mouse presses in canvas pixels to stderr.
 
 ## simulation
 

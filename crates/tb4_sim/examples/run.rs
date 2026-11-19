@@ -66,10 +66,10 @@ fn usage(msg: &str) -> ! {
     std::process::exit(2)
 }
 
-const SET_NAMES: [&str; 23] = [
+const SET_NAMES: [&str; 24] = [
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
-    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
+    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative",
 ];
 
@@ -101,6 +101,7 @@ fn set(cfg: &mut SimConfig, kv: &str) -> Result<(), String> {
         "vx_max" => cfg.nav.mppi.vx_max = x,
         "wz_max" => cfg.nav.mppi.wz_max = x,
         "path_switch_ratio" => cfg.nav.path_switch_ratio = x,
+        "plan_with_scan" => cfg.nav.plan_with_scan = x != 0.0,
         "slow_on_tentative" => cfg.slow.enabled = x != 0.0,
         _ => return Err(format!("--set: unknown name {k}")),
     }

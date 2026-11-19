@@ -17,6 +17,9 @@ pub struct NavParams {
     pub use_scan_obstacles: bool,
     pub scan_obstacle_range: f64,
     pub path_switch_ratio: f64,
+    /// plan on the SLAM map plus the latest scan points (rebuilds the cspace at every replan).
+    /// Off: no measurable gain in the studio over 3 seeds (markers readable 6/9 both ways)
+    pub plan_with_scan: bool,
     pub mppi: MppiParams,
 }
 
@@ -40,6 +43,7 @@ impl NavParams {
             use_scan_obstacles: true,
             scan_obstacle_range: 2.5,
             path_switch_ratio: 0.8,
+            plan_with_scan: false,
             mppi: MppiParams {
                 samples: 1000,
                 horizon: 40,
@@ -273,6 +277,19 @@ impl Navigator {
         };
 
         let need_plan = self.path.is_empty() || now - self.last_plan >= self.p.replan_period - EPS;
+        // plan on the map plus the latest scan, like MPPI: thin chair legs barely reach the SLAM map
+        if need_plan
+            && self.p.plan_with_scan
+            && let Some(m) = self.map.as_ref()
+        {
+            let mut g = m.clone();
+            for &(x, y) in &self.scan_points {
+                if let Some(c) = g.world_to_cell(x, y) {
+                    g.set(c, 100);
+                }
+            }
+            self.cspace = Some(CSpace::new(&g, &self.p.cs));
+        }
         if need_plan {
             let Some(cs) = self.cspace.take() else {
                 self.state = NavState::NoMap;

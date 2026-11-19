@@ -102,6 +102,7 @@ fn set_param(p: &mut SlamParams, key: &str, val: &str) -> bool {
         "loop_cooldown" => p.loop_cooldown = f().unwrap() as usize,
         "loop_min_score" => p.loop_min_score = f().unwrap(),
         "icp" => p.icp = b(),
+        "icp_max_keyframes" => p.icp_max_keyframes = f().unwrap() as usize,
         "opt_iterations" => p.opt_iterations = f().unwrap() as usize,
         _ => return false,
     }

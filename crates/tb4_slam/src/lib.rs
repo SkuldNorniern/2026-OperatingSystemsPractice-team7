@@ -63,6 +63,9 @@ pub struct SlamParams {
     pub icp: bool,
     pub icp_voxel: f64,
     pub icp_normal_radius: f64,
+    /// icp matches against the scans of at most this many keyframes nearest to the pose,
+    /// so its point map does not grow with the run
+    pub icp_max_keyframes: usize,
 }
 
 impl Default for SlamParams {
@@ -106,6 +109,7 @@ impl Default for SlamParams {
             icp: true,
             icp_voxel: 0.025,
             icp_normal_radius: 0.12,
+            icp_max_keyframes: 10,
         }
     }
 }
@@ -169,7 +173,7 @@ pub struct Slam {
     stats: SlamStats,
     update_ms_sum: f64,
     /// point map for icp, tagged with (keyframe count, loop count) it was built at
-    points: Option<((usize, u64), PointMap)>,
+    points: Option<((Vec<usize>, u64), PointMap)>,
 }
 
 fn ms(t: Instant) -> f64 {
@@ -333,20 +337,32 @@ impl Slam {
         if !self.p.icp || self.kfs.is_empty() {
             return pose;
         }
-        let tag = (self.kfs.len(), self.stats.loop_closures);
+        let r = self.p.max_range;
+        let mut near: Vec<(f64, usize)> = self
+            .kfs
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.pose.distance_to(pose.x, pose.y), i))
+            .filter(|&(d, _)| d <= r)
+            .collect();
+        let max = self.p.icp_max_keyframes.max(1);
+        if near.len() > max {
+            near.select_nth_unstable_by(max - 1, |a, b| a.0.total_cmp(&b.0));
+            near.truncate(max);
+        }
+        let mut ids: Vec<usize> = near.into_iter().map(|(_, i)| i).collect();
+        ids.sort_unstable();
+        let tag = (ids, self.stats.loop_closures);
         if self.points.as_ref().is_none_or(|(t, _)| *t != tag) {
-            let r = self.p.max_range;
-            let pts = self
-                .kfs
-                .iter()
-                .filter(|k| k.pose.distance_to(pose.x, pose.y) <= r)
-                .flat_map(|k| {
-                    k.scans.iter().flat_map(move |s| {
-                        let t = compose(k.pose, s.rel);
-                        s.points.iter().map(move |&(x, y)| apply(t, (x as f64, y as f64)))
-                    })
-                });
-            self.points = Some((tag, PointMap::new(pts, self.p.icp_voxel, self.p.icp_normal_radius)));
+            let kfs = &self.kfs;
+            let pts = tag.0.iter().map(|&i| &kfs[i]).flat_map(|k: &Keyframe| {
+                k.scans.iter().flat_map(move |s| {
+                    let t = compose(k.pose, s.rel);
+                    s.points.iter().map(move |&(x, y)| apply(t, (x as f64, y as f64)))
+                })
+            });
+            let map = PointMap::new(pts, self.p.icp_voxel, self.p.icp_normal_radius);
+            self.points = Some((tag, map));
         }
         let map = &self.points.as_ref().unwrap().1;
         match icp(map, q, pose, &IcpParams::default()) {
@@ -575,5 +591,38 @@ impl Slam {
         for part in &parts {
             self.map.merge_add(part);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{Lidar, OdomModel, Rng, World, drive};
+
+    /// drives the room loop with mild odometry drift, calls `check` after every processed scan
+    fn run_room(params: SlamParams, mut check: impl FnMut(&Slam)) -> Slam {
+        let dt = 1.0 / 7.5;
+        let wps = [(1.6, 0.0), (1.6, 1.8), (3.4, 1.8), (3.4, 0.2), (5.6, 0.6), (5.6, 3.6), (3.0, 3.7), (-0.2, 3.7), (-0.2, 0.8), (0.0, 0.0)];
+        let world = World::room();
+        let truth = drive(Pose2::default(), &wps, dt, 0.3, 0.8);
+        let mut rng = Rng::new(3);
+        let odom = OdomModel { trans_noise: 0.02, yaw_noise: 0.001, yaw_bias: 0.002, yaw_scale: 0.005 }.integrate(&truth, dt, &mut rng);
+        let lidar = Lidar::default();
+        let mut slam = Slam::new(params);
+        for (t, o) in truth.iter().zip(&odom) {
+            if slam.update(*o, &lidar.scan(&world, *t, &mut rng)).is_some() {
+                check(&slam);
+            }
+        }
+        slam
+    }
+
+    #[test]
+    fn icp_point_map_is_bounded() {
+        let p = SlamParams { icp_max_keyframes: 6, ..SlamParams::default() };
+        let mut most = 0;
+        let slam = run_room(p, |s| most = most.max(s.points.as_ref().map_or(0, |(tag, _)| tag.0.len())));
+        assert!(slam.kfs.len() > 20, "{}", slam.kfs.len());
+        assert_eq!(most, 6);
     }
 }

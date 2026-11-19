@@ -14,6 +14,7 @@ marker_mapper:
     allow_pnp_fallback: true
     max_abs_bearing_z: 0.8
     min_views: 5
+    min_wall_views: 3         # views whose ray hits a lidar surface; targets are on faces that reach the floor
     max_spread: 0.08          # m, fused position 1 sigma
     max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
     max_history: 200
@@ -130,8 +131,10 @@ aruco_detector:
   ros__parameters:
     marker_dict: ARUCO_ORIGINAL  # same as aruco.yaml. exam markers are ARUCO_ORIGINAL; other names: 4X4_50 .. 7X7_1000, APRILTAG_16H5/25H9/36H10/36H11. Old 6X6_250 test markers 10, 11 are NOT detected with this setting
     image_transport: compressed  # compressed | raw
-    max_hamming: 1            # bit errors corrected, capped per dictionary
+    max_hamming: 0            # bit errors corrected. 0: field frames 2026-11-18 gave 1 false id in 27k frames (8 with 1),
+                              # bench sheet lost <1 % of real detections
     min_side_px: 8.0
     refine_corners: true
-    max_stripe_flips: 1       # reject 1D-barcode-like codes (chair labels read as ids 0, 341, 682, 1023); -1 = off
+    max_stripe_flips: -1      # barcode filter (rejects ids 0, 341, 682, 1023) OFF: a real id 0 is 16-80 px, chair
+                              # labels 8-50 px, so it would hide a real target. marker_mapper wall views stop the labels
     debug_every: 3

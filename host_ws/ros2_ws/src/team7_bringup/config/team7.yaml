@@ -108,6 +108,7 @@ slam:
     max_range: 8.0
     map_publish_period: 1.0
     map_odom_scan_stamp: 0.0  # 1.0 = stamp map->odom with the scan time (test on replay first); 0.0 = current live behaviour
+    scan_time_offset: 0.0  # s added to the scan stamp for the odom lookup; -0.15 halved per-scan pose corrections and tf failures on the 2026-11-18 bags (offline replay), test live first
     transform_publish_period: 0.05
 
 navigator:

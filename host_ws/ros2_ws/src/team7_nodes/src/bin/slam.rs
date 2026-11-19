@@ -12,7 +12,7 @@ use r2r::tf2_msgs::msg::TFMessage;
 use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{QosProfile, log_info, log_warn};
 use tb4_core::nalgebra::Point3;
-use tb4_core::{Grid, Pose2, TfBuffer};
+use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
 use tb4_slam::{Slam, SlamParams};
 use team7_nodes::{Params, pose_msg, spawn_tf_listener, stamp, viz};
 
@@ -54,6 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // on: stamp it with the latest scan time, so it lines up with the odometry
     let scan_stamp_tf = p.f64("map_odom_scan_stamp", 0.0) > 0.5;
     let tf_period = Duration::from_secs_f64(p.f64("transform_publish_period", 0.05));
+    // odometry is looked up at scan stamp + this (s); negative when scan stamps run ahead of odom
+    let scan_time_offset_ns = (p.f64("scan_time_offset", 0.0) * 1e9).round() as i64;
     log_info!(&log, "own slam on {scan_topic}, map every {:.1}s", map_period.as_secs_f64());
 
     let pool = LocalPool::new();
@@ -78,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawner.spawn_local(scans.for_each(move |m| {
         let t = stamp(&m.header.stamp);
         let b = tfb.borrow();
-        let (odom, base_t_laser) = match (b.lookup(&of, &bf, t), b.lookup(&bf, &m.header.frame_id, t)) {
+        let t_odom = Stamp(t.0 + scan_time_offset_ns);
+        let (odom, base_t_laser) = match (b.lookup(&of, &bf, t_odom), b.lookup(&bf, &m.header.frame_id, t)) {
             (Ok(o), Ok(l)) => (Pose2::from_isometry(&o), l),
             (Err(e), _) | (_, Err(e)) => {
                 let mut s = st.borrow_mut();
@@ -108,12 +111,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.last_stamp = m.header.stamp.clone();
             let stats = s.slam.stats();
             if stats.loop_closures > before {
-                log_info!(&log2, "loop closure #{} ({} keyframes)", stats.loop_closures, stats.keyframes);
+                let (lin, ang) = stats.last_loop_correction;
+                log_info!(&log2, "loop closure #{} ({} keyframes, moved {:.3} m {:.3} rad, {} map redraws)",
+                    stats.loop_closures, stats.keyframes, lin, ang, stats.map_redraws);
             }
             if stats.scans_processed % 200 == 0 {
-                log_info!(&log2, "{} scans, mean {:.1} ms, max {:.1} ms, {} fallbacks, icp {}/{}",
+                log_info!(&log2, "{} scans, mean {:.1} ms, max {:.1} ms, {} fallbacks, icp {}/{}, {} loops, {} map redraws",
                     stats.scans_processed, stats.mean_update_ms, stats.max_update_ms, stats.match_fallbacks,
-                    stats.icp_used, stats.icp_used + stats.icp_rejected);
+                    stats.icp_used, stats.icp_used + stats.icp_rejected, stats.loop_closures, stats.map_redraws);
             }
         }
         futures::future::ready(())

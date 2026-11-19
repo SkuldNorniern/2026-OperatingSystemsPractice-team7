@@ -206,6 +206,8 @@ pub struct SimState<'a> {
     pub cmd: (f64, f64),
     pub markers: &'a [MarkerRecord],
     pub collisions: u64,
+    /// world-frame contact points of the bumps (front bumper zones, one per bump)
+    pub bumps: &'a [(f64, f64)],
 }
 
 impl SimState<'_> {
@@ -275,6 +277,7 @@ pub struct Sim {
     next_cam: f64,
     slow_until: f64,
     last_view: Vec<Option<((f64, f64), f64)>>,
+    bump_points: Vec<(f64, f64)>,
     // metrics
     m: Metrics,
     stalls: StallTracker,
@@ -328,6 +331,7 @@ impl Sim {
             next_cam: 0.0,
             slow_until: f64::NEG_INFINITY,
             last_view: vec![None; cfg.world.markers.len()],
+            bump_points: Vec::new(),
             m,
             stalls: StallTracker::default(),
             area_next: 0,
@@ -364,6 +368,11 @@ impl Sim {
         &self.explorer
     }
 
+    /// the navigator (planned path, MPPI optimal trajectory, state)
+    pub fn navigator(&self) -> &Navigator {
+        &self.nav
+    }
+
     pub fn log(&self) -> &[(f64, String)] {
         &self.log
     }
@@ -382,6 +391,7 @@ impl Sim {
             cmd: self.cmd,
             markers: &self.m.markers,
             collisions: self.robot.collisions,
+            bumps: &self.bump_points,
         }
     }
 
@@ -601,6 +611,7 @@ impl Sim {
             }
             if let Some(z) = c.zone.filter(|_| self.robot.bumps > bumps_before) {
                 *self.m.bumps_by_zone.entry(z.frame_id().into()).or_default() += 1;
+                self.bump_points.push(c.point);
             }
         }
         let after = self.robot.pose;

@@ -17,6 +17,19 @@ pub struct CoverageParams {
     pub standoff: f64,
     /// viewpoint must be at least this far from any obstacle (m)
     pub min_clearance: f64,
+    /// a wall cell only counts as seen if the camera met it at most this far off its normal (rad);
+    /// a marker seen edge-on does not decode
+    pub max_incidence: f64,
+    #[cfg(test)]
+    plain_range: bool,
+}
+
+impl CoverageParams {
+    /// only for comparison in tests: count a hit as seen by plain range, ignoring incidence
+    #[cfg(test)]
+    fn with_plain_range(self) -> Self {
+        Self { plain_range: true, ..self }
+    }
 }
 
 impl Default for CoverageParams {
@@ -31,6 +44,9 @@ impl Default for CoverageParams {
             max_cluster_cells: 24,
             standoff: 1.2,
             min_clearance: 0.35,
+            max_incidence: 1.3,
+            #[cfg(test)]
+            plain_range: false,
         }
     }
 }
@@ -87,6 +103,15 @@ impl Coverage {
             if let Some(hit) = g.raycast(cx, cy, a.cos(), a.sin(), p.range, p.occupied_threshold) {
                 // step just inside the wall cell
                 let (hx, hy) = (hit.x + a.cos() * 1e-3, hit.y + a.sin() * 1e-3);
+                // A marker on the wall looks cos(incidence) narrower, like one range / cos further
+                // away; `range` is how far a marker can be read head-on, so compare that.
+                let cos_inc = wall_direction(g, (hx, hy), p.occupied_threshold)
+                    .map_or(1.0, |(wx, wy)| (a.cos() * wy - a.sin() * wx).abs());
+                #[cfg(test)]
+                let cos_inc = if p.plain_range { 1.0 } else { cos_inc };
+                if cos_inc < p.max_incidence.cos() || hit.range > p.range * cos_inc {
+                    continue;
+                }
                 let k = self.key(hx, hy);
                 self.seen.insert(k);
             }
@@ -160,6 +185,36 @@ impl Coverage {
             .total_cmp(&(b.distance - 0.2 * b.cells as f64 * g.meta.resolution)));
         out
     }
+}
+
+/// unit direction along the wall at `pt`: principal axis of the occupied cells within 2 cells.
+/// None if too few cells to tell (a single post).
+fn wall_direction(g: &Grid, pt: (f64, f64), occupied: i8) -> Option<(f64, f64)> {
+    let c = g.world_to_cell(pt.0, pt.1)?;
+    let mut pts = Vec::with_capacity(25);
+    for dy in -2..=2i64 {
+        for dx in -2..=2i64 {
+            if let Some(n) = g.cell_checked(c.x as i64 + dx, c.y as i64 + dy)
+                && g.get(n) >= occupied
+            {
+                pts.push((dx as f64, dy as f64));
+            }
+        }
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    let n = pts.len() as f64;
+    let (mx, my) = (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for (x, y) in pts {
+        sxx += (x - mx) * (x - mx);
+        syy += (y - my) * (y - my);
+        sxy += (x - mx) * (y - my);
+    }
+    // major axis angle of the 2x2 covariance
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    Some((th.cos(), th.sin()))
 }
 
 fn d2(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -236,6 +291,31 @@ mod tests {
     }
 
     #[test]
+    fn oblique_or_far_walls_are_not_seen() {
+        let g = room();
+        let p = CoverageParams { range: 1.5, ..Default::default() };
+        // 1 m from the south wall, looking straight at it: seen
+        let mut cov = Coverage::new();
+        cov.update(&g, (3.0, 1.1, -std::f64::consts::FRAC_PI_2), &p);
+        assert!(cov.is_seen(&g, g.world_to_cell(3.0, 0.02).unwrap()));
+        // grazing view: wall point about 1.4 m away (inside range) but 70 deg off its normal, so a
+        // marker there looks like one ~4 m away: not seen. Without the incidence rule it would be.
+        let mut cov = Coverage::new();
+        let pose = (3.0, 0.5, -0.349);
+        cov.update(&g, pose, &p);
+        let grazing = g.world_to_cell(4.3, 0.02).unwrap();
+        assert!(!cov.is_seen(&g, grazing));
+        let mut cov = Coverage::new();
+        cov.update(&g, pose, &CoverageParams { range: 1.5, max_incidence: std::f64::consts::FRAC_PI_2, ..Default::default() }
+            .with_plain_range());
+        assert!(cov.is_seen(&g, grazing), "plain range check sees it");
+        // head-on but 2.5 m away: a marker would be too small, not seen
+        let mut cov = Coverage::new();
+        cov.update(&g, (3.0, 2.6, -std::f64::consts::FRAC_PI_2), &p);
+        assert!(!cov.is_seen(&g, g.world_to_cell(3.0, 0.02).unwrap()));
+    }
+
+    #[test]
     fn views_point_at_unseen_walls() {
         let g = room();
         let mut cov = Coverage::new();
@@ -246,9 +326,10 @@ mod tests {
             let c = g.world_to_cell(v.x, v.y).unwrap();
             assert_eq!(g.get(c), 0);
         }
-        // look at every wall from the middle: nothing left
+        // look at every wall from the middle (range long enough for the corners at an angle): nothing left
+        let far = CoverageParams { range: 10.0, ..p.clone() };
         for k in 0..16 {
-            cov.update(&g, (3.0, 2.0, k as f64 * std::f64::consts::TAU / 16.0), &p);
+            cov.update(&g, (3.0, 2.0, k as f64 * std::f64::consts::TAU / 16.0), &far);
         }
         assert!(cov.views(&g, (3.0, 2.0), &p).is_empty(), "{:?}", cov.views(&g, (3.0, 2.0), &p));
     }

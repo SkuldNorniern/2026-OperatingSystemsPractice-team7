@@ -92,6 +92,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
         progress_epsilon: 0.1,
         retry_delay: 5.0,
         blacklist_duration: 45.0,
+        blacklist_max_duration: 300.0,
         turn_weight: 0.5,
         costmap_timeout: 5.0,
         explore: ExploreParams {
@@ -158,10 +159,10 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 34] = [
+pub const SET_NAMES: [&str; 35] = [
     "min_free_fraction",
     "require_scale_all",
-    "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
+    "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "blacklist_max_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
     "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
@@ -179,6 +180,7 @@ impl SimConfig {
             "progress_timeout" => e.progress_timeout = x,
             "retry_delay" => e.retry_delay = x,
             "blacklist_duration" => e.blacklist_duration = x,
+            "blacklist_max_duration" => e.blacklist_max_duration = x,
             "turn_weight" => e.turn_weight = x,
             "distance_weight" => e.explore.distance_weight = x,
             "size_weight" => e.explore.size_weight = x,

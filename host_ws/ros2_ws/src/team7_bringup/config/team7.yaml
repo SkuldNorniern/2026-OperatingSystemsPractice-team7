@@ -54,6 +54,7 @@ explorer:
     progress_timeout: 15.0    # s without 0.1 m of movement: give the goal up (field runs lost 30 s per stuck goal)
     progress_epsilon: 0.1
     blacklist_duration: 45.0
+    blacklist_max_duration: 300.0  # s, ban doubles per failure at one spot (183647 replay cycled 3 failing goals)
     turn_weight: 0.5
     goal_standoff: 0.3
     free_threshold: 50

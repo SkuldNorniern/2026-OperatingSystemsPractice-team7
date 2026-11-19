@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         progress_epsilon: p.f64("progress_epsilon", 0.1),
         retry_delay: p.f64("retry_delay", 5.0),
         blacklist_duration: p.f64("blacklist_duration", 45.0),
+        blacklist_max_duration: p.f64("blacklist_max_duration", 300.0),
         turn_weight: p.f64("turn_weight", 0.5),
         costmap_timeout: 5.0,
         explore: ExploreParams {

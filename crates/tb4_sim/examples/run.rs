@@ -1,4 +1,4 @@
-//! One closed-loop run: prints the metrics table and writes them as JSON.
+//! One closed-loop run: prints the metrics table, and writes them as JSON with `--json FILE`.
 //!
 //! cargo run --release -p tb4_sim --example run -- --world studio --seconds 600 --seed 1 [--perfect-pose]
 //!     [--json out.json] [--log]
@@ -50,10 +50,11 @@ fn main() {
     }
     let m = sim.metrics();
     print!("{}", m.table());
-    let path = json.unwrap_or_else(|| format!("tb4_sim_{world}_seed{seed}{}.json", if perfect { "_perfect" } else { "" }));
-    match std::fs::write(&path, m.to_json()) {
-        Ok(()) => println!("metrics written to {path}"),
-        Err(e) => eprintln!("cannot write {path}: {e}"),
+    if let Some(path) = json {
+        match std::fs::write(&path, m.to_json()) {
+            Ok(()) => println!("metrics written to {path}"),
+            Err(e) => eprintln!("cannot write {path}: {e}"),
+        }
     }
 }
 

@@ -55,11 +55,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allow_pnp_fallback: p.bool("allow_pnp_fallback", true),
             max_abs_bearing_z: p.f64("max_abs_bearing_z", 0.8),
             wall_fit_radius: p.f64("wall_fit_radius", 0.2),
+            min_range: p.f64("min_range", 0.3),
         };
         let track = TrackParams {
             min_views: p.i64("min_views", 5) as usize,
             min_wall_views: p.i64("min_wall_views", 3) as usize,
             min_wall_fraction: p.f64("min_wall_fraction", 0.25),
+            min_triangulation_spread: p.f64("min_triangulation_spread", 0.2),
+            max_triangulation_gap: p.f64("max_triangulation_gap", 0.3),
             max_spread: p.f64("max_spread", 0.08),
             max_consistency: p.f64("max_consistency", 3.0),
             max_history: p.i64("max_history", 200) as usize,
@@ -140,6 +143,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
 
     let pub_targets = node.create_publisher::<MarkerArray>("/team7/targets", QosProfile::default())?;
+    // tentative markers: where to stand (approach_standoff m in front, facing it) to read it properly.
+    // For the explorer's approach-on-sight; empty array when nothing is tentative
+    let pub_approach = node.create_publisher::<r2r::geometry_msgs::msg::PoseArray>("/team7/marker_approach", QosProfile::default())?;
+    let approach_standoff = Params(&node).f64("approach_standoff", 1.3);
     let det_sub = node.subscribe::<ArucoDetection>(&detections_topic, QosProfile::sensor_data())?;
     let st = state.clone();
     let log2 = log.clone();
@@ -210,6 +217,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = f.flush();
         }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
+        let mut approach = r2r::geometry_msgs::msg::PoseArray::default();
+        approach.header.frame_id = s.map_frame.clone();
+        approach.poses = targets
+            .iter()
+            .filter(|t| !t.confirmed && t.views >= 2)
+            .filter_map(|t| s.tracker.approach(t.id, approach_standoff))
+            .map(|(x, y, yaw)| team7_nodes::pose_msg(x, y, yaw))
+            .collect();
+        let _ = pub_approach.publish(&approach);
         futures::future::ready(())
     }))?;
 

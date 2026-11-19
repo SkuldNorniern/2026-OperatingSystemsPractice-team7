@@ -16,6 +16,10 @@ marker_mapper:
     min_views: 5
     min_wall_views: 3         # views whose ray hits a lidar surface; targets are on faces that reach the floor
     min_wall_fraction: 0.25   # and this share of all views (chair label in 184838: 3 of 39)
+    min_triangulation_spread: 0.2   # rad; views must spread this far before confirming, and their bearings'
+    max_triangulation_gap: 0.3      # m intersection must agree with the fused position (labels in front of a wall fail)
+    min_range: 0.3            # m, ignore hits / pnp ranges closer to the camera (robot's own cells)
+    approach_standoff: 1.3    # m, /team7/marker_approach poses for tentative markers
     max_spread: 0.08          # m, fused position 1 sigma
     max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
     max_history: 200

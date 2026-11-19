@@ -145,12 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
 
     let pub_targets = node.create_publisher::<MarkerArray>("/team7/targets", QosProfile::default())?;
-    // Tentative markers for the explorer's approach on sight. /team7/marker_approach, geometry_msgs/PoseArray
-    // in the map frame: one pose per marker that is not confirmed and has 2+ views, position = fused
-    // marker position (z 0), orientation = yaw of the marker's face normal, pointing to the free side it
-    // was seen from (Tracker::facing: the wall line in the map, else back along the views). Ids are not
-    // carried. Empty array when nothing is tentative. The explorer picks the viewpoints itself.
-    let pub_approach = node.create_publisher::<r2r::geometry_msgs::msg::PoseArray>("/team7/marker_approach", QosProfile::default())?;
+    // Tentative markers for the explorer's approach on sight: /team7/marker_approach,
+    // visualization_msgs/MarkerArray, ns "tentative", id = aruco id, pose = fused position in the map
+    // frame with yaw = face normal toward the free side it was seen from (Tracker::facing).
+    // Only markers with 2+ views that are not confirmed; one that leaves the list was confirmed.
+    let pub_approach = node.create_publisher::<MarkerArray>("/team7/marker_approach", QosProfile::default())?;
     let det_sub = node.subscribe::<ArucoDetection>(&detections_topic, QosProfile::sensor_data())?;
     let st = state.clone();
     let log2 = log.clone();
@@ -221,16 +220,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = f.flush();
         }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
-        let mut approach = r2r::geometry_msgs::msg::PoseArray::default();
-        approach.header.frame_id = s.map_frame.clone();
-        approach.poses = targets
-            .iter()
-            .filter(|t| !t.confirmed && t.views >= 2)
-            .filter_map(|t| {
-                let yaw = s.tracker.facing(t.id, s.grid.as_ref(), s.locate.occupied_threshold)?;
-                Some(team7_nodes::pose_msg(t.x, t.y, yaw))
-            })
-            .collect();
+        // marker id = aruco id, so the explorer keys approaches by id: without ids a jumping
+        // estimate looked like a confirmation and the same chair label was approached 3 times
+        let approach = MarkerArray {
+            markers: targets
+                .iter()
+                .filter(|t| !t.confirmed && t.views >= 2)
+                .filter_map(|t| {
+                    let yaw = s.tracker.facing(t.id, s.grid.as_ref(), s.locate.occupied_threshold)?;
+                    let mut m = team7_nodes::viz::base(&s.map_frame, "tentative", t.id as i32, team7_nodes::viz::SPHERE);
+                    m.pose = team7_nodes::pose_msg(t.x, t.y, yaw);
+                    Some(m)
+                })
+                .collect(),
+        };
         let _ = pub_approach.publish(&approach);
         futures::future::ready(())
     }))?;

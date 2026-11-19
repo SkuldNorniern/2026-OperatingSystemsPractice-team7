@@ -3,8 +3,8 @@
 # map_origin_shift (marker_mapper, mission)
 
 marker_mapper:
-  # publishes /team7/marker_approach (PoseArray, map frame): tentative markers with 2+ views at their fused
-  # position, oriented along the face normal toward the side they were seen from (no ids); the explorer's
+  # publishes /team7/marker_approach (MarkerArray ns tentative, id = aruco id, map frame): tentative markers with 2+ views at their fused
+  # position, oriented along the face normal toward the side they were seen from; the explorer's
   # approach_* parameters pick the viewpoints
   ros__parameters:
     detections_topic: /aruco_detections

@@ -123,19 +123,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         markers: Vec::new(),
     }));
 
-    // marker_mapper's tentative markers: one pose per marker that is not confirmed yet, at its fused
-    // position in the map frame, orientation = yaw of its face normal toward the free side it was seen
-    // from (no ids). A marker leaving the list was confirmed. Subscribed even with approach off (cheap)
-    let approach_sub = node.subscribe::<r2r::geometry_msgs::msg::PoseArray>(&approach_topic, QosProfile::default())?;
+    // marker_mapper's tentative markers (MarkerArray, ns "tentative", id = aruco id, pose = fused
+    // position, yaw = face normal toward the free side). A marker leaving the list was confirmed.
+    // Subscribed even with approach off (cheap)
+    let approach_sub = node.subscribe::<MarkerArray>(&approach_topic, QosProfile::default())?;
     let st = state.clone();
     spawner.spawn_local(approach_sub.for_each(move |m| {
         st.borrow_mut().markers = m
-            .poses
+            .markers
             .iter()
-            .map(|p| {
-                let q = &p.orientation;
+            .filter(|mk| mk.ns == "tentative")
+            .map(|mk| {
+                let (p, q) = (&mk.pose.position, &mk.pose.orientation);
                 let facing = (2.0 * (q.w * q.z + q.x * q.y)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-                MarkerHint { id: None, x: p.position.x, y: p.position.y, facing }
+                MarkerHint { id: Some(mk.id as i64), x: p.x, y: p.y, facing }
             })
             .collect();
         futures::future::ready(())

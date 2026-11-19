@@ -1,7 +1,7 @@
 //! What the viewer knows about the run, all in the map frame. Filled by the ROS thread (`ros`),
 //! read by the window (`app`, `gui`). No ROS types here, so it is tested and drawn without a ROS graph.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use tb4_core::GridMeta;
@@ -64,6 +64,7 @@ impl RateMeter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Map,
+    Scan,
     GlobalCost,
     LocalCost,
     Plan,
@@ -83,6 +84,7 @@ impl Slot {
     pub fn candidates(self) -> &'static [&'static str] {
         match self {
             Slot::Map => &["/map"],
+            Slot::Scan => &["/scan"],
             Slot::GlobalCost => &["/global_costmap/costmap"],
             Slot::LocalCost => &["/team7/mppi/local_cost", "/local_costmap/costmap"],
             Slot::Plan => &["/team7/path", "/plan"],
@@ -188,24 +190,73 @@ pub struct CameraFrame {
     pub at: Instant,
 }
 
-/// everything drawn, in the map frame
+/// the message types a layer can show, and so what a topic is subscribed as
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MsgKind {
+    Grid,
+    Scan,
+    Path,
+    Markers,
+    Pose,
+    Image,
+}
+
+impl MsgKind {
+    /// the ROS type name, as the graph lists it
+    pub fn ros_type(self) -> &'static str {
+        match self {
+            MsgKind::Grid => "nav_msgs/msg/OccupancyGrid",
+            MsgKind::Scan => "sensor_msgs/msg/LaserScan",
+            MsgKind::Path => "nav_msgs/msg/Path",
+            MsgKind::Markers => "visualization_msgs/msg/MarkerArray",
+            MsgKind::Pose => "geometry_msgs/msg/PoseStamped",
+            MsgKind::Image => "sensor_msgs/msg/Image",
+        }
+    }
+}
+
+/// one topic in the ROS graph
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GraphTopic {
+    pub name: String,
+    pub types: Vec<String>,
+    pub publishers: usize,
+}
+
+/// a marker in the map frame, with what the layers need from it
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mk {
+    pub ns: String,
+    pub id: i32,
+    pub kind: ShapeKind,
+    pub pts: Vec<(f64, f64)>,
+    /// the marker's own position (a sphere's centre)
+    pub pos: (f64, f64),
+    pub color: Rgba,
+    pub text: String,
+}
+
+/// the latest data of one topic, in the map frame
+#[derive(Debug, Clone)]
+pub enum Feed {
+    Grid(GridLayer),
+    /// scan points or a path
+    Points(Vec<(f64, f64)>),
+    Markers(Vec<Mk>),
+    Pose(Option<(f64, f64)>),
+    Image(CameraFrame),
+}
+
+/// everything drawn, in the map frame. Data is kept per topic, so a layer can switch topics
+/// without losing what the other one had.
 #[derive(Debug, Clone, Default)]
 pub struct Model {
-    pub map: GridLayer,
-    pub global_cost: GridLayer,
-    pub local_cost: GridLayer,
+    pub feeds: HashMap<String, Feed>,
+    /// message rate per topic
+    pub topic_rates: HashMap<String, RateMeter>,
     /// map -> base_link (x, y, yaw)
     pub robot: Option<(f64, f64, f64)>,
     pub trail: Vec<(f64, f64)>,
-    pub scan: Vec<(f64, f64)>,
-    pub path: Vec<(f64, f64)>,
-    pub trajectory: Vec<(f64, f64)>,
-    pub frontiers: Vec<(f64, f64)>,
-    pub views: Vec<(f64, f64)>,
-    pub goal: Option<(f64, f64)>,
-    pub targets: Vec<Target>,
-    pub slam_graph: Vec<Shape>,
-    pub camera: Option<CameraFrame>,
     pub mission: Option<String>,
     /// first RUNNING, and when the state left RUNNING after that
     pub mission_started: Option<Instant>,
@@ -219,15 +270,17 @@ pub struct Model {
     pub scan_delay: Option<f64>,
     pub rates: [RateMeter; 5],
     /// messages received per subscription, for the debug line
-    pub counts: Vec<(&'static str, u64)>,
+    pub counts: Vec<(String, u64)>,
     /// the last frame that could not be put in the map frame (no TF yet), and when
     pub tf_problem: Option<(String, Instant)>,
     /// what happened to the last goal sent with the 2D Goal tool
     pub goal_status: Option<String>,
-    /// topic names in the ROS graph, polled every few seconds
-    pub graph: Vec<String>,
-    /// last message per topic
-    pub seen: Vec<(&'static str, Instant)>,
+    /// topics in the ROS graph with their types and publisher counts, polled every few seconds
+    pub graph: Vec<GraphTopic>,
+    /// what the window wants subscribed: set by the window, read by the ROS thread
+    pub wanted: Vec<(String, MsgKind)>,
+    /// the camera image topic in use (the health panel rates it)
+    pub camera_topic: Option<String>,
 }
 
 impl Model {
@@ -235,10 +288,13 @@ impl Model {
     pub fn reset_run(&mut self) {
         self.robot = None;
         self.trail.clear();
-        self.scan.clear();
-        self.path.clear();
-        self.trajectory.clear();
-        self.goal = None;
+        for f in self.feeds.values_mut() {
+            match f {
+                Feed::Points(p) => p.clear(),
+                Feed::Pose(p) => *p = None,
+                _ => {}
+            }
+        }
         self.tf_stamp = None;
         self.scan_delay = None;
         // the mission clock and the targets stay: the mission state is latched and sent once, so
@@ -246,23 +302,82 @@ impl Model {
         // its target array replaces the targets
     }
 
-    /// the topic a slot takes its data from: the first candidate in the graph, else the first
-    /// one that sent something; None when no candidate exists (the layer is hidden)
+    /// new data on `topic`
+    pub fn put(&mut self, topic: &str, feed: Feed, now: Instant) {
+        self.feeds.insert(topic.to_owned(), feed);
+        self.topic_rates.entry(topic.to_owned()).or_default().tick(now);
+    }
+
+    /// change the data of `topic` in place (markers accumulate, grids count their updates)
+    pub fn feed_mut(&mut self, topic: &str, now: Instant, empty: impl FnOnce() -> Feed) -> &mut Feed {
+        self.topic_rates.entry(topic.to_owned()).or_default().tick(now);
+        self.feeds.entry(topic.to_owned()).or_insert_with(empty)
+    }
+
+    pub fn grid(&self, topic: &str) -> Option<&GridLayer> {
+        match self.feeds.get(topic) {
+            Some(Feed::Grid(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    pub fn points(&self, topic: &str) -> &[(f64, f64)] {
+        match self.feeds.get(topic) {
+            Some(Feed::Points(p)) => p,
+            _ => &[],
+        }
+    }
+
+    pub fn markers(&self, topic: &str) -> &[Mk] {
+        match self.feeds.get(topic) {
+            Some(Feed::Markers(m)) => m,
+            _ => &[],
+        }
+    }
+
+    pub fn pose(&self, topic: &str) -> Option<(f64, f64)> {
+        match self.feeds.get(topic) {
+            Some(Feed::Pose(p)) => *p,
+            _ => None,
+        }
+    }
+
+    pub fn image(&self, topic: &str) -> Option<&CameraFrame> {
+        match self.feeds.get(topic) {
+            Some(Feed::Image(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// the camera frame of the topic in use
+    pub fn camera(&self) -> Option<&CameraFrame> {
+        self.image(self.camera_topic.as_deref()?)
+    }
+
+    /// publishers of a topic in the last graph poll; None when the topic is not in the graph
+    pub fn publishers(&self, topic: &str) -> Option<usize> {
+        self.graph.iter().find(|g| g.name == topic).map(|g| g.publishers)
+    }
+
+    pub fn topic_hz(&self, topic: &str, now: Instant) -> Option<f64> {
+        self.topic_rates.get(topic).map(|r| r.hz(now))
+    }
+
+    /// graph topics of a message type, publishers first, then by name
+    pub fn topics_of(&self, kind: MsgKind) -> Vec<&GraphTopic> {
+        let mut v: Vec<&GraphTopic> = self.graph.iter().filter(|g| g.types.iter().any(|t| t == kind.ros_type())).collect();
+        v.sort_by(|a, b| b.publishers.min(1).cmp(&a.publishers.min(1)).then_with(|| a.name.cmp(&b.name)));
+        v
+    }
+
+    /// the topic a slot takes its data from: the first candidate someone publishes, else the
+    /// first one that sent something; None when no candidate exists (the layer is hidden)
     pub fn bound(&self, slot: Slot) -> Option<&'static str> {
         let c = slot.candidates();
         c.iter()
-            .find(|t| self.graph.iter().any(|g| *g == slot.probe(t)))
-            .or_else(|| c.iter().find(|t| self.seen.iter().any(|(s, _)| s == *t)))
+            .find(|t| self.publishers(&slot.probe(t)).is_some_and(|n| n > 0))
+            .or_else(|| c.iter().find(|t| self.topic_rates.contains_key(**t)))
             .copied()
-    }
-
-    /// a message on `topic` for `slot`: noted, and true when it is the slot's source
-    pub fn accept(&mut self, slot: Slot, topic: &'static str, now: Instant) -> bool {
-        match self.seen.iter_mut().find(|(s, _)| *s == topic) {
-            Some(e) => e.1 = now,
-            None => self.seen.push((topic, now)),
-        }
-        self.bound(slot) == Some(topic)
     }
 
     /// which stack the sources look like: "team7", "stock", "mixed" or "-"
@@ -289,7 +404,12 @@ impl Model {
         (d > STALE_AFTER).then_some(d)
     }
 
+    /// the health rate of a watched topic (the camera is the image topic in use)
     pub fn rate(&self, t: Topic) -> &RateMeter {
+        static NONE: std::sync::LazyLock<RateMeter> = std::sync::LazyLock::new(RateMeter::default);
+        if t == Topic::Camera {
+            return self.camera_topic.as_deref().and_then(|c| self.topic_rates.get(c)).unwrap_or(&NONE);
+        }
         &self.rates[t as usize]
     }
 
@@ -297,10 +417,10 @@ impl Model {
         self.rates[t as usize].tick(now);
     }
 
-    pub fn count(&mut self, name: &'static str) {
-        match self.counts.iter_mut().find(|(n, _)| *n == name) {
+    pub fn count(&mut self, name: &str) {
+        match self.counts.iter_mut().find(|(n, _)| n == name) {
             Some((_, c)) => *c += 1,
-            None => self.counts.push((name, 1)),
+            None => self.counts.push((name.to_owned(), 1)),
         }
     }
 
@@ -343,19 +463,58 @@ impl Model {
         }
     }
 
-    /// world box to fit the view to: the map, else around the robot, else 10 x 10 m at the origin
-    pub fn bounds(&self) -> [f64; 4] {
-        if let Some(m) = &self.map.grid {
+    /// world box to fit the view to: the map of `map_topic`, else around the robot, else
+    /// 10 x 10 m at the origin
+    pub fn bounds(&self, map_topic: Option<&str>) -> [f64; 4] {
+        if let Some(m) = map_topic.and_then(|t| self.grid(t)).and_then(|g| g.grid.as_ref()) {
             let g = &m.meta;
             return [g.origin_x, g.origin_y, g.origin_x + f64::from(g.width) * g.resolution, g.origin_y + f64::from(g.height) * g.resolution];
         }
         let (x, y) = self.robot.map_or((0.0, 0.0), |r| (r.0, r.1));
         [x - 5.0, y - 5.0, x + 5.0, y + 5.0]
     }
+}
 
-    pub fn targets(&self, confirmed: bool) -> impl Iterator<Item = &Target> {
-        self.targets.iter().filter(move |t| t.confirmed == confirmed)
+/// a marker array's frontier goals: team7's `frontier_goals` namespace, or for explore_lite every
+/// point but our camera views and labels
+pub fn frontier_points(mks: &[Mk]) -> Vec<(f64, f64)> {
+    let team7 = mks.iter().any(|m| m.ns == "frontier_goals");
+    mks.iter()
+        .filter(|m| if team7 { m.ns == "frontier_goals" } else { m.ns != "camera_views" && !m.ns.ends_with("_label") })
+        .flat_map(|m| m.pts.iter().copied())
+        .collect()
+}
+
+/// team7's planned camera view poses (`camera_views` namespace)
+pub fn view_points(mks: &[Mk]) -> Vec<(f64, f64)> {
+    mks.iter().filter(|m| m.ns == "camera_views").flat_map(|m| m.pts.iter().copied()).collect()
+}
+
+/// views from a tentative label "ID 3? 2v"
+fn label_views(text: &str) -> Option<u32> {
+    text.split_whitespace().last()?.strip_suffix('v')?.parse().ok()
+}
+
+/// marker_mapper's targets: spheres give the position, tentative labels the view count
+pub fn targets_of(mks: &[Mk]) -> Vec<Target> {
+    let mut out: Vec<Target> = mks
+        .iter()
+        .filter_map(|m| {
+            let confirmed = match m.ns.as_str() {
+                "target_confirmed" => true,
+                "target_tentative" => false,
+                _ => return None,
+            };
+            Some(Target { id: m.id, x: m.pos.0, y: m.pos.1, confirmed, views: None })
+        })
+        .collect();
+    for m in mks.iter().filter(|m| m.ns == "target_tentative_label") {
+        if let Some(t) = out.iter_mut().find(|t| t.id == m.id && !t.confirmed) {
+            t.views = label_views(&m.text);
+        }
     }
+    out.sort_by_key(|t| t.id);
+    out
 }
 
 fn mmss(d: Duration) -> String {
@@ -401,7 +560,7 @@ pub fn human_age(d: Duration) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -423,16 +582,42 @@ mod tests {
     #[test]
     fn bounds_follow_map_then_robot() {
         let mut m = Model::default();
-        assert_eq!(m.bounds(), [-5.0, -5.0, 5.0, 5.0]);
+        assert_eq!(m.bounds(Some("/map")), [-5.0, -5.0, 5.0, 5.0]);
         m.robot = Some((1.0, 2.0, 0.0));
-        assert_eq!(m.bounds(), [-4.0, -3.0, 6.0, 7.0]);
-        m.map.set(MapData {
+        assert_eq!(m.bounds(Some("/map")), [-4.0, -3.0, 6.0, 7.0]);
+        let mut g = GridLayer::default();
+        g.set(MapData {
             meta: GridMeta { width: 20, height: 10, resolution: 0.05, origin_x: -0.5, origin_y: 0.0 },
             data: vec![-1; 200],
             origin_yaw: 0.0,
         });
-        assert_eq!(m.bounds(), [-0.5, 0.0, 0.5, 0.5]);
-        assert_eq!(m.map.seq, 1);
+        m.put("/map", Feed::Grid(g), Instant::now());
+        assert_eq!(m.bounds(Some("/map")), [-0.5, 0.0, 0.5, 0.5]);
+        assert_eq!(m.grid("/map").unwrap().seq, 1);
+        assert_eq!(m.bounds(None), [-4.0, -3.0, 6.0, 7.0]);
+    }
+
+    fn mk(ns: &str, id: i32, pos: (f64, f64), pts: Vec<(f64, f64)>, text: &str) -> Mk {
+        Mk { ns: ns.into(), id, kind: ShapeKind::Points, pts, pos, color: [0, 0, 0, 255], text: text.into() }
+    }
+
+    #[test]
+    fn markers_read_as_frontiers_views_and_targets() {
+        let team7 = vec![
+            mk("frontier_goals", 0, (0.0, 0.0), vec![(1.0, 1.0)], ""),
+            mk("camera_views", 0, (0.0, 0.0), vec![(2.0, 2.0)], ""),
+        ];
+        assert_eq!(frontier_points(&team7), vec![(1.0, 1.0)]);
+        assert_eq!(view_points(&team7), vec![(2.0, 2.0)]);
+        // explore_lite: any namespace
+        let stock = vec![mk("frontiers", 0, (0.0, 0.0), vec![(3.0, 3.0), (4.0, 4.0)], "")];
+        assert_eq!(frontier_points(&stock), vec![(3.0, 3.0), (4.0, 4.0)]);
+        let t = targets_of(&[
+            mk("target_confirmed", 7, (1.0, 2.0), vec![], ""),
+            mk("target_tentative", 3, (-1.0, 0.5), vec![], ""),
+            mk("target_tentative_label", 3, (-1.0, 0.5), vec![], "ID 3? 2v"),
+        ]);
+        assert_eq!(t, vec![Target { id: 3, x: -1.0, y: 0.5, confirmed: false, views: Some(2) }, Target { id: 7, x: 1.0, y: 2.0, confirmed: true, views: None }]);
     }
 
     #[test]
@@ -484,22 +669,36 @@ mod tests {
         let mut m = Model::default();
         assert_eq!(m.bound(Slot::Plan), None);
         // stock graph: Nav2 /plan, explore_lite frontiers, the Nav2 action
-        m.graph = ["/plan", "/explore/frontiers", "/local_costmap/costmap", "/navigate_to_pose/_action/status"].map(String::from).to_vec();
+        m.graph = graph(&[("/plan", "nav_msgs/msg/Path", 1), ("/explore/frontiers", "visualization_msgs/msg/MarkerArray", 1), ("/local_costmap/costmap", "nav_msgs/msg/OccupancyGrid", 1), ("/navigate_to_pose/_action/status", "action_msgs/msg/GoalStatusArray", 1)]);
         assert_eq!(m.bound(Slot::Plan), Some("/plan"));
         assert_eq!(m.bound(Slot::Frontiers), Some("/explore/frontiers"));
         assert_eq!(m.bound(Slot::NavAction), Some("/navigate_to_pose"));
         assert_eq!(m.bound(Slot::Views), None);
         assert_eq!(m.stack(), "stock");
-        assert!(m.accept(Slot::Plan, "/plan", t0));
-        assert!(!m.accept(Slot::Plan, "/team7/path", t0));
-        // team7 topics win once they are in the graph
-        m.graph.push("/team7/path".into());
-        assert!(m.accept(Slot::Plan, "/team7/path", t0));
+        // a team7 topic with only our own subscription does not count; with a publisher it wins
+        m.graph.extend(graph(&[("/team7/path", "nav_msgs/msg/Path", 0)]));
+        assert_eq!(m.bound(Slot::Plan), Some("/plan"));
+        m.graph.last_mut().unwrap().publishers = 1;
+        assert_eq!(m.bound(Slot::Plan), Some("/team7/path"));
         assert_eq!(m.stack(), "mixed");
         // before the first graph poll, data decides
         let mut m = Model::default();
-        assert!(m.accept(Slot::Camera, "/aruco_tracker/debug", t0));
+        m.put("/aruco_tracker/debug", Feed::Points(vec![]), t0);
         assert_eq!(m.bound(Slot::Camera), Some("/aruco_tracker/debug"));
+    }
+
+    pub(crate) fn graph(list: &[(&str, &str, usize)]) -> Vec<GraphTopic> {
+        list.iter().map(|&(n, t, p)| GraphTopic { name: n.into(), types: vec![t.into()], publishers: p }).collect()
+    }
+
+    #[test]
+    fn topics_of_a_type_list_publishers_first() {
+        let m = Model {
+            graph: graph(&[("/b_path", "nav_msgs/msg/Path", 0), ("/a_path", "nav_msgs/msg/Path", 2), ("/scan", "sensor_msgs/msg/LaserScan", 1), ("/c_path", "nav_msgs/msg/Path", 1)]),
+            ..Model::default()
+        };
+        let names: Vec<&str> = m.topics_of(MsgKind::Path).iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["/a_path", "/c_path", "/b_path"]);
     }
 
     #[test]

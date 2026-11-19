@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::executor::LocalPool;
+use futures::future::AbortHandle;
 use futures::stream::{Stream, StreamExt};
 use futures::task::LocalSpawnExt;
 use r2r::QosProfile;
+use r2r::qos::{DurabilityPolicy, ReliabilityPolicy};
 use r2r::geometry_msgs::msg::{PoseStamped, Transform};
 use r2r::nav_msgs::msg::{OccupancyGrid, Odometry, Path};
 use r2r::sensor_msgs::msg::{Image, LaserScan};
@@ -22,7 +24,7 @@ use r2r::visualization_msgs::msg::{Marker, MarkerArray};
 use tb4_core::nalgebra::{Point3, Quaternion, Translation3, UnitQuaternion};
 use tb4_core::{GridMeta, Isometry3, Pose2, Stamp, TfBuffer};
 
-use crate::model::{CameraFrame, MapData, Model, Shape, ShapeKind, Slot, Target, Topic};
+use crate::model::{CameraFrame, Feed, GraphTopic, GridLayer, MapData, Mk, Model, MsgKind, ShapeKind, Slot, Topic};
 
 pub const MAP_FRAME: &str = "map";
 pub const BASE_FRAME: &str = "base_link";
@@ -60,54 +62,35 @@ pub fn scan_points(s: &LaserScan) -> impl Iterator<Item = (f64, f64)> + '_ {
     })
 }
 
-/// views from a tentative label "ID 3? 2v"
-fn label_views(text: &str) -> Option<u32> {
-    text.split_whitespace().last()?.strip_suffix('v')?.parse().ok()
-}
-
-/// the latest /team7/targets array -> targets (spheres give the position, labels the view count)
-pub fn targets_from(m: &MarkerArray, prev: &[Target]) -> Vec<Target> {
-    let mut out = if m.markers.iter().any(|mk| mk.action == DELETEALL) { Vec::new() } else { prev.to_vec() };
-    for mk in &m.markers {
-        let confirmed = match mk.ns.as_str() {
-            "target_confirmed" => true,
-            "target_tentative" => false,
-            _ => continue,
-        };
-        out.retain(|t| t.id != mk.id);
-        if mk.action == 0 {
-            out.push(Target { id: mk.id, x: mk.pose.position.x, y: mk.pose.position.y, confirmed, views: None });
-        }
-    }
-    for mk in m.markers.iter().filter(|mk| mk.ns == "target_tentative_label") {
-        if let Some(t) = out.iter_mut().find(|t| t.id == mk.id) {
-            t.views = label_views(&mk.text);
-        }
-    }
-    out.sort_by_key(|t| t.id);
-    out
-}
-
-/// a marker as a top-down shape, points still in the marker's frame
-pub fn shape_of(mk: &Marker) -> Option<Shape> {
-    const ARROW_ETC: [i32; 2] = [0, 9];
+/// a marker as the layers read it, points and position still in the marker's frame. Lists and
+/// lines keep their points; a single sphere, cube or cylinder is its position; text and arrows
+/// keep only id, namespace, position and text (the targets' labels)
+pub fn mk_of(mk: &Marker) -> Option<Mk> {
     let kind = match mk.type_ {
-        8 | 6 | 7 | 1 | 2 => ShapeKind::Points,
         4 => ShapeKind::Strip,
         5 => ShapeKind::Segments,
-        t if ARROW_ETC.contains(&t) => return None,
-        _ => return None,
+        _ => ShapeKind::Points,
     };
-    let pts: Vec<_> = if mk.points.is_empty() {
-        vec![(mk.pose.position.x, mk.pose.position.y)]
-    } else {
-        // the marker pose places its points (identity for all our markers)
-        let p = iso_pose(&mk.pose);
-        mk.points.iter().map(|q| p * Point3::new(q.x, q.y, q.z)).map(|q| (q.x, q.y)).collect()
+    let pts: Vec<_> = match mk.type_ {
+        4..=8 => {
+            // the marker pose places its points (identity for all our markers)
+            let p = iso_pose(&mk.pose);
+            mk.points.iter().map(|q| p * Point3::new(q.x, q.y, q.z)).map(|q| (q.x, q.y)).collect()
+        }
+        1..=3 => vec![(mk.pose.position.x, mk.pose.position.y)],
+        _ => Vec::new(),
     };
     let c = &mk.color;
     let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Some(Shape { kind, pts, color: [to8(c.r), to8(c.g), to8(c.b), to8(c.a).max(160)] })
+    Some(Mk {
+        ns: mk.ns.clone(),
+        id: mk.id,
+        kind,
+        pts,
+        pos: (mk.pose.position.x, mk.pose.position.y),
+        color: [to8(c.r), to8(c.g), to8(c.b), to8(c.a).max(160)],
+        text: mk.text.clone(),
+    })
 }
 
 fn iso_pose(p: &r2r::geometry_msgs::msg::Pose) -> Isometry3<f64> {
@@ -335,172 +318,11 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
         c.update(|m, _| m.clock = Some((secs(&msg.clock), Instant::now())));
     });
 
-    let s = node.subscribe::<OccupancyGrid>("/map", QosProfile::default().reliable().transient_local())?;
-    spawn(&pool, s, &ctx, |c, msg: OccupancyGrid| {
-        c.update(|m, _| {
-            let now = Instant::now();
-            m.count("map");
-            m.tick(Topic::Map, now);
-            m.accept(Slot::Map, "/map", now);
-            if let Some(g) = grid_of(msg) {
-                m.map.set(g);
-            }
-        });
-    });
-
-    // costmaps, in the map frame. Nav2's are latched; our MPPI local cost is not, and a latched
-    // subscription would not match a volatile publisher
-    for (topic, slot, latched) in [
-        ("/global_costmap/costmap", Slot::GlobalCost, true),
-        ("/team7/mppi/local_cost", Slot::LocalCost, false),
-        ("/local_costmap/costmap", Slot::LocalCost, true),
-    ] {
-        let qos = if latched { QosProfile::default().reliable().transient_local() } else { QosProfile::default() };
-        let s = node.subscribe::<OccupancyGrid>(topic, qos)?;
-        spawn(&pool, s, &ctx, move |c, msg: OccupancyGrid| {
-            c.update(|m, _| {
-                m.count(topic);
-                if m.accept(slot, topic, Instant::now())
-                    && let Some(g) = grid_of(msg)
-                {
-                    if slot == Slot::GlobalCost { m.global_cost.set(g) } else { m.local_cost.set(g) }
-                }
-            });
-        });
-    }
-
-    let s = node.subscribe::<LaserScan>("/scan", QosProfile::sensor_data())?;
-    spawn(&pool, s, &ctx, |c, msg: LaserScan| {
-        c.update(|m, tf| {
-            let now = Instant::now();
-            m.count("scan");
-            m.tick(Topic::Scan, now);
-            let (ros_now, _) = m.ros_now(now, wall_secs());
-            let d = ros_now - secs(&msg.header.stamp);
-            m.scan_delay = Some(m.scan_delay.map_or(d, |old| 0.8 * old + 0.2 * d));
-            if let Some(p) = in_map(m, header_points(tf, &msg.header, scan_points(&msg))) {
-                m.scan = p;
-            }
-        });
-    });
-
     let s = node.subscribe::<Odometry>("/odom", QosProfile::sensor_data())?;
     spawn(&pool, s, &ctx, |c, _msg: Odometry| {
         c.update(|m, _| {
             m.count("odom");
             m.tick(Topic::Odom, Instant::now());
-        });
-    });
-
-    for (topic, slot) in [("/team7/path", Slot::Plan), ("/plan", Slot::Plan), ("/team7/mppi/trajectory", Slot::Trajectory), ("/local_plan", Slot::Trajectory)] {
-        let s = node.subscribe::<Path>(topic, QosProfile::default())?;
-        spawn(&pool, s, &ctx, move |c, msg: Path| {
-            c.update(|m, tf| {
-                m.count(topic);
-                if !m.accept(slot, topic, Instant::now()) {
-                    return;
-                }
-                let pts = msg.poses.iter().map(|p| (p.pose.position.x, p.pose.position.y));
-                if let Some(p) = in_map(m, header_points(tf, &msg.header, pts)) {
-                    if slot == Slot::Trajectory { m.trajectory = p } else { m.path = p }
-                }
-            });
-        });
-    }
-
-    let s = node.subscribe::<MarkerArray>("/team7/frontiers", QosProfile::default())?;
-    spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
-        c.update(|m, tf| {
-            let now = Instant::now();
-            m.count("/team7/frontiers");
-            let (front, views) = (m.accept(Slot::Frontiers, "/team7/frontiers", now), m.accept(Slot::Views, "/team7/frontiers", now));
-            if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
-                if front {
-                    m.frontiers.clear();
-                }
-                if views {
-                    m.views.clear();
-                }
-            }
-            for mk in &msg.markers {
-                let pts = mk.points.iter().map(|p| (p.x, p.y));
-                let Some(p) = in_map(m, header_points(tf, &mk.header, pts)) else { continue };
-                match mk.ns.as_str() {
-                    "frontier_goals" if front => m.frontiers = p,
-                    "camera_views" if views => m.views = p,
-                    _ => {}
-                }
-            }
-        });
-    });
-    // explore_lite: frontier cells and centres as points / spheres, all drawn as frontier dots
-    let s = node.subscribe::<MarkerArray>("/explore/frontiers", QosProfile::default())?;
-    spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
-        c.update(|m, tf| {
-            m.count("/explore/frontiers");
-            if !m.accept(Slot::Frontiers, "/explore/frontiers", Instant::now()) {
-                return;
-            }
-            if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
-                m.frontiers.clear();
-            }
-            let mut pts = Vec::new();
-            for mk in msg.markers.iter().filter(|mk| mk.action == 0) {
-                let Some(s) = shape_of(mk) else { continue };
-                if let Some(p) = in_map(m, header_points(tf, &mk.header, s.pts.iter().copied())) {
-                    pts.extend(p);
-                }
-            }
-            if !pts.is_empty() {
-                m.frontiers = pts;
-            }
-        });
-    });
-
-    for topic in ["/team7/slam/graph", "/slam_toolbox/graph_visualization"] {
-        let s = node.subscribe::<MarkerArray>(topic, QosProfile::default())?;
-        spawn(&pool, s, &ctx, move |c, msg: MarkerArray| {
-            c.update(|m, tf| {
-                m.count(topic);
-                if !m.accept(Slot::SlamGraph, topic, Instant::now()) {
-                    return;
-                }
-                if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
-                    m.slam_graph.clear();
-                }
-                for mk in msg.markers.iter().filter(|mk| mk.action == 0) {
-                    let Some(mut s) = shape_of(mk) else { continue };
-                    let Some(p) = in_map(m, header_points(tf, &mk.header, s.pts.iter().copied())) else { continue };
-                    s.pts = p;
-                    m.slam_graph.push(s);
-                }
-            });
-        });
-    }
-
-    for topic in ["/team7/goal", "/goal_pose"] {
-        let s = node.subscribe::<PoseStamped>(topic, QosProfile::default())?;
-        spawn(&pool, s, &ctx, move |c, msg: PoseStamped| {
-            c.update(|m, tf| {
-                m.count(topic);
-                if !m.accept(Slot::Goal, topic, Instant::now()) {
-                    return;
-                }
-                let p = msg.pose.position;
-                if let Some(g) = in_map(m, header_points(tf, &msg.header, std::iter::once((p.x, p.y)))) {
-                    m.goal = g.first().copied();
-                }
-            });
-        });
-    }
-
-    let s = node.subscribe::<MarkerArray>("/team7/targets", QosProfile::default())?;
-    spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
-        c.update(|m, _| {
-            m.count("targets");
-            m.accept(Slot::Targets, "/team7/targets", Instant::now());
-            // targets are published in the map frame (marker_mapper `frame` = map)
-            m.targets = targets_from(&msg, &m.targets);
         });
     });
 
@@ -512,25 +334,6 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
         });
     });
 
-    for topic in ["/team7/aruco/debug", "/aruco_tracker/debug"] {
-        let s = node.subscribe::<Image>(topic, QosProfile::sensor_data())?;
-        spawn(&pool, s, &ctx, move |c, msg: Image| {
-            let frame = image_rgba(&msg);
-            c.update(|m, _| {
-                let now = Instant::now();
-                m.count(topic);
-                if !m.accept(Slot::Camera, topic, now) {
-                    return;
-                }
-                m.tick(Topic::Camera, now);
-                if let Some((width, height, rgba)) = frame {
-                    let seq = m.camera.as_ref().map_or(1, |f| f.seq + 1);
-                    m.camera = Some(CameraFrame { width, height, rgba, seq, at: now });
-                }
-            });
-        });
-    }
-
     // goals: only with --allow-goals, to whichever NavigateToPose server is in the graph
     type Nav = r2r::nav2_msgs::action::NavigateToPose::Action;
     let mut clients = Vec::new();
@@ -541,19 +344,34 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
     }
 
     let mut pool = pool;
+    let mut subs = Subs::default();
     let mut last_graph = Instant::now() - GRAPH_EVERY;
+    let mut last_wanted = Instant::now() - WANTED_EVERY;
     while !stop.load(Ordering::Relaxed) {
-        node.spin_once(Duration::from_millis(10));
+        node.spin_once(Duration::from_millis(5));
         if last_graph.elapsed() >= GRAPH_EVERY {
             last_graph = Instant::now();
             if let Ok(names) = node.get_topic_names_and_types() {
+                let graph: Vec<GraphTopic> = names
+                    .into_iter()
+                    .map(|(name, types)| {
+                        // our own subscriptions put topics in the graph too: count publishers
+                        let publishers = node.get_publishers_info_by_topic(&name, false).map_or(0, |p| p.len());
+                        GraphTopic { name, types, publishers }
+                    })
+                    .collect();
                 ctx.update(|m, _| {
-                    // only topics someone publishes: our own subscriptions put every candidate in the graph
-                    let mut g: Vec<String> = names.into_keys().filter(|t| node.get_publishers_info_by_topic(t, false).is_ok_and(|p| !p.is_empty())).collect();
-                    g.sort();
+                    let mut g = graph;
+                    g.sort_by(|a, b| a.name.cmp(&b.name));
                     m.graph = g;
                 });
             }
+        }
+        // subscribe and drop topics as the window's layers ask
+        if last_wanted.elapsed() >= WANTED_EVERY {
+            last_wanted = Instant::now();
+            let wanted = ctx.model.lock().map(|m| m.wanted.clone()).unwrap_or_default();
+            subs.sync(&mut node, &pool, &ctx, &wanted);
         }
         if let Some(rx) = &opts.goals {
             while let Ok(goal) = rx.try_recv() {
@@ -567,6 +385,180 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
         pool.run_until_stalled();
     }
     Ok(())
+}
+
+/// how often the wanted subscriptions are compared with the live ones
+const WANTED_EVERY: Duration = Duration::from_millis(100);
+
+/// a viewer's QoS: take what the publisher offers (latched maps arrive at once, best-effort
+/// sensor data still matches)
+fn viewer_qos(depth: usize) -> QosProfile {
+    let mut q = QosProfile::default().keep_last(depth);
+    q.reliability = ReliabilityPolicy::BestAvailable;
+    q.durability = DurabilityPolicy::BestAvailable;
+    q
+}
+
+/// the live subscriptions of the layers, by topic and message kind
+#[derive(Default)]
+struct Subs {
+    live: Vec<((String, MsgKind), AbortHandle)>,
+}
+
+impl Subs {
+    /// subscribe what is wanted and not live, drop what is live and not wanted. A dropped stream
+    /// makes r2r destroy the subscription at its next message.
+    fn sync(&mut self, node: &mut r2r::Node, pool: &LocalPool, ctx: &Rc<Ctx>, wanted: &[(String, MsgKind)]) {
+        self.live.retain(|(key, h)| {
+            let keep = wanted.contains(key);
+            if !keep {
+                h.abort();
+            }
+            keep
+        });
+        for key in wanted {
+            if self.live.iter().any(|(k, _)| k == key) {
+                continue;
+            }
+            match subscribe_feed(node, pool, ctx, &key.0, key.1) {
+                Ok(h) => self.live.push((key.clone(), h)),
+                Err(e) => ctx.update(|m, _| m.tf_problem = Some((format!("cannot subscribe {}: {e}", key.0), Instant::now()))),
+            }
+        }
+    }
+}
+
+/// spawn `f` on every message of `stream`, abortable
+fn spawn_abortable<T: 'static>(pool: &LocalPool, stream: impl Stream<Item = T> + 'static, ctx: &Rc<Ctx>, mut f: impl FnMut(&Ctx, T) + 'static) -> AbortHandle {
+    let ctx = ctx.clone();
+    let (task, handle) = futures::future::abortable(stream.for_each(move |msg| {
+        f(&ctx, msg);
+        futures::future::ready(())
+    }));
+    pool.spawner().spawn_local(async move {
+        let _ = task.await;
+    }).expect("spawn subscriber");
+    handle
+}
+
+/// one layer topic: decode its messages into the model's feed for that topic
+fn subscribe_feed(node: &mut r2r::Node, pool: &LocalPool, ctx: &Rc<Ctx>, topic: &str, kind: MsgKind) -> r2r::Result<AbortHandle> {
+    let t = topic.to_owned();
+    Ok(match kind {
+        MsgKind::Grid => {
+            let s = node.subscribe::<OccupancyGrid>(topic, viewer_qos(2))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: OccupancyGrid| {
+                c.update(|m, _| {
+                    let now = Instant::now();
+                    m.count(&t);
+                    if t == "/map" {
+                        m.tick(Topic::Map, now);
+                    }
+                    if let Some(g) = grid_of(msg)
+                        && let Feed::Grid(layer) = m.feed_mut(&t, now, || Feed::Grid(GridLayer::default()))
+                    {
+                        layer.set(g);
+                    }
+                });
+            })
+        }
+        MsgKind::Scan => {
+            let s = node.subscribe::<LaserScan>(topic, viewer_qos(5))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: LaserScan| {
+                c.update(|m, tf| {
+                    let now = Instant::now();
+                    m.count(&t);
+                    if t == "/scan" {
+                        m.tick(Topic::Scan, now);
+                        let (ros_now, _) = m.ros_now(now, wall_secs());
+                        let d = ros_now - secs(&msg.header.stamp);
+                        m.scan_delay = Some(m.scan_delay.map_or(d, |old| 0.8 * old + 0.2 * d));
+                    }
+                    if let Some(p) = in_map(m, header_points(tf, &msg.header, scan_points(&msg))) {
+                        m.put(&t, Feed::Points(p), now);
+                    }
+                });
+            })
+        }
+        MsgKind::Path => {
+            let s = node.subscribe::<Path>(topic, viewer_qos(5))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: Path| {
+                c.update(|m, tf| {
+                    m.count(&t);
+                    let pts = msg.poses.iter().map(|p| (p.pose.position.x, p.pose.position.y));
+                    if let Some(p) = in_map(m, header_points(tf, &msg.header, pts)) {
+                        m.put(&t, Feed::Points(p), Instant::now());
+                    }
+                });
+            })
+        }
+        MsgKind::Pose => {
+            let s = node.subscribe::<PoseStamped>(topic, viewer_qos(5))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: PoseStamped| {
+                c.update(|m, tf| {
+                    m.count(&t);
+                    let p = msg.pose.position;
+                    if let Some(g) = in_map(m, header_points(tf, &msg.header, std::iter::once((p.x, p.y)))) {
+                        m.put(&t, Feed::Pose(g.first().copied()), Instant::now());
+                    }
+                });
+            })
+        }
+        MsgKind::Markers => {
+            let s = node.subscribe::<MarkerArray>(topic, viewer_qos(10))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: MarkerArray| {
+                c.update(|m, tf| {
+                    m.count(&t);
+                    // put each marker in the map frame first, then fold the array into the store
+                    let mut parts = Vec::new();
+                    for mk in &msg.markers {
+                        let placed = mk_of(mk).and_then(|mut x| {
+                            let pts = in_map(m, header_points(tf, &mk.header, x.pts.iter().copied().chain(std::iter::once(x.pos))))?;
+                            let (pos, rest) = pts.split_last()?;
+                            x.pos = *pos;
+                            x.pts = rest.to_vec();
+                            Some(x)
+                        });
+                        parts.push((mk.action, mk.ns.clone(), mk.id, placed));
+                    }
+                    if let Feed::Markers(store) = m.feed_mut(&t, Instant::now(), || Feed::Markers(Vec::new())) {
+                        apply_markers(store, parts);
+                    }
+                });
+            })
+        }
+        MsgKind::Image => {
+            let s = node.subscribe::<Image>(topic, viewer_qos(2))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: Image| {
+                let frame = image_rgba(&msg);
+                c.update(|m, _| {
+                    let now = Instant::now();
+                    m.count(&t);
+                    if let Some((width, height, rgba)) = frame {
+                        let seq = m.image(&t).map_or(1, |f| f.seq + 1);
+                        m.put(&t, Feed::Image(CameraFrame { width, height, rgba, seq, at: now }), now);
+                    }
+                });
+            })
+        }
+    })
+}
+
+/// fold one MarkerArray into the stored markers: DELETEALL clears, ADD replaces by (ns, id),
+/// DELETE removes
+pub fn apply_markers(store: &mut Vec<Mk>, parts: Vec<(i32, String, i32, Option<Mk>)>) {
+    for (action, ns, id, mk) in parts {
+        match action {
+            DELETEALL => store.clear(),
+            2 => store.retain(|s| !(s.ns == ns && s.id == id)),
+            _ => {
+                store.retain(|s| !(s.ns == ns && s.id == id));
+                if let Some(mk) = mk {
+                    store.push(mk);
+                }
+            }
+        }
+    }
 }
 
 /// how often the ROS graph is read to bind layers to topics
@@ -629,31 +621,31 @@ mod tests {
     }
 
     #[test]
-    fn targets_follow_the_marker_mapper_array() {
+    fn marker_arrays_fold_into_the_store() {
         let mut label = marker("target_tentative_label", 3, 0, -1.0, 0.5);
+        label.type_ = 9;
         label.text = "ID 3? 2v".into();
-        let msg = MarkerArray {
-            markers: vec![
-                marker("", 0, DELETEALL, 0.0, 0.0),
-                marker("target_confirmed", 7, 0, 1.0, 2.0),
-                marker("target_confirmed_label", 7, 0, 1.0, 2.0),
-                marker("target_tentative", 3, 0, -1.0, 0.5),
-                label,
-            ],
-        };
-        let old = [Target { id: 9, x: 0.0, y: 0.0, confirmed: true, views: None }];
-        let t = targets_from(&msg, &old);
-        assert_eq!(
-            t,
-            vec![
-                Target { id: 3, x: -1.0, y: 0.5, confirmed: false, views: Some(2) },
-                Target { id: 7, x: 1.0, y: 2.0, confirmed: true, views: None }
-            ]
-        );
-        let up = MarkerArray { markers: vec![marker("target_confirmed", 3, 0, -1.1, 0.5)] };
-        let t = targets_from(&up, &t);
-        assert_eq!(t.len(), 2);
-        assert!(t.iter().all(|t| t.confirmed));
+        let mut sphere = marker("target_confirmed", 7, 0, 1.0, 2.0);
+        sphere.type_ = 2;
+        let mut tent = marker("target_tentative", 3, 0, -1.0, 0.5);
+        tent.type_ = 2;
+        let parts = |ms: Vec<Marker>| ms.iter().map(|m| (m.action, m.ns.clone(), m.id, mk_of(m))).collect::<Vec<_>>();
+        let mut store = vec![mk_of(&marker("old", 9, 0, 0.0, 0.0)).unwrap()];
+        apply_markers(&mut store, parts(vec![marker("", 0, DELETEALL, 0.0, 0.0), sphere.clone(), tent, label]));
+        assert_eq!(store.len(), 3);
+        let t = crate::model::targets_of(&store);
+        assert_eq!(t.iter().map(|t| (t.id, t.confirmed, t.views)).collect::<Vec<_>>(), vec![(3, false, Some(2)), (7, true, None)]);
+        assert_eq!(store.iter().find(|m| m.id == 7).unwrap().pts, vec![(1.0, 2.0)]);
+        // ADD replaces by (ns, id), DELETE removes
+        let mut moved = sphere.clone();
+        moved.pose.position.x = 5.0;
+        apply_markers(&mut store, parts(vec![moved]));
+        assert_eq!(store.iter().filter(|m| m.ns == "target_confirmed").count(), 1);
+        assert_eq!(store.iter().find(|m| m.id == 7).unwrap().pos.0, 5.0);
+        let mut del = sphere;
+        del.action = 2;
+        apply_markers(&mut store, parts(vec![del]));
+        assert!(store.iter().all(|m| m.ns != "target_confirmed"));
     }
 
     #[test]
@@ -663,14 +655,15 @@ mod tests {
         mk.pose.orientation.w = 1.0;
         mk.points = vec![r2r::geometry_msgs::msg::Point { x: 1.0, y: 2.0, z: 0.0 }, r2r::geometry_msgs::msg::Point { x: 3.0, y: 4.0, z: 0.0 }];
         mk.color = r2r::std_msgs::msg::ColorRGBA { r: 1.0, g: 0.1, b: 0.8, a: 0.9 };
-        let s = shape_of(&mk).unwrap();
+        let s = mk_of(&mk).unwrap();
         assert_eq!((s.kind, s.pts.clone()), (ShapeKind::Segments, vec![(1.0, 2.0), (3.0, 4.0)]));
         assert_eq!(s.color, [255, 26, 204, 230]);
-        mk.type_ = 9; // text
-        assert!(shape_of(&mk).is_none());
+        mk.type_ = 9; // text: no points, the label is kept
+        assert!(mk_of(&mk).unwrap().pts.is_empty());
     }
 
     #[test]
+
     fn images_convert_to_rgba() {
         let img = Image { width: 2, height: 1, step: 8, encoding: "bgr8".into(), data: vec![1, 2, 3, 4, 5, 6, 0, 0], ..Image::default() };
         assert_eq!(image_rgba(&img).unwrap(), (2, 1, vec![3, 2, 1, 255, 6, 5, 4, 255]));

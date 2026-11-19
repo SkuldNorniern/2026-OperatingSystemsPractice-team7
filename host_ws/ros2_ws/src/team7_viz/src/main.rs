@@ -333,12 +333,14 @@ fn main() -> AureaResult<()> {
         let timed_out = exit_after.is_some_and(|s| started.elapsed().as_secs_f64() >= s);
         let last = (timed_out || quit.load(Ordering::Relaxed)) && !closing;
         let now = Instant::now();
-        let Ok(m) = shared.lock() else { return Ok(()) };
+        let Ok(mut m) = shared.lock() else { return Ok(()) };
         let mut c = dc.borrow_mut();
         let mut a = da.borrow_mut();
+        // tell the ROS thread what the layers want subscribed, and which image the camera shows
+        a.publish_wants(&mut m);
         let paint = Instant::now();
         let req = c.frame(ctx, &mut a, &m, now)?;
-        STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), m.camera.as_ref().map(|f| f.seq)));
+        STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), m.camera().map(|f| f.seq)));
         if c.ui.wants_frame() {
             redraw();
         }

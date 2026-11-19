@@ -10,16 +10,16 @@ use std::time::{Duration, Instant, SystemTime};
 use aurea::AureaResult;
 use aurea::prelude::{KeyCode, Modifiers, WindowEvent};
 use aurea::render::{Color, DrawingContext, Font, FontWeight, Image, Rect};
-use aurea::ui::{Align, Button, Checkbox, Disclosure, ScrollArea, Sense, Slider, Splitter, Theme, UiState};
+use aurea::ui::{Align, Button, Checkbox, Disclosure, Dropdown, ScrollArea, Sense, Slider, Splitter, Theme, UiState};
 use tb4_draw::palette as pal;
 use tb4_draw::prim;
 
 use crate::app::{App, Tool};
 use crate::health::{self, Level};
-use crate::model::{Model, Slot, human_age, mission_clock};
+use crate::model::{Model, MsgKind, Slot, Target, human_age, mission_clock};
 use crate::outputs;
 use crate::ros::wall_secs;
-use crate::scene::{self, LAYERS};
+use crate::scene::{self, Binding};
 
 pub const TOOLBAR_H: f32 = 40.0;
 pub const STRIP_H: f32 = 58.0;
@@ -51,6 +51,10 @@ pub enum Wid {
     Check(u8),
     Row(u8),
     Opacity(u8),
+    Topic(u8),
+    Remove(u8),
+    AddLayer,
+    CameraTopic,
     Camera,
 }
 
@@ -168,7 +172,8 @@ impl Chrome {
         app.draw_in(&mut *ui.ctx, model, now, map)?;
 
         toolbar(&mut ui, app, dock_open, &mut req, model, w)?;
-        strip(&mut ui, model, now, w)?;
+        let found = app.targets(model);
+        strip(&mut ui, model, &found, now, w)?;
         if let Some(d) = dock {
             ui.fill(d, theme.palette.surface)?;
             dock_sections(&mut ui, d, layout, sections, camera_image, app, model, now, run_dir.as_deref())?;
@@ -249,7 +254,7 @@ fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, dock_open: &mut bool,
 }
 
 /// the header strip: mission clock, 3 target slots, one status light (or the stale banner)
-fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, now: Instant, w: f32) -> AureaResult<()> {
+fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], now: Instant, w: f32) -> AureaResult<()> {
     let t = ui.theme.clone();
     let r = Rect::new(0.0, TOOLBAR_H, w, STRIP_H);
     let stale = model.stale_for(now);
@@ -266,7 +271,7 @@ fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, now: Instant, w: f32) -
     // targets: three slots
     let mut x = 250.0f32.min(w * 0.3);
     ui.text("TARGETS", Rect::new(x, r.y + 6.0, 140.0, 12.0), &bold(10.0), t.palette.dim, Align::Start)?;
-    let mut targets: Vec<_> = model.targets.iter().collect();
+    let mut targets: Vec<_> = found.iter().collect();
     targets.sort_by_key(|t| (!t.confirmed, t.id));
     let slot_w = 150.0;
     for i in 0..3 {
@@ -396,7 +401,7 @@ fn dock_sections(
                     0 => layers(ui, app, model, cx, c.y, cw)?,
                     // image, 4 px gap, 16 px info line, 6 px bottom margin: fits without a bar
                     1 => camera(ui, camera_image, app, model, now, cx, c.y, cw, body.height - 28.0)?,
-                    2 => targets(ui, model, cx, c.y, cw, run_dir)?,
+                    2 => targets(ui, model, &app.targets(model), cx, c.y, cw, run_dir)?,
                     _ => health_rows(ui, model, now, cx, c.y, cw)?,
                 };
                 Ok(end - c.y + 6.0)
@@ -438,52 +443,146 @@ fn dock_sections(
     })
 }
 
+/// the choices of a topic picker: "Auto" first, then the graph's topics of the message type
+/// (publishers first), and a pinned topic that is not in the graph at the end
+pub struct TopicChoices {
+    pub labels: Vec<String>,
+    /// topic per label; None for Auto
+    pub topics: Vec<Option<String>>,
+    pub selected: usize,
+}
+
+pub fn topic_choices(model: &Model, kind: MsgKind, binding: &Binding, auto_topic: Option<&str>, now: Instant) -> TopicChoices {
+    let auto = match auto_topic {
+        Some(t) => format!("Auto  {t}"),
+        None => "Auto  (none)".to_owned(),
+    };
+    let mut labels = vec![auto];
+    let mut topics = vec![None];
+    for g in model.topics_of(kind) {
+        let hz = model.topic_hz(&g.name, now).filter(|h| *h > 0.0).map_or(String::new(), |h| format!(" {h:.0}Hz"));
+        labels.push(format!("{}  {}p{hz}", g.name, g.publishers));
+        topics.push(Some(g.name.clone()));
+    }
+    let selected = match binding {
+        Binding::Auto => 0,
+        Binding::Pinned(t) => match topics.iter().position(|o| o.as_deref() == Some(t)) {
+            Some(i) => i,
+            None => {
+                labels.push(format!("{t}  no publisher"));
+                topics.push(Some(t.clone()));
+                topics.len() - 1
+            }
+        },
+    };
+    TopicChoices { labels, topics, selected }
+}
+
+/// the binding a picked choice means
+pub fn binding_of(choices: &TopicChoices, picked: usize) -> Binding {
+    match choices.topics.get(picked).cloned().flatten() {
+        Some(t) => Binding::Pinned(t),
+        None => Binding::Auto,
+    }
+}
+
 fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32, mut y: f32, w: f32) -> AureaResult<f32> {
     let t = ui.theme.clone();
+    let now = Instant::now();
     let mut missing = Vec::new();
-    for (i, l) in LAYERS.iter().enumerate() {
-        let topic = match l.slot {
-            Some(s) => match model.bound(s) {
-                Some(topic) => Some(topic),
-                None => {
-                    missing.push(l.name);
-                    continue;
-                }
-            },
-            None => None,
-        };
+    let mut remove = None;
+    for i in 0..app.layers.list.len() {
+        let spec = app.layers.list[i].clone();
+        let info = spec.info();
+        let topic = spec.topic(model);
+        // a base layer with no source and nothing of its type to pick is only listed by name
+        if let (Some(_), Some(kind)) = (info.slot, info.msg)
+            && topic.is_none()
+            && !spec.extra
+            && model.topics_of(kind).is_empty()
+        {
+            missing.push(info.name);
+            continue;
+        }
         let row = Rect::new(x, y, w, ROW_H);
         // the whole row toggles; the checkbox takes the keyboard
-        let input = ui.interact(Wid::Row(i as u8), 0, row, Sense::Click, true);
+        let input = ui.interact(Wid::Row(i as u8), 0, Rect::new(x, y, 150.0f32.min(w * 0.45), ROW_H), Sense::Click, true);
         if input.hovered {
             ui.round(row, 5.0, t.palette.hover)?;
         }
-        let mut on = app.layers.on[i];
+        let mut on = spec.on;
         let check = Checkbox::new(&mut on).show(ui, Wid::Check(i as u8), Rect::new(x + 6.0, y + 3.5, 18.0, 18.0))?;
         if input.clicked && !check.clicked {
             on = !on;
         }
-        app.layers.on[i] = on;
-        tb4_draw::paint_prims(ui.ctx, &scene::symbol(l.layer, (x + 46.0, y + ROW_H / 2.0)))?;
-        let key = if i < 9 { format!("{}", i + 1) } else { String::new() };
+        app.layers.list[i].on = on;
+        let mut symbol = scene::symbol(info.layer, (x + 44.0, y + ROW_H / 2.0));
+        if spec.extra {
+            let c = app.layers.extra_color(i);
+            for p in &mut symbol {
+                recolor(p, c);
+            }
+        }
+        tb4_draw::paint_prims(ui.ctx, &symbol)?;
         let name_c = if on { t.palette.text } else { t.palette.dim };
-        let name_w = ui.text_width(l.name, &font(13.0));
-        ui.text(l.name, Rect::new(x + 66.0, y + 4.0, name_w + 2.0, 16.0), &font(13.0), name_c, Align::Start)?;
-        let sub = topic.unwrap_or(l.legend);
-        // the bound topic, dim, after the name on the same line
-        let sx = x + 66.0 + name_w + 8.0;
-        ui.text_clipped(sub, Rect::new(sx, y + 6.0, (x + w - 24.0 - sx).max(0.0), 13.0), &font(10.0), t.palette.faint, Align::End)?;
-        ui.text(&key, Rect::new(x + w - 20.0, y + 5.0, 14.0, 14.0), &font(11.0), t.palette.faint, Align::End)?;
+        let name_x = x + 62.0;
+        let name_w = (w * 0.42 - 62.0).max(40.0);
+        ui.text_clipped(info.name, Rect::new(name_x, y + 4.0, name_w, 16.0), &font(13.0), name_c, Align::Start)?;
+
+        // the topic picker, or the legend for layers without a topic
+        let right = x + w - 22.0;
+        let fx = name_x + name_w + 4.0;
+        if let Some(kind) = info.msg {
+            let auto = info.slot.and_then(|s| model.bound(s));
+            let choices = topic_choices(model, kind, &spec.binding, auto, now);
+            let labels: Vec<&str> = choices.labels.iter().map(String::as_str).collect();
+            let mut sel = choices.selected;
+            let field = Rect::new(fx + 10.0, y + 2.5, (right - fx - 10.0).max(30.0), ROW_H - 5.0);
+            Dropdown::new(&labels, &mut sel).show(ui, Wid::Topic(i as u8), field)?;
+            if sel != choices.selected {
+                app.layers.list[i].binding = binding_of(&choices, sel);
+            }
+            // a pinned topic nobody publishes gets a small amber dot
+            if let Binding::Pinned(p) = &spec.binding
+                && model.publishers(p).unwrap_or(0) == 0
+            {
+                ui.circle(aurea::render::Point::new(fx + 4.0, y + ROW_H / 2.0), 3.5, t.palette.warning)?;
+            }
+        } else {
+            ui.text_clipped(info.legend, Rect::new(fx, y + 6.0, (right - fx).max(0.0), 13.0), &font(10.0), t.palette.faint, Align::End)?;
+        }
+        if spec.extra {
+            if Button::new("x").quiet().show(ui, Wid::Remove(i as u8), Rect::new(x + w - 20.0, y + 4.0, 18.0, 17.0))?.clicked {
+                remove = Some(i);
+            }
+        } else if i < 9 {
+            ui.text(&format!("{}", i + 1), Rect::new(x + w - 16.0, y + 5.0, 12.0, 14.0), &font(11.0), t.palette.faint, Align::End)?;
+        }
         y += ROW_H + 2.0;
-        if let (Some(_), true) = (l.opacity, on) {
-            let mut o = app.layers.opacity[i];
+        if let (Some(_), true) = (info.opacity, on) {
+            let mut o = spec.opacity;
             let pct = format!("{:.0}%", o * 100.0);
-            ui.text("opacity", Rect::new(x + 66.0, y + 2.0, 60.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
-            Slider::new(&mut o, 0.0..=1.0).readout(&pct).show(ui, Wid::Opacity(i as u8), Rect::new(x + 118.0, y, w - 126.0, 20.0))?;
-            app.layers.opacity[i] = o;
+            ui.text("opacity", Rect::new(x + 62.0, y + 2.0, 60.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
+            Slider::new(&mut o, 0.0..=1.0).readout(&pct).show(ui, Wid::Opacity(i as u8), Rect::new(x + 118.0, y, (w - 126.0).max(40.0), 20.0))?;
+            app.layers.list[i].opacity = o;
             y += 24.0;
         }
     }
+    if let Some(i) = remove {
+        app.layers.list.remove(i);
+    }
+    // a second layer of a kind: two paths, a filtered scan, another map
+    let kinds: Vec<&str> = scene::EXTRA_KINDS.iter().map(|&k| scene::info_of(k).name).collect();
+    let mut pick = kinds.len();
+    Dropdown::new(&kinds, &mut pick).placeholder("+ add layer").show(ui, Wid::AddLayer, Rect::new(x + 6.0, y + 3.0, 140.0, ROW_H - 4.0))?;
+    if let Some(&kind) = scene::EXTRA_KINDS.get(pick) {
+        // bound to the first topic of its type that is not already shown
+        let msg = scene::info_of(kind).msg.expect("extra kinds have a topic");
+        let used: Vec<String> = app.layers.list.iter().filter(|s| s.info().msg == Some(msg)).filter_map(|s| s.topic(model)).collect();
+        let topic = model.topics_of(msg).iter().find(|g| !used.contains(&g.name)).map(|g| g.name.clone());
+        app.layers.add(kind, topic);
+    }
+    y += ROW_H + 2.0;
     if !missing.is_empty() {
         let text = format!("Not published: {}", missing.join(", "));
         let used = ui.text_wrapped(&text, Rect::new(x + 6.0, y + 2.0, w - 12.0, 200.0), &font(11.0), t.palette.faint, 14.0)?;
@@ -492,7 +591,17 @@ fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32,
     Ok(y)
 }
 
-fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, x: f32, mut y: f32, w: f32, run_dir: Option<&std::path::Path>) -> AureaResult<f32> {
+/// give a legend symbol an added layer's colour
+fn recolor(p: &mut prim::Prim, c: tb4_draw::Rgba) {
+    match p {
+        prim::Prim::Line { color, .. } | prim::Prim::Polyline { color, .. } | prim::Prim::Points { color, .. } => *color = c,
+        prim::Prim::Circle { fill: Some(f), .. } => *f = c,
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], x: f32, mut y: f32, w: f32, run_dir: Option<&std::path::Path>) -> AureaResult<f32> {
     let t = ui.theme.clone();
     // columns scale with the dock; state carries the view count ("tentative, 2 views")
     let col = |f: f32| x + 6.0 + (w - 12.0) * f;
@@ -501,11 +610,11 @@ fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, x: f32, mut y: f32, w
         ui.text(head, Rect::new(col(f), y, 70.0, 14.0), &bold(10.0), t.palette.dim, Align::Start)?;
     }
     y += 18.0;
-    if model.targets.is_empty() {
+    if found.is_empty() {
         ui.text("no targets yet", Rect::new(x + 6.0, y, w, 16.0), &font(12.0), t.palette.faint, Align::Start)?;
         y += 20.0;
     }
-    for tg in &model.targets {
+    for tg in found {
         let c = rgba(if tg.confirmed { pal::TARGET_CONFIRMED } else { pal::TARGET_TENTATIVE });
         let state = match (tg.confirmed, tg.views) {
             (true, _) => "confirmed".to_owned(),
@@ -552,8 +661,18 @@ fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, x: f32, mut y: f32, w
 #[allow(clippy::too_many_arguments)]
 fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)>, app: &mut App, model: &Model, now: Instant, x: f32, mut y: f32, w: f32, max_h: f32) -> AureaResult<f32> {
     let t = ui.theme.clone();
-    let topic = model.bound(Slot::Camera);
-    let Some(f) = &model.camera else {
+    // the image topic, picked like a layer's
+    let choices = topic_choices(model, MsgKind::Image, &app.layers.camera, model.bound(Slot::Camera), now);
+    let labels: Vec<&str> = choices.labels.iter().map(String::as_str).collect();
+    let mut sel = choices.selected;
+    Dropdown::new(&labels, &mut sel).show(ui, Wid::CameraTopic, Rect::new(x + 6.0, y, (w - 12.0).max(40.0), ROW_H - 4.0))?;
+    if sel != choices.selected {
+        app.layers.camera = binding_of(&choices, sel);
+    }
+    y += ROW_H;
+    let max_h = max_h - ROW_H;
+    let topic = app.layers.camera_topic(model);
+    let Some(f) = topic.as_deref().and_then(|tp| model.image(tp)) else {
         let text = match topic {
             Some(tp) => format!("waiting for {tp}"),
             None => "no camera debug image published".into(),
@@ -595,7 +714,7 @@ fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)
         ui.text(&format!("stale {}", human_age(age)), b, &bold(11.0), t.palette.warning, Align::Center)?;
     }
     y += ih + 4.0;
-    let info = format!("{}  {}x{}  {} ago", topic.unwrap_or(""), f.width, f.height, human_age(age));
+    let info = format!("{}  {}x{}  {} ago", topic.as_deref().unwrap_or(""), f.width, f.height, human_age(age));
     ui.text_clipped(&info, Rect::new(x + 6.0, y, w - 12.0, 14.0), &font(10.0), t.palette.faint, Align::Start)?;
     Ok(y + 16.0)
 }
@@ -667,10 +786,39 @@ mod tests {
         }
     }
 
+    /// marker_mapper's array for `n` targets, every other one confirmed
+    fn many_targets(n: i32) -> Vec<crate::model::Mk> {
+        (0..n)
+            .map(|i| crate::model::Mk {
+                ns: if i % 2 == 0 { "target_confirmed".into() } else { "target_tentative".into() },
+                id: i,
+                kind: crate::model::ShapeKind::Points,
+                pts: vec![],
+                pos: (f64::from(i), 1.0),
+                color: [0, 0, 0, 255],
+                text: String::new(),
+            })
+            .collect()
+    }
+
     fn team7_model() -> Model {
         let mut m = team7_scene();
-        m.graph = ["/map", "/team7/path", "/team7/mppi/trajectory", "/team7/frontiers", "/team7/goal", "/team7/targets", "/team7/mppi/local_cost", "/global_costmap/costmap"].map(String::from).to_vec();
+        m.graph = team7_graph();
         m
+    }
+
+    pub(crate) fn team7_graph() -> Vec<crate::model::GraphTopic> {
+        crate::model::tests::graph(&[
+            ("/map", "nav_msgs/msg/OccupancyGrid", 1),
+            ("/scan", "sensor_msgs/msg/LaserScan", 1),
+            ("/team7/path", "nav_msgs/msg/Path", 1),
+            ("/team7/mppi/trajectory", "nav_msgs/msg/Path", 1),
+            ("/team7/frontiers", "visualization_msgs/msg/MarkerArray", 1),
+            ("/team7/goal", "geometry_msgs/msg/PoseStamped", 1),
+            ("/team7/targets", "visualization_msgs/msg/MarkerArray", 1),
+            ("/team7/mppi/local_cost", "nav_msgs/msg/OccupancyGrid", 1),
+            ("/global_costmap/costmap", "nav_msgs/msg/OccupancyGrid", 1),
+        ])
     }
 
     #[test]
@@ -701,15 +849,15 @@ mod tests {
 
         // click the "Global costmap" row: it turns on and the floor gets tinted
         let gi = scene::index(scene::Layer::GlobalCost);
-        assert!(!app.layers.on[gi]);
+        assert!(!app.layers.list[gi].on);
         let row_y = row_center(&chrome, &mut app, &m, now, gi);
         click(&mut chrome, &mut app, &m, now, 23.0, f64::from(row_y));
-        assert!(app.layers.on[gi], "checkbox click turned it on");
-        click(&mut chrome, &mut app, &m, now, 200.0, f64::from(row_y));
-        assert!(!app.layers.on[gi], "a click on the row turned it off again");
-        click(&mut chrome, &mut app, &m, now, 200.0, f64::from(row_y));
+        assert!(app.layers.list[gi].on, "checkbox click turned it on");
+        click(&mut chrome, &mut app, &m, now, 100.0, f64::from(row_y));
+        assert!(!app.layers.list[gi].on, "a click on the row turned it off again");
+        click(&mut chrome, &mut app, &m, now, 100.0, f64::from(row_y));
         let px = draw(&mut chrome, &mut app, &m, w, h, now);
-        assert!(app.layers.on[gi], "row click turned the layer on");
+        assert!(app.layers.list[gi].on, "row click turned the layer on");
         snapshot(&px, w, h, "window_team7_costmap.png");
         let p = px[(sy + a.y) as usize * w as usize + (sx + a.x) as usize];
         assert!(!near(p, pal::FREE, 10), "tinted {:?}", rgb(p));
@@ -721,17 +869,18 @@ mod tests {
     }
 
     /// y of a layer row's centre in the dock, found from the layout the same way the dock does
-    fn row_center(chrome: &Chrome, _app: &mut App, m: &Model, _now: Instant, idx: usize) -> f32 {
+    fn row_center(chrome: &Chrome, app: &mut App, m: &Model, _now: Instant, idx: usize) -> f32 {
         let mut y = chrome.layout.bodies[0].expect("layers open").y;
-        for (i, l) in LAYERS.iter().enumerate() {
-            if l.slot.is_some_and(|s| m.bound(s).is_none()) {
+        for (i, s) in app.layers.list.iter().enumerate() {
+            let info = s.info();
+            if info.slot.is_some() && s.topic(m).is_none() && info.msg.is_some_and(|k| m.topics_of(k).is_empty()) {
                 continue;
             }
             if i == idx {
                 return y + ROW_H / 2.0;
             }
             y += ROW_H + 2.0;
-            if l.opacity.is_some() && chrome.sections[0] && _app.layers.on[i] {
+            if info.opacity.is_some() && s.on {
                 y += 24.0;
             }
         }
@@ -806,7 +955,7 @@ mod tests {
     fn the_wheel_scrolls_only_the_section_under_the_pointer() {
         let now = Instant::now();
         let mut m = team7_model();
-        m.targets = (0..40).map(|i| crate::model::Target { id: i, x: f64::from(i), y: 1.0, confirmed: i % 2 == 0, views: None }).collect();
+        m.put("/team7/targets", crate::model::Feed::Markers(many_targets(40)), now);
         let mut chrome = Chrome::new("91".into(), None);
         chrome.set_run_dir(None);
         let mut app = App::new(false);
@@ -837,7 +986,7 @@ mod tests {
             (mid.saturating_sub(10)..mid + 10).any(|y| (x0..x1).any(|x| rgb(px[y * w as usize + x]).iter().all(|&c| c > 60)))
         };
         assert!(bar(&px, chrome.layout.bodies[2].unwrap()), "bar on the long target list");
-        m.targets.truncate(2);
+        m.put("/team7/targets", crate::model::Feed::Markers(many_targets(2)), now);
         let mut chrome2 = Chrome::new("91".into(), None);
         chrome2.set_run_dir(None);
         // the first frame measures the content, the second draws with it
@@ -860,7 +1009,8 @@ mod tests {
         let mut times = Vec::new();
         for i in 0..60u64 {
             let rgba = [(i * 4) as u8, 90, 160, 255].repeat(500 * 500);
-            m.camera = Some(crate::model::CameraFrame { width: 500, height: 500, rgba, seq: i + 1, at: Instant::now() });
+            m.put("/team7/aruco/debug", crate::model::Feed::Image(crate::model::CameraFrame { width: 500, height: 500, rgba, seq: i + 1, at: Instant::now() }), Instant::now());
+            m.camera_topic = Some("/team7/aruco/debug".into());
             let t = Instant::now();
             {
                 let mut ctx = r.begin_frame().unwrap();
@@ -877,7 +1027,15 @@ mod tests {
     fn stock_sources_and_stale_banner() {
         let now = Instant::now();
         let mut m = team7_scene();
-        m.graph = ["/map", "/plan", "/local_costmap/costmap", "/explore/frontiers", "/goal_pose", "/aruco_tracker/debug", "/global_costmap/costmap"].map(String::from).to_vec();
+        m.graph = crate::model::tests::graph(&[
+            ("/map", "nav_msgs/msg/OccupancyGrid", 1),
+            ("/plan", "nav_msgs/msg/Path", 1),
+            ("/local_costmap/costmap", "nav_msgs/msg/OccupancyGrid", 1),
+            ("/explore/frontiers", "visualization_msgs/msg/MarkerArray", 1),
+            ("/goal_pose", "geometry_msgs/msg/PoseStamped", 1),
+            ("/aruco_tracker/debug", "sensor_msgs/msg/Image", 1),
+            ("/global_costmap/costmap", "nav_msgs/msg/OccupancyGrid", 1),
+        ]);
         // data stopped 90 s ago, mission was running
         for i in 0..20 {
             m.tick(Topic::Scan, now - Duration::from_secs(90) - Duration::from_millis(100 * i));

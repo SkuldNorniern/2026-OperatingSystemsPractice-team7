@@ -1,6 +1,12 @@
 //! The map view: layers, their legend symbols, and drawing one frame of them on any
 //! `DrawingContext`. Draw order keeps walls readable: map, costmaps, grid, then the occupied cells
 //! again on top, then everything else, the scan and the robot last.
+//!
+//! A layer is a kind (what it draws and how) plus a binding: Auto (the team7 or the stock topic,
+//! whichever is published) or a topic the user picked. More than one layer of a kind can be shown,
+//! e.g. two paths, or `/scan` and a filtered scan.
+
+use std::collections::HashMap;
 
 use aurea::AureaResult;
 use aurea::render::{DrawingContext, Font, Image, Point};
@@ -8,7 +14,7 @@ use tb4_draw::palette as pal;
 use tb4_draw::prim::{self, Prim, fill, stroke};
 use tb4_draw::{Rgba, Viewport};
 
-use crate::model::{GridLayer, MapData, Model, ROBOT_RADIUS, ShapeKind, Slot};
+use crate::model::{self, GridLayer, MapData, Model, MsgKind, ROBOT_RADIUS, ShapeKind, Slot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layer {
@@ -38,71 +44,185 @@ pub struct LayerInfo {
     pub opacity: Option<f32>,
     /// where its data comes from; None: always there (TF, or drawn by the viewer)
     pub slot: Option<Slot>,
+    /// the message type of its topic; None for the layers without one
+    pub msg: Option<MsgKind>,
+    /// the profile name of the kind
+    pub key: &'static str,
 }
 
-const fn info(layer: Layer, name: &'static str, legend: &'static str, on: bool, opacity: Option<f32>, slot: Option<Slot>) -> LayerInfo {
-    LayerInfo { layer, name, legend, on, opacity, slot }
+#[allow(clippy::too_many_arguments)]
+const fn info(layer: Layer, key: &'static str, name: &'static str, legend: &'static str, on: bool, opacity: Option<f32>, slot: Option<Slot>, msg: Option<MsgKind>) -> LayerInfo {
+    LayerInfo { layer, name, legend, on, opacity, slot, msg, key }
 }
 
 /// default costmap opacity: readable over the map, walls stay on top
 pub const COST_OPACITY: f32 = 0.35;
 
-/// all layers in panel order; the first nine toggle with keys 1-9. Costmaps start off.
+/// all base layers in panel order; the first nine toggle with keys 1-9. Costmaps start off.
 pub const LAYERS: [LayerInfo; 14] = [
-    info(Layer::Map, "Map", "free, wall, unknown", true, None, Some(Slot::Map)),
-    info(Layer::Scan, "Scan", "laser points", true, None, None),
-    info(Layer::Path, "Plan", "global path", true, None, Some(Slot::Plan)),
-    info(Layer::Trajectory, "Local plan", "MPPI / controller path", true, None, Some(Slot::Trajectory)),
-    info(Layer::Frontiers, "Frontiers", "exploration goals", true, None, Some(Slot::Frontiers)),
-    info(Layer::Goal, "Goal", "active goal", true, None, Some(Slot::Goal)),
-    info(Layer::Targets, "Targets", "tentative / confirmed", true, None, Some(Slot::Targets)),
-    info(Layer::GlobalCost, "Global costmap", "low .. high cost", false, Some(COST_OPACITY), Some(Slot::GlobalCost)),
-    info(Layer::LocalCost, "Local cost", "around the robot", false, Some(COST_OPACITY), Some(Slot::LocalCost)),
-    info(Layer::Robot, "Robot", "pose, x/y axes", true, None, None),
-    info(Layer::Views, "Camera views", "planned view poses", true, None, Some(Slot::Views)),
-    info(Layer::SlamGraph, "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph)),
-    info(Layer::Grid, "Grid", "1 m", true, None, None),
-    info(Layer::Trail, "Trail", "where it drove", true, None, None),
+    info(Layer::Map, "map", "Map", "free, wall, unknown", true, None, Some(Slot::Map), Some(MsgKind::Grid)),
+    info(Layer::Scan, "scan", "Scan", "laser points", true, None, Some(Slot::Scan), Some(MsgKind::Scan)),
+    info(Layer::Path, "plan", "Plan", "global path", true, None, Some(Slot::Plan), Some(MsgKind::Path)),
+    info(Layer::Trajectory, "local_plan", "Local plan", "MPPI / controller path", true, None, Some(Slot::Trajectory), Some(MsgKind::Path)),
+    info(Layer::Frontiers, "frontiers", "Frontiers", "exploration goals", true, None, Some(Slot::Frontiers), Some(MsgKind::Markers)),
+    info(Layer::Goal, "goal", "Goal", "active goal", true, None, Some(Slot::Goal), Some(MsgKind::Pose)),
+    info(Layer::Targets, "targets", "Targets", "tentative / confirmed", true, None, Some(Slot::Targets), Some(MsgKind::Markers)),
+    info(Layer::GlobalCost, "global_cost", "Global costmap", "low .. high cost", false, Some(COST_OPACITY), Some(Slot::GlobalCost), Some(MsgKind::Grid)),
+    info(Layer::LocalCost, "local_cost", "Local cost", "around the robot", false, Some(COST_OPACITY), Some(Slot::LocalCost), Some(MsgKind::Grid)),
+    info(Layer::Robot, "robot", "Robot", "pose, x/y axes", true, None, None, None),
+    info(Layer::Views, "camera_views", "Camera views", "planned view poses", true, None, Some(Slot::Views), Some(MsgKind::Markers)),
+    info(Layer::SlamGraph, "slam_graph", "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph), Some(MsgKind::Markers)),
+    info(Layer::Grid, "grid", "Grid", "1 m", true, None, None, None),
+    info(Layer::Trail, "trail", "Trail", "where it drove", true, None, None, None),
 ];
+
+/// kinds a second layer can be added for (one message type each)
+pub const EXTRA_KINDS: [Layer; 5] = [Layer::Scan, Layer::Path, Layer::Trajectory, Layer::Map, Layer::LocalCost];
+
+/// colours of added layers, so two paths or two scans are told apart
+const EXTRA_COLORS: [Rgba; 4] = [[0, 200, 230, 255], [255, 150, 40, 255], [180, 230, 60, 255], [190, 120, 255, 255]];
+
+pub fn info_of(l: Layer) -> &'static LayerInfo {
+    LAYERS.iter().find(|i| i.layer == l).expect("every layer is listed")
+}
 
 pub fn index(l: Layer) -> usize {
     LAYERS.iter().position(|i| i.layer == l).expect("every layer is listed")
 }
 
-/// which layers are shown and their opacity
+/// where a layer takes its topic from
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Binding {
+    /// the team7 or the stock topic, whichever is published
+    #[default]
+    Auto,
+    /// a topic the user picked
+    Pinned(String),
+}
+
+/// one layer row: kind, binding, visibility, opacity
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerSpec {
+    pub kind: Layer,
+    pub on: bool,
+    pub opacity: f32,
+    pub binding: Binding,
+    /// added by the user (can be removed; drawn in its own colour)
+    pub extra: bool,
+}
+
+impl LayerSpec {
+    pub fn base(i: &LayerInfo) -> Self {
+        Self { kind: i.layer, on: i.on, opacity: i.opacity.unwrap_or(1.0), binding: Binding::Auto, extra: false }
+    }
+
+    pub fn info(&self) -> &'static LayerInfo {
+        info_of(self.kind)
+    }
+
+    /// the topic it draws from now; None when Auto found nothing or the kind has no topic
+    pub fn topic(&self, model: &Model) -> Option<String> {
+        match &self.binding {
+            Binding::Pinned(t) => Some(t.clone()),
+            Binding::Auto => self.info().slot.and_then(|s| model.bound(s)).map(str::to_owned),
+        }
+    }
+}
+
+/// the layer list: the base layers in panel order, then added ones
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layers {
-    pub on: [bool; 14],
-    pub opacity: [f32; 14],
+    pub list: Vec<LayerSpec>,
+    /// the camera panel's image topic
+    pub camera: Binding,
 }
 
 impl Default for Layers {
     fn default() -> Self {
-        Self { on: LAYERS.map(|i| i.on), opacity: LAYERS.map(|i| i.opacity.unwrap_or(1.0)) }
+        Self { list: LAYERS.iter().map(LayerSpec::base).collect(), camera: Binding::Auto }
     }
 }
 
 impl Layers {
+    fn first(&self, l: Layer) -> Option<&LayerSpec> {
+        self.list.iter().find(|s| s.kind == l && !s.extra)
+    }
+
     pub fn shown(&self, l: Layer) -> bool {
-        self.on[index(l)]
+        self.first(l).is_some_and(|s| s.on)
     }
 
     pub fn toggle(&mut self, l: Layer) {
-        let i = index(l);
-        self.on[i] = !self.on[i];
+        if let Some(s) = self.list.iter_mut().find(|s| s.kind == l && !s.extra) {
+            s.on = !s.on;
+        }
     }
 
     pub fn opacity(&self, l: Layer) -> f32 {
-        self.opacity[index(l)]
+        self.first(l).map_or(1.0, |s| s.opacity)
+    }
+
+    pub fn set_opacity(&mut self, l: Layer, o: f32) {
+        if let Some(s) = self.list.iter_mut().find(|s| s.kind == l && !s.extra) {
+            s.opacity = o;
+        }
+    }
+
+    /// the topic of the base layer of a kind (the header strip's targets, the map to fit to)
+    pub fn topic(&self, l: Layer, model: &Model) -> Option<String> {
+        self.first(l).and_then(|s| s.topic(model))
+    }
+
+    pub fn camera_topic(&self, model: &Model) -> Option<String> {
+        match &self.camera {
+            Binding::Pinned(t) => Some(t.clone()),
+            Binding::Auto => model.bound(Slot::Camera).map(str::to_owned),
+        }
+    }
+
+    /// add a layer of `kind`, bound to `topic`
+    pub fn add(&mut self, kind: Layer, topic: Option<String>) {
+        let o = info_of(kind).opacity.unwrap_or(1.0);
+        self.list.push(LayerSpec { kind, on: true, opacity: o, binding: topic.map_or(Binding::Auto, Binding::Pinned), extra: true });
+    }
+
+    /// colour of an added layer, by its place among the added ones
+    pub fn extra_color(&self, idx: usize) -> Rgba {
+        let n = self.list[..idx].iter().filter(|s| s.extra).count();
+        EXTRA_COLORS[n % EXTRA_COLORS.len()]
+    }
+
+    /// what has to be subscribed: Auto layers take every candidate (so they can switch as the
+    /// graph changes), pinned ones their topic, plus the camera and the health topics
+    pub fn wanted(&self) -> Vec<(String, MsgKind)> {
+        let mut out: Vec<(String, MsgKind)> = vec![("/scan".into(), MsgKind::Scan), ("/map".into(), MsgKind::Grid)];
+        let mut add = |t: &str, k: MsgKind| {
+            if !out.iter().any(|(o, ok)| o == t && *ok == k) {
+                out.push((t.to_owned(), k));
+            }
+        };
+        for s in &self.list {
+            let (Some(k), slot) = (s.info().msg, s.info().slot) else { continue };
+            match (&s.binding, slot) {
+                (Binding::Pinned(t), _) => add(t, k),
+                (Binding::Auto, Some(slot)) => slot.candidates().iter().for_each(|t| add(t, k)),
+                (Binding::Auto, None) => {}
+            }
+        }
+        match &self.camera {
+            Binding::Pinned(t) => add(t, MsgKind::Image),
+            Binding::Auto => Slot::Camera.candidates().iter().for_each(|t| add(t, MsgKind::Image)),
+        }
+        out.sort();
+        out
     }
 }
 
-/// images rebuilt only when their grid (or opacity) changed
+/// images rebuilt only when their grid (or opacity) changed, per topic
 #[derive(Default)]
 pub struct Cache {
-    map: Option<(u64, Image, Image)>,
-    global: Option<(u64, f32, Image)>,
-    local: Option<(u64, f32, Image)>,
+    maps: HashMap<String, (u64, Image, Image)>,
+    costs: HashMap<String, (u64, f32, Image)>,
 }
 
 /// where a grid image lands: the grid frame is `info.origin` (position and yaw) in the map frame
@@ -111,22 +231,25 @@ pub fn grid_layer(m: &MapData, vp: &Viewport) -> tb4_draw::MapLayer {
     tb4_draw::map_layer(&at_origin, (m.meta.origin_x, m.meta.origin_y, m.origin_yaw), vp)
 }
 
-fn cost_image(slot: &mut Option<(u64, f32, Image)>, g: &GridLayer, opacity: f32) -> Option<Image> {
-    let m = g.grid.as_ref()?;
-    if slot.as_ref().is_none_or(|(seq, o, _)| *seq != g.seq || *o != opacity) {
-        *slot = tb4_draw::costmap_image(&m.meta, &m.data, opacity).map(|i| (g.seq, opacity, i));
-    }
-    slot.as_ref().map(|(.., i)| i.clone())
-}
-
 impl Cache {
-    /// the map image and its occupied-only overlay
-    fn map(&mut self, g: &GridLayer) -> Option<(Image, Image)> {
+    fn cost(&mut self, topic: &str, g: &GridLayer, opacity: f32) -> Option<Image> {
         let m = g.grid.as_ref()?;
-        if self.map.as_ref().is_none_or(|(seq, ..)| *seq != g.seq) {
-            self.map = tb4_draw::map_image(&m.meta, &m.data).zip(tb4_draw::occupied_image(&m.meta, &m.data)).map(|(a, b)| (g.seq, a, b));
+        let slot = self.costs.get(topic);
+        if slot.is_none_or(|(seq, o, _)| *seq != g.seq || *o != opacity) {
+            let img = tb4_draw::costmap_image(&m.meta, &m.data, opacity)?;
+            self.costs.insert(topic.to_owned(), (g.seq, opacity, img));
         }
-        self.map.as_ref().map(|(_, a, b)| (a.clone(), b.clone()))
+        self.costs.get(topic).map(|(.., i)| i.clone())
+    }
+
+    /// the map image and its occupied-only overlay
+    fn map(&mut self, topic: &str, g: &GridLayer) -> Option<(Image, Image)> {
+        let m = g.grid.as_ref()?;
+        if self.maps.get(topic).is_none_or(|(seq, ..)| *seq != g.seq) {
+            let (a, b) = tb4_draw::map_image(&m.meta, &m.data).zip(tb4_draw::occupied_image(&m.meta, &m.data))?;
+            self.maps.insert(topic.to_owned(), (g.seq, a, b));
+        }
+        self.maps.get(topic).map(|(_, a, b)| (a.clone(), b.clone()))
     }
 }
 
@@ -149,96 +272,120 @@ fn grid_lines(bounds: [f64; 4], vp: &Viewport) -> Vec<Prim> {
     out
 }
 
+/// the drawing order of the kinds over the map images
+const ORDER: [Layer; 11] = [
+    Layer::Trail,
+    Layer::SlamGraph,
+    Layer::Path,
+    Layer::Trajectory,
+    Layer::Frontiers,
+    Layer::Views,
+    Layer::Goal,
+    Layer::Targets,
+    Layer::Scan,
+    Layer::Robot,
+    Layer::Map,
+];
+
 /// everything over the map images, in drawing order
 pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
     let at = |&(x, y): &(f64, f64)| vp.to_screen(x, y);
     let mut out = Vec::new();
-    if layers.shown(Layer::Trail) && model.trail.len() >= 2 {
-        out.push(Prim::Polyline { pts: model.trail.iter().map(at).collect(), color: pal::TRAIL, width: 1.5 });
-    }
-    if layers.shown(Layer::SlamGraph) {
-        for s in &model.slam_graph {
-            let pts: Vec<_> = s.pts.iter().map(at).collect();
-            match s.kind {
-                ShapeKind::Points => out.extend(pts.iter().map(|&p| prim::dot(p, 2.0, s.color))),
-                ShapeKind::Strip if pts.len() >= 2 => out.push(Prim::Polyline { pts, color: s.color, width: 1.0 }),
-                ShapeKind::Segments => {
-                    out.extend(pts.as_chunks::<2>().0.iter().map(|&[a, b]| Prim::Line { a, b, color: s.color, width: 1.0, dashed: false }));
+    for kind in ORDER {
+        for (idx, s) in layers.list.iter().enumerate().filter(|(_, s)| s.kind == kind && s.on) {
+            let topic = s.topic(model);
+            let t = topic.as_deref().unwrap_or("");
+            let color = |base: Rgba| if s.extra { layers.extra_color(idx) } else { base };
+            match kind {
+                Layer::Trail if model.trail.len() >= 2 => out.push(Prim::Polyline { pts: model.trail.iter().map(at).collect(), color: pal::TRAIL, width: 1.5 }),
+                Layer::SlamGraph => {
+                    for m in model.markers(t) {
+                        let pts: Vec<_> = m.pts.iter().map(at).collect();
+                        match m.kind {
+                            ShapeKind::Points => out.extend(pts.iter().map(|&p| prim::dot(p, 2.0, m.color))),
+                            ShapeKind::Strip if pts.len() >= 2 => out.push(Prim::Polyline { pts, color: m.color, width: 1.0 }),
+                            ShapeKind::Segments => {
+                                out.extend(pts.as_chunks::<2>().0.iter().map(|&[a, b]| Prim::Line { a, b, color: m.color, width: 1.0, dashed: false }));
+                            }
+                            ShapeKind::Strip => {}
+                        }
+                    }
                 }
-                ShapeKind::Strip => {}
+                Layer::Path | Layer::Trajectory => {
+                    let p = model.points(t);
+                    if p.len() >= 2 {
+                        let base = if kind == Layer::Path { pal::PATH } else { pal::TRAJECTORY };
+                        out.push(Prim::Polyline { pts: p.iter().map(at).collect(), color: color(base), width: 2.0 });
+                    }
+                }
+                Layer::Frontiers => out.extend(model::frontier_points(model.markers(t)).iter().map(|p| prim::dot(at(p), 4.0, pal::FRONTIER))),
+                Layer::Views => out.extend(model::view_points(model.markers(t)).iter().map(|p| Prim::Points { pts: vec![at(p)], size: 7.0, color: pal::VIEW })),
+                Layer::Goal => {
+                    if let Some(g) = model.pose(t) {
+                        out.push(Prim::Circle { c: at(&g), r: 7.0, fill: None, stroke: Some((pal::ROBOT_EDGE, 4.0)) });
+                        out.extend(prim::goal(at(&g)));
+                    }
+                }
+                Layer::Targets => {
+                    for tg in model::targets_of(model.markers(t)) {
+                        let (c, label) = if tg.confirmed { (pal::TARGET_CONFIRMED, format!("ID {}", tg.id)) } else { (pal::TARGET_TENTATIVE, format!("ID {}?", tg.id)) };
+                        out.extend(prim::target(at(&(tg.x, tg.y)), 6.0, &label, c));
+                    }
+                }
+                Layer::Scan => {
+                    let p = model.points(t);
+                    if !p.is_empty() {
+                        out.push(Prim::Points { pts: p.iter().map(at).collect(), size: 3.0, color: color(pal::SCAN) });
+                    }
+                }
+                Layer::Robot => {
+                    if let Some((x, y, yaw)) = model.robot {
+                        let c = vp.to_screen(x, y);
+                        // true size when zoomed in, never smaller than an easy-to-see icon
+                        let r = vp.len(ROBOT_RADIUS).max(9.0);
+                        out.extend(prim::robot(c, r, vp.heading(yaw)));
+                        // x (red) and y (green) axes, 0.3 m, like RViz's robot axes
+                        let axis = |a: f64, color| {
+                            let h = vp.heading(yaw + a);
+                            let l = vp.len(0.3).max(r + 8.0);
+                            Prim::Line { a: c, b: (c.0 + l * h.cos() as f32, c.1 - l * h.sin() as f32), color, width: 2.0, dashed: false }
+                        };
+                        out.push(axis(0.0, pal::AXIS_X));
+                        out.push(axis(std::f64::consts::FRAC_PI_2, pal::AXIS_Y));
+                    }
+                }
+                _ => {}
             }
         }
-    }
-    if layers.shown(Layer::Path) && model.path.len() >= 2 {
-        out.push(Prim::Polyline { pts: model.path.iter().map(at).collect(), color: pal::PATH, width: 2.0 });
-    }
-    if layers.shown(Layer::Trajectory) && model.trajectory.len() >= 2 {
-        out.push(Prim::Polyline { pts: model.trajectory.iter().map(at).collect(), color: pal::TRAJECTORY, width: 2.0 });
-    }
-    if layers.shown(Layer::Frontiers) {
-        out.extend(model.frontiers.iter().map(|p| prim::dot(at(p), 4.0, pal::FRONTIER)));
-    }
-    if layers.shown(Layer::Views) {
-        out.extend(model.views.iter().map(|p| Prim::Points { pts: vec![at(p)], size: 7.0, color: pal::VIEW }));
-    }
-    if layers.shown(Layer::Goal)
-        && let Some(g) = model.goal
-    {
-        out.push(Prim::Circle { c: at(&g), r: 7.0, fill: None, stroke: Some((pal::ROBOT_EDGE, 4.0)) });
-        out.extend(prim::goal(at(&g)));
-    }
-    if layers.shown(Layer::Targets) {
-        for t in &model.targets {
-            let (color, label) = if t.confirmed {
-                (pal::TARGET_CONFIRMED, format!("ID {}", t.id))
-            } else {
-                (pal::TARGET_TENTATIVE, format!("ID {}?", t.id))
-            };
-            out.extend(prim::target(at(&(t.x, t.y)), 6.0, &label, color));
-        }
-    }
-    if layers.shown(Layer::Scan) && !model.scan.is_empty() {
-        out.push(Prim::Points { pts: model.scan.iter().map(at).collect(), size: 3.0, color: pal::SCAN });
-    }
-    if layers.shown(Layer::Robot)
-        && let Some((x, y, yaw)) = model.robot
-    {
-        let c = vp.to_screen(x, y);
-        // true size when zoomed in, never smaller than an easy-to-see icon
-        let r = vp.len(ROBOT_RADIUS).max(9.0);
-        out.extend(prim::robot(c, r, vp.heading(yaw)));
-        // x (red) and y (green) axes, 0.3 m, like RViz's robot axes
-        let axis = |a: f64, color| {
-            let h = vp.heading(yaw + a);
-            let l = vp.len(0.3).max(r + 8.0);
-            Prim::Line { a: c, b: (c.0 + l * h.cos() as f32, c.1 - l * h.sin() as f32), color, width: 2.0, dashed: false }
-        };
-        out.push(axis(0.0, pal::AXIS_X));
-        out.push(axis(std::f64::consts::FRAC_PI_2, pal::AXIS_Y));
     }
     out
 }
 
 /// one frame of the map view in `ctx` (the whole context is the view)
 pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache: &mut Cache, vp: &Viewport, grid_bounds: [f64; 4]) -> AureaResult<()> {
-    let map = if layers.shown(Layer::Map) { cache.map(&model.map) } else { None };
     let place = |g: &GridLayer| g.grid.as_ref().map(|m| grid_layer(m, vp));
-    if let (Some((img, _)), Some(l)) = (&map, place(&model.map)) {
-        tb4_draw::draw_map(ctx, img, &l)?;
+    // maps: images now, their walls again after the costmaps and the grid
+    let mut walls = Vec::new();
+    for s in layers.list.iter().filter(|s| s.kind == Layer::Map && s.on) {
+        let Some(t) = s.topic(model) else { continue };
+        let Some(g) = model.grid(&t) else { continue };
+        if let (Some((img, w)), Some(l)) = (cache.map(&t, g), place(g)) {
+            tb4_draw::draw_map(ctx, &img, &l)?;
+            walls.push((w, l));
+        }
     }
-    for (layer, g, slot) in [(Layer::GlobalCost, &model.global_cost, &mut cache.global), (Layer::LocalCost, &model.local_cost, &mut cache.local)] {
-        if layers.shown(layer)
-            && let (Some(img), Some(l)) = (cost_image(slot, g, layers.opacity(layer)), place(g))
-        {
+    for s in layers.list.iter().filter(|s| matches!(s.kind, Layer::GlobalCost | Layer::LocalCost) && s.on) {
+        let Some(t) = s.topic(model) else { continue };
+        let Some(g) = model.grid(&t) else { continue };
+        if let (Some(img), Some(l)) = (cache.cost(&t, g, s.opacity), place(g)) {
             tb4_draw::draw_map(ctx, &img, &l)?;
         }
     }
     if layers.shown(Layer::Grid) {
         tb4_draw::paint_prims(ctx, &grid_lines(grid_bounds, vp))?;
     }
-    // walls again, over costmaps and grid
-    if let (Some((_, walls)), Some(l)) = (&map, place(&model.map)) {
-        tb4_draw::draw_map(ctx, walls, &l)?;
+    for (w, l) in &walls {
+        tb4_draw::draw_map(ctx, w, l)?;
     }
     tb4_draw::paint_prims(ctx, &prims(model, layers, vp))
 }
@@ -291,5 +438,105 @@ pub fn symbol(l: Layer, c: (f32, f32)) -> Vec<Prim> {
             Prim::Line { a: (x - 10.0, y + 4.0), b: (x + 10.0, y + 4.0), color: [140, 150, 160, 255], width: 1.0, dashed: false },
             Prim::Line { a: (x, y - 7.0), b: (x, y + 7.0), color: [140, 150, 160, 255], width: 1.0, dashed: false },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::app::tests::{near, render, rgb, scene};
+    use crate::chrome::{binding_of, topic_choices};
+    use crate::model::Feed;
+    use crate::model::tests::graph;
+    use std::time::Instant;
+
+    fn fixed() -> App {
+        let mut a = App::new(false);
+        a.camera.follow = false;
+        a
+    }
+
+    #[test]
+    fn picking_a_topic_rebinds_the_layer() {
+        let now = Instant::now();
+        let mut m = scene();
+        // a second path topic, south of the room
+        m.put("/team7/path_alt", Feed::Points(vec![(0.0, -0.6), (1.5, -0.6)]), now);
+        let mut app = fixed();
+        let (w, h) = (900u32, 600u32);
+        render(&mut app, &m, w, h);
+        let (vp, _) = app.viewport().unwrap();
+        let at = |px: &[u32], x: f64, y: f64| {
+            let (sx, sy) = vp.to_screen(x, y);
+            px[sy as usize * w as usize + sx as usize]
+        };
+        let px = render(&mut app, &m, w, h);
+        assert!(near(at(&px, 2.0, 1.0), pal::PATH, 20), "auto path {:?}", rgb(at(&px, 2.0, 1.0)));
+        assert!(!near(at(&px, 0.8, -0.6), pal::PATH, 20));
+
+        // pin the Plan layer to the other topic: drawn there, subscribed, old topic gone from the layer
+        let plan = index(Layer::Path);
+        app.layers.list[plan].binding = Binding::Pinned("/team7/path_alt".into());
+        let px = render(&mut app, &m, w, h);
+        assert!(near(at(&px, 0.8, -0.6), pal::PATH, 20), "pinned path {:?}", rgb(at(&px, 0.8, -0.6)));
+        assert!(!near(at(&px, 2.0, 1.0), pal::PATH, 20));
+        let wanted = app.layers.wanted();
+        assert!(wanted.contains(&("/team7/path_alt".into(), MsgKind::Path)));
+        assert!(!wanted.contains(&("/plan".into(), MsgKind::Path)), "the pinned layer no longer asks for its auto candidates");
+
+        // back to Auto through the picker's choices
+        m.graph = graph(&[("/team7/path", "nav_msgs/msg/Path", 1), ("/team7/path_alt", "nav_msgs/msg/Path", 1), ("/plan", "nav_msgs/msg/Path", 0)]);
+        let c = topic_choices(&m, MsgKind::Path, &app.layers.list[plan].binding, m.bound(Slot::Plan), now);
+        assert_eq!(c.topics, vec![None, Some("/team7/path".into()), Some("/team7/path_alt".into()), Some("/plan".into())]);
+        assert_eq!(c.selected, 2);
+        assert!(c.labels[0].starts_with("Auto") && c.labels[0].contains("/team7/path"));
+        assert_eq!(binding_of(&c, 0), Binding::Auto);
+        assert_eq!(binding_of(&c, 3), Binding::Pinned("/plan".into()));
+        // a pinned topic missing from the graph is still offered, marked
+        let gone = topic_choices(&m, MsgKind::Path, &Binding::Pinned("/old_path".into()), None, now);
+        assert!(gone.labels[gone.selected].contains("no publisher"));
+    }
+
+    #[test]
+    fn auto_rebinds_when_the_stock_topic_appears() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        let layers = Layers::default();
+        let plan = &layers.list[index(Layer::Path)];
+        assert_eq!(plan.topic(&m), None);
+        // both candidates are subscribed while Auto, so either can start publishing
+        let wanted = layers.wanted();
+        assert!(wanted.contains(&("/team7/path".into(), MsgKind::Path)) && wanted.contains(&("/plan".into(), MsgKind::Path)));
+        // Nav2's planner comes up
+        m.graph = graph(&[("/plan", "nav_msgs/msg/Path", 1)]);
+        m.put("/plan", Feed::Points(vec![(0.0, 0.0), (1.0, 0.0)]), now);
+        assert_eq!(plan.topic(&m).as_deref(), Some("/plan"));
+        // our planner comes up too: team7 wins
+        m.graph.extend(graph(&[("/team7/path", "nav_msgs/msg/Path", 1)]));
+        assert_eq!(plan.topic(&m).as_deref(), Some("/team7/path"));
+    }
+
+    #[test]
+    fn an_added_layer_draws_its_topic_in_its_own_colour() {
+        let now = Instant::now();
+        let mut m = scene();
+        m.put("/scan_filtered", Feed::Points((0..40).map(|i| (-0.5 + 0.05 * f64::from(i), -0.5)).collect()), now);
+        let mut app = fixed();
+        app.layers.add(Layer::Scan, Some("/scan_filtered".into()));
+        let idx = app.layers.list.len() - 1;
+        let c = app.layers.extra_color(idx);
+        assert_ne!(c, pal::SCAN);
+        let (w, h) = (900u32, 600u32);
+        render(&mut app, &m, w, h);
+        let px = render(&mut app, &m, w, h);
+        let (vp, _) = app.viewport().unwrap();
+        let (sx, sy) = vp.to_screen(0.5, -0.5);
+        let p = px[sy as usize * w as usize + sx as usize];
+        assert!(near(p, c, 30), "added scan {:?}", rgb(p));
+        // the base scan still draws in red
+        let (sx, sy) = vp.to_screen(1.0, 2.8);
+        assert!(near(px[sy as usize * w as usize + sx as usize], pal::SCAN, 20));
+        assert!(app.layers.wanted().contains(&("/scan_filtered".into(), MsgKind::Scan)));
     }
 }

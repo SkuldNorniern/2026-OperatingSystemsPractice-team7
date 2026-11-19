@@ -142,11 +142,36 @@ impl App {
 
     /// fit to the first map and keep it, so the view does not jump each time SLAM grows the map
     fn fit_bounds(&mut self, model: &Model) -> [f64; 4] {
-        match (self.fit_bounds, &model.map.grid) {
+        let map = self.map_topic(model);
+        let has_map = map.as_deref().and_then(|t| model.grid(t)).is_some_and(|g| g.grid.is_some());
+        match (self.fit_bounds, has_map) {
             (Some(b), _) => b,
-            (None, Some(_)) => *self.fit_bounds.insert(model.bounds()),
-            (None, None) => model.bounds(),
+            (None, true) => *self.fit_bounds.insert(model.bounds(map.as_deref())),
+            (None, false) => model.bounds(map.as_deref()),
         }
+    }
+
+    /// put the subscriptions the layers need and the camera topic into the model, for the ROS
+    /// thread (it compares and subscribes or drops)
+    pub fn publish_wants(&self, model: &mut Model) {
+        let wanted = self.layers.wanted();
+        if model.wanted != wanted {
+            model.wanted = wanted;
+        }
+        let cam = self.layers.camera_topic(model);
+        if model.camera_topic != cam {
+            model.camera_topic = cam;
+        }
+    }
+
+    /// the targets of the base Targets layer's topic
+    pub fn targets(&self, model: &Model) -> Vec<crate::model::Target> {
+        self.layers.topic(Layer::Targets, model).map_or_else(Vec::new, |t| crate::model::targets_of(model.markers(&t)))
+    }
+
+    /// the topic of the base map layer
+    pub fn map_topic(&self, model: &Model) -> Option<String> {
+        self.layers.topic(Layer::Map, model)
     }
 
     /// back to the whole map, north up
@@ -308,7 +333,8 @@ impl App {
         let bounds = self.fit_bounds(model);
         self.frame = Some(Frame { bounds, rect, robot: model.robot.map(|r| (r.0, r.1)) });
         let (vp, _) = self.viewport().expect("frame just set");
-        scene::draw(ctx, model, &self.layers, &mut self.cache, &vp, model.bounds())?;
+        let grid_bounds = model.bounds(self.map_topic(model).as_deref());
+        scene::draw(ctx, model, &self.layers, &mut self.cache, &vp, grid_bounds)?;
         tb4_draw::paint_prims(ctx, &self.tool_prims(&vp))?;
         if let Some((a, b)) = self.measure {
             let (d, ang) = ((b.0 - a.0).hypot(b.1 - a.1), (b.1 - a.1).atan2(b.0 - a.0).to_degrees());
@@ -349,8 +375,9 @@ impl App {
     fn hints(&self, ctx: &mut dyn DrawingContext, model: &Model, now: Instant) -> AureaResult<()> {
         let font = Font::monospace(13.0);
         let mut lines: Vec<(String, [u8; 4])> = Vec::new();
-        if model.map.grid.is_none() {
-            lines.push(("waiting for /map".into(), pal::TEXT_DIM));
+        let map = self.map_topic(model);
+        if map.as_deref().and_then(|t| model.grid(t)).is_none() {
+            lines.push((format!("waiting for {}", map.as_deref().unwrap_or("/map")), pal::TEXT_DIM));
         }
         if model.robot.is_none() {
             lines.push(("no TF map -> base_link yet".into(), pal::TEXT_DIM));
@@ -373,8 +400,8 @@ impl App {
     fn camera_overlay(&self, ctx: &mut dyn DrawingContext, model: &Model, w: f32, h: f32) -> AureaResult<()> {
         ctx.draw_rect(Rect::new(0.0, 0.0, w, h), &fill([0, 0, 0, 170]))?;
         let font = Font::monospace(14.0);
-        let Some(f) = &model.camera else {
-            return ctx.draw_text_with_font("no camera image yet (/team7/aruco/debug)", Point::new(24.0, 40.0), &font, &fill(pal::TEXT));
+        let Some(f) = model.camera() else {
+            return ctx.draw_text_with_font("no camera image yet", Point::new(24.0, 40.0), &font, &fill(pal::TEXT));
         };
         let s = ((w - 48.0) / f.width as f32).min((h - 72.0) / f.height as f32).max(0.1);
         let (iw, ih) = (f.width as f32 * s, f.height as f32 * s);
@@ -410,7 +437,7 @@ impl App {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::model::{CameraFrame, GridLayer, MapData, Shape, ShapeKind, Target, Topic};
+    use crate::model::{CameraFrame, Feed, GridLayer, MapData, Mk, ShapeKind, Topic};
     use aurea::render::{CpuRasterizer, Renderer};
     use tb4_core::GridMeta;
     use tb4_draw::Rgba;
@@ -437,28 +464,47 @@ pub(crate) mod tests {
     /// a 6 x 4 m room with walls, an inner wall at x 2.0..2.1, unknown east strip, costmaps
     pub(crate) fn scene() -> Model {
         let wall = |x: f64, y: f64| !(-0.9..=4.9).contains(&x) || !(-0.9..=2.9).contains(&y) || ((2.0..=2.1).contains(&x) && y < 1.0);
+        let now = Instant::now();
         let mut m = Model::default();
-        m.map.set(grid(-1.0, -1.0, 120, 80, |x, y| if wall(x, y) { 100 } else if x > 4.0 { -1 } else { 0 }));
+        let layer = |g: MapData| {
+            let mut l = GridLayer::default();
+            l.set(g);
+            Feed::Grid(l)
+        };
+        m.put("/map", layer(grid(-1.0, -1.0, 120, 80, |x, y| if wall(x, y) { 100 } else if x > 4.0 { -1 } else { 0 })), now);
         // global costmap: cost falls off with distance to the inner wall
-        m.global_cost.set(grid(-1.0, -1.0, 120, 80, |x, y| {
-            let d = (x - 2.05).abs();
-            if wall(x, y) { 100 } else if d < 0.6 && y < 1.2 { (98.0 * (1.0 - d / 0.6)) as i8 } else { 0 }
-        }));
-        m.local_cost.set(grid(0.0, 0.0, 40, 40, |x, y| if (x - 1.0).hypot(y - 1.0) < 0.9 { 40 } else { -1 }));
+        m.put(
+            "/global_costmap/costmap",
+            layer(grid(-1.0, -1.0, 120, 80, |x, y| {
+                let d = (x - 2.05).abs();
+                if wall(x, y) { 100 } else if d < 0.6 && y < 1.2 { (98.0 * (1.0 - d / 0.6)) as i8 } else { 0 }
+            })),
+            now,
+        );
+        m.put("/team7/mppi/local_cost", layer(grid(0.0, 0.0, 40, 40, |x, y| if (x - 1.0).hypot(y - 1.0) < 0.9 { 40 } else { -1 })), now);
         m.set_robot(1.0, 1.0, std::f64::consts::FRAC_PI_2);
-        m.path = vec![(1.0, 1.0), (3.0, 1.0), (3.0, 2.0)];
-        m.trajectory = vec![(1.0, 1.2), (1.0, 2.0)];
-        m.scan = (0..90).map(|i| (-0.8 + 0.06 * f64::from(i), 2.8)).collect();
-        m.frontiers = vec![(3.9, 0.5)];
-        m.views = vec![(2.6, 2.4)];
-        m.goal = Some((3.0, 2.0));
-        m.targets = vec![
-            Target { id: 7, x: 0.0, y: 2.0, confirmed: true, views: None },
-            Target { id: 3, x: 2.5, y: -0.5, confirmed: false, views: Some(2) },
-        ];
-        m.slam_graph = vec![Shape { kind: ShapeKind::Strip, pts: vec![(-0.5, -0.5), (-0.5, 0.5)], color: pal::SLAM_GRAPH }];
-        m.set_mission("RUNNING".into(), Instant::now());
-        m.tick(Topic::Scan, Instant::now());
+        m.put("/team7/path", Feed::Points(vec![(1.0, 1.0), (3.0, 1.0), (3.0, 2.0)]), now);
+        m.put("/team7/mppi/trajectory", Feed::Points(vec![(1.0, 1.2), (1.0, 2.0)]), now);
+        m.put("/scan", Feed::Points((0..90).map(|i| (-0.8 + 0.06 * f64::from(i), 2.8)).collect()), now);
+        let mk = |ns: &str, id: i32, pos: (f64, f64), pts: Vec<(f64, f64)>, text: &str, kind: ShapeKind| Mk { ns: ns.into(), id, kind, pts, pos, color: pal::SLAM_GRAPH, text: text.into() };
+        m.put(
+            "/team7/frontiers",
+            Feed::Markers(vec![mk("frontier_goals", 0, (0.0, 0.0), vec![(3.9, 0.5)], "", ShapeKind::Points), mk("camera_views", 0, (0.0, 0.0), vec![(2.6, 2.4)], "", ShapeKind::Points)]),
+            now,
+        );
+        m.put("/team7/goal", Feed::Pose(Some((3.0, 2.0))), now);
+        m.put(
+            "/team7/targets",
+            Feed::Markers(vec![
+                mk("target_confirmed", 7, (0.0, 2.0), vec![], "", ShapeKind::Points),
+                mk("target_tentative", 3, (2.5, -0.5), vec![], "", ShapeKind::Points),
+                mk("target_tentative_label", 3, (2.5, -0.5), vec![], "ID 3? 2v", ShapeKind::Points),
+            ]),
+            now,
+        );
+        m.put("/team7/slam/graph", Feed::Markers(vec![mk("slam_odom_edges", 0, (0.0, 0.0), vec![(-0.5, -0.5), (-0.5, 0.5)], "", ShapeKind::Strip)]), now);
+        m.set_mission("RUNNING".into(), now);
+        m.tick(Topic::Scan, now);
         m
     }
 
@@ -494,7 +540,7 @@ pub(crate) mod tests {
         let mut m = scene();
         let mut app = fixed();
         app.layers.toggle(Layer::GlobalCost); // off by default
-        app.layers.opacity[scene::index(Layer::GlobalCost)] = 1.0;
+        app.layers.set_opacity(Layer::GlobalCost, 1.0);
         let (w, h) = (900u32, 600u32);
         let px = render(&mut app, &m, w, h);
         snapshot(&px, w, h, "frame_layers.png");
@@ -534,7 +580,8 @@ pub(crate) mod tests {
         assert!(near(at(&px, 1.4, 0.6), pal::FREE, 2));
 
         // camera overlay shows the image over the map
-        m.camera = Some(CameraFrame { width: 4, height: 3, rgba: [10, 200, 30, 255].repeat(12), seq: 1, at: Instant::now() });
+        m.put("/team7/aruco/debug", Feed::Image(CameraFrame { width: 4, height: 3, rgba: [10, 200, 30, 255].repeat(12), seq: 1, at: Instant::now() }), Instant::now());
+        m.camera_topic = Some("/team7/aruco/debug".into());
         app.key(KeyCode::C, Modifiers::default());
         let px = render(&mut app, &m, w, h);
         snapshot(&px, w, h, "frame_camera.png");

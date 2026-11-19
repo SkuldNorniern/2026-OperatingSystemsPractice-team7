@@ -97,6 +97,18 @@ pub struct MarkerRecord {
     pub views5_at: Option<f64>,
     pub max_side_px: f64,
     pub closest: f64,
+    /// marker pipeline (simulated detections into tb4_markers::Tracker): frames with a detection
+    pub detections: u64,
+    /// first time the tracker held an estimate for this id
+    pub first_tentative: Option<f64>,
+    pub first_confirmed: Option<f64>,
+    /// fused position error vs truth in the map frame (m), when first confirmed and at the end
+    pub err_confirmed: Option<f64>,
+    pub err_end: Option<f64>,
+    /// confirmed at the end of the run (a confirmation can be lost again)
+    pub confirmed_end: bool,
+    /// tracker views at the end
+    pub tracker_views: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -133,6 +145,12 @@ pub struct Metrics {
     pub markers: Vec<MarkerRecord>,
     pub all_readable_at: Option<f64>,
     pub all_within_2m_at: Option<f64>,
+    /// decoy labels, same records (first_confirmed set = a false target)
+    pub decoys: Vec<MarkerRecord>,
+    /// every marker confirmed by the tracker (the mission would end here)
+    pub all_confirmed_at: Option<f64>,
+    /// decoys ever confirmed (must be 0)
+    pub decoys_confirmed: u64,
     pub slam_keyframes: usize,
     pub slam_loop_closures: u64,
     pub slam_fallbacks: u64,
@@ -216,6 +234,14 @@ impl Metrics {
                 m.id, m.size, opt(m.first_readable), opt(m.first_within_2m), m.views, opt(m.views5_at), m.max_side_px, m.closest);
         }
         let _ = writeln!(w, "all markers readable at {} s, all within 2 m at {} s", opt(self.all_readable_at), opt(self.all_within_2m_at));
+        let cm = |e: Option<f64>| e.map_or("-".into(), |e| format!("{:.1}", 100.0 * e));
+        let _ = writeln!(w, "tracker:  id  kind    detections  tentative  confirmed  err@conf cm  err end cm  views  confirmed at end");
+        for (kind, m) in self.markers.iter().map(|m| ("target", m)).chain(self.decoys.iter().map(|m| ("decoy", m))) {
+            let _ = writeln!(w, "        {:>4}  {kind:<6} {:>11} {:>10} {:>10} {:>12} {:>11} {:>6}  {}",
+                m.id, m.detections, opt(m.first_tentative), opt(m.first_confirmed), cm(m.err_confirmed), cm(m.err_end),
+                m.tracker_views, if m.confirmed_end { "yes" } else { "no" });
+        }
+        let _ = writeln!(w, "all markers confirmed at {} s, decoys confirmed {}", opt(self.all_confirmed_at), self.decoys_confirmed);
         let _ = writeln!(w, "slam keyframes {}  loop closures {}  match fallbacks {}  pose error final {:.3} m / {:.3} rad, max {:.3} m",
             self.slam_keyframes, self.slam_loop_closures, self.slam_fallbacks,
             self.final_pose_error.0, self.final_pose_error.1, self.max_pose_error);
@@ -262,18 +288,21 @@ impl Metrics {
         let _ = writeln!(w, "  \"bumps\": {},", self.bumps);
         let _ = writeln!(w, "  \"bumps_by_zone\": {{{}}},", zones.join(", "));
         let _ = writeln!(w, "  \"rear_contacts\": {},", self.rear_contacts);
-        let markers: Vec<String> = self
-            .markers
-            .iter()
-            .map(|m| {
-                format!("{{\"id\": {}, \"size\": {:.3}, \"first_readable\": {}, \"first_within_2m\": {}, \"readable_frames\": {}, \"views\": {}, \"views5_at\": {}, \"max_side_px\": {:.2}, \"closest_m\": {:.3}}}",
-                    m.id, m.size, json_opt(m.first_readable), json_opt(m.first_within_2m), m.readable_frames, m.views,
-                    json_opt(m.views5_at), m.max_side_px, m.closest)
-            })
-            .collect();
+        let record = |m: &MarkerRecord| {
+            let closest = if m.closest.is_finite() { format!("{:.3}", m.closest) } else { "null".into() };
+            format!("{{\"id\": {}, \"size\": {:.3}, \"first_readable\": {}, \"first_within_2m\": {}, \"readable_frames\": {}, \"views\": {}, \"views5_at\": {}, \"max_side_px\": {:.2}, \"closest_m\": {closest}, \"detections\": {}, \"first_tentative\": {}, \"first_confirmed\": {}, \"err_confirmed_m\": {}, \"err_end_m\": {}, \"confirmed_end\": {}, \"tracker_views\": {}}}",
+                m.id, m.size, json_opt(m.first_readable), json_opt(m.first_within_2m), m.readable_frames, m.views,
+                json_opt(m.views5_at), m.max_side_px, m.detections, json_opt(m.first_tentative), json_opt(m.first_confirmed),
+                json_opt(m.err_confirmed), json_opt(m.err_end), m.confirmed_end, m.tracker_views)
+        };
+        let markers: Vec<String> = self.markers.iter().map(record).collect();
+        let decoys: Vec<String> = self.decoys.iter().map(record).collect();
         let _ = writeln!(w, "  \"markers\": [{}],", markers.join(", "));
+        let _ = writeln!(w, "  \"decoys\": [{}],", decoys.join(", "));
         let _ = writeln!(w, "  \"all_readable_at\": {},", json_opt(self.all_readable_at));
         let _ = writeln!(w, "  \"all_within_2m_at\": {},", json_opt(self.all_within_2m_at));
+        let _ = writeln!(w, "  \"all_confirmed_at\": {},", json_opt(self.all_confirmed_at));
+        let _ = writeln!(w, "  \"decoys_confirmed\": {},", self.decoys_confirmed);
         let _ = writeln!(w, "  \"slam\": {{\"keyframes\": {}, \"loop_closures\": {}, \"match_fallbacks\": {}}},",
             self.slam_keyframes, self.slam_loop_closures, self.slam_fallbacks);
         let _ = writeln!(w, "  \"final_pose_error\": {{\"m\": {:.4}, \"rad\": {:.4}}},", self.final_pose_error.0, self.final_pose_error.1);

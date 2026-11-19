@@ -18,7 +18,7 @@ pub fn by_name(name: &str) -> Option<World> {
 /// 10 x 7 m studio laid out like the sketch on page 5 of OSP_final_project.pdf (sketch 774 x 322 pt scaled
 /// to 10 x 7 m): two rows of two tall boxes in the middle, targets in the upper-left and upper-right corners
 /// and one low on the east face of the lower-right box, robot in the lower left. Added (not in the sketch):
-/// a cluster of four chairs (legs only) and a desk (legs only).
+/// a cluster of four chairs (legs only), a desk (legs only) and three decoy labels (`--set decoys=0` drops them).
 pub fn studio() -> World {
     let mut w = studio_base("studio");
     w.wall((0.0, 0.0), (10.0, 0.0));
@@ -52,6 +52,14 @@ fn studio_base(name: &str) -> World {
     w.marker(7, (0.0, 5.6), 0.35, (1.0, 0.0), 0.15);
     w.marker(23, (10.0, 5.7), 0.35, (-1.0, 0.0), 0.12);
     w.marker(42, (5.9, 1.2), 0.10, (1.0, 0.0), 0.10);
+    // decoys, with ids the field detector returned for chair barcode labels: a label on the back of a
+    // chair pushed against the north wall (the wall is 0.66 m behind it, like field run 184838), one
+    // on a chair of the cluster, and a sticker on the desk's east apron. Nothing at lidar height
+    // behind any of them; the camera ray runs on past the legs
+    w.legs(6.0, 6.55, 0.42, 0.42, 0.015);
+    w.decoy(1023, (6.0, 6.34), 0.45, (0.0, -1.0), 0.05);
+    w.decoy(0, (7.59, 3.1), 0.45, (-1.0, 0.0), 0.04);
+    w.decoy(703, (2.25, 4.0), 0.6, (1.0, 0.0), 0.06);
     w
 }
 
@@ -82,6 +90,10 @@ mod tests {
             }
         }
         assert_eq!(studio().markers.len(), 3);
+        // decoys hang in free space: no solid face within 10 cm
+        for d in &studio().decoys {
+            assert!(studio().nearest(d.pos).unwrap().dist > 0.1, "decoy {}", d.id);
+        }
         assert!(studio_glass().segments.iter().any(|s| s.kind == crate::world::SegmentKind::Glass));
     }
 }

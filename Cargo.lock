@@ -620,6 +620,7 @@ dependencies = [
  "tb4_control",
  "tb4_core",
  "tb4_explore",
+ "tb4_markers",
  "tb4_planning",
  "tb4_slam",
 ]

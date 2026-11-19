@@ -10,5 +10,6 @@ license.workspace = true
 tb4_core = { path = "../tb4_core" }
 tb4_control = { path = "../tb4_control" }
 tb4_explore = { path = "../tb4_explore" }
+tb4_markers = { path = "../tb4_markers" }
 tb4_planning = { path = "../tb4_planning" }
 tb4_slam = { path = "../tb4_slam" }

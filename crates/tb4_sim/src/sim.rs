@@ -1,6 +1,7 @@
 //! The closed loop on a simulated clock: physics 100 Hz, lidar 5.5 Hz into SLAM, /map every 1 s,
 //! navigator + velocity chain 20 Hz, explorer 1 Hz (from 10 s, like the launch file), coverage 5 Hz,
-//! camera 15 Hz. Nothing reads the wall clock except the wall-time figure in the metrics.
+//! camera 15 Hz (detections into the marker tracker). Nothing reads the wall clock except the wall-time
+//! figure in the metrics.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -8,6 +9,7 @@ use std::time::Instant;
 use tb4_control::Rng;
 use tb4_core::{Grid, Pose2};
 use tb4_explore::{Action, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, TickInput};
+use tb4_markers::{LocateParams, Tracker};
 use tb4_slam::{Slam, SlamParams};
 
 use crate::chain::{Chain, ChainParams};
@@ -15,6 +17,7 @@ use crate::metrics::{AREA_TIMES, MarkerRecord, Metrics, Motion, STILL_V, STILL_W
 use crate::nav::{NavParams, NavState, NavStatus, Navigator};
 use crate::robot::{Robot, RobotParams, wrap};
 use crate::sensors::{CameraParams, LidarParams, Scan, camera_pose, scan, view_marker};
+use crate::vision::{VisionParams, detect, team7_locate_params, team7_track_params};
 use crate::world::World;
 
 /// wheel odometry errors (Create 3 odom drifts slowly)
@@ -41,7 +44,8 @@ pub struct SlowParams {
     pub enabled: bool,
     pub percent: f64,
     pub hold: f64,
-    /// views (camera moved 0.05 m or turned 0.05 rad) after which a marker counts as confirmed
+    /// without the tracker (`vision.enabled` false): views (camera moved 0.05 m or turned 0.05 rad)
+    /// after which a marker counts as confirmed
     pub min_views: u64,
 }
 
@@ -66,6 +70,10 @@ pub struct SimConfig {
     pub chain: ChainParams,
     pub explorer: ExplorerParams,
     pub slow: SlowParams,
+    /// detections of markers and decoys into tb4_markers::Tracker
+    pub vision: VisionParams,
+    pub locate: LocateParams,
+    pub track: tb4_markers::TrackParams,
     /// the launch file starts the explorer 10 s after the rest
     pub explorer_start: f64,
     pub explorer_period: f64,
@@ -134,6 +142,9 @@ impl SimConfig {
             chain: ChainParams::default(),
             explorer: team7_explorer_params(),
             slow: SlowParams::default(),
+            vision: VisionParams::default(),
+            locate: team7_locate_params(),
+            track: team7_track_params(),
             explorer_start: 10.0,
             explorer_period: 1.0,
             coverage_period: 0.2,
@@ -145,11 +156,11 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 24] = [
+pub const SET_NAMES: [&str; 28] = [
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
     "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
-    "path_switch_ratio", "slow_on_tentative",
+    "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
 ];
 
 impl SimConfig {
@@ -184,6 +195,11 @@ impl SimConfig {
             "path_switch_ratio" => self.nav.path_switch_ratio = x,
             "plan_with_scan" => self.nav.plan_with_scan = x != 0.0,
             "slow_on_tentative" => self.slow.enabled = x != 0.0,
+            "decoys" if x == 0.0 => self.world.decoys.clear(),
+            "decoys" => {}
+            "vision" => self.vision.enabled = x != 0.0,
+            "pnp_sigma" => self.vision.pnp_sigma = x,
+            "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
             _ => return Err(format!("--set: unknown name {k}")),
         }
         Ok(())
@@ -278,6 +294,8 @@ pub struct Sim {
     slow_until: f64,
     last_view: Vec<Option<((f64, f64), f64)>>,
     bump_points: Vec<(f64, f64)>,
+    tracker: Tracker,
+    vision_rng: Rng,
     // metrics
     m: Metrics,
     stalls: StallTracker,
@@ -290,18 +308,14 @@ pub struct Sim {
 impl Sim {
     pub fn new(cfg: SimConfig) -> Self {
         let slam_p = if cfg.perfect_pose { perfect_pose_slam(cfg.slam.clone()) } else { cfg.slam.clone() };
-        let markers = cfg
-            .world
-            .markers
-            .iter()
-            .map(|mk| MarkerRecord { id: mk.id, size: mk.size, closest: f64::INFINITY, ..Default::default() })
-            .collect();
+        let record = |mk: &crate::world::Marker| MarkerRecord { id: mk.id, size: mk.size, closest: f64::INFINITY, ..Default::default() };
         let m = Metrics {
             world: cfg.world.name.clone(),
             seed: cfg.seed,
             perfect_pose: cfg.perfect_pose,
             reference_area: reference_area(&cfg.world, 0.05),
-            markers,
+            markers: cfg.world.markers.iter().map(record).collect(),
+            decoys: cfg.world.decoys.iter().map(record).collect(),
             ..Default::default()
         };
         let mut mppi = cfg.nav.clone();
@@ -332,6 +346,8 @@ impl Sim {
             slow_until: f64::NEG_INFINITY,
             last_view: vec![None; cfg.world.markers.len()],
             bump_points: Vec::new(),
+            tracker: Tracker::new(cfg.track.clone()),
+            vision_rng: Rng::stream(cfg.seed, 3, 0, 0),
             m,
             stalls: StallTracker::default(),
             area_next: 0,
@@ -371,6 +387,11 @@ impl Sim {
     /// the navigator (planned path, MPPI optimal trajectory, state)
     pub fn navigator(&self) -> &Navigator {
         &self.nav
+    }
+
+    /// the marker tracker fed by the simulated camera (map frame)
+    pub fn tracker(&self) -> &Tracker {
+        &self.tracker
     }
 
     pub fn log(&self) -> &[(f64, String)] {
@@ -505,12 +526,65 @@ impl Sim {
         };
         self.m.all_readable_at = all(|r| r.first_readable);
         self.m.all_within_2m_at = all(|r| r.first_within_2m);
+        if self.cfg.vision.enabled {
+            // like marker_mapper: slow down while a detected id has an unconfirmed estimate
+            tentative = self.detect_markers();
+        }
         if self.cfg.slow.enabled {
             if tentative {
                 self.slow_until = t + self.cfg.slow.hold;
             }
             self.nav.speed_limit = (true, if t < self.slow_until { self.cfg.slow.percent } else { 0.0 });
         }
+    }
+
+    /// one camera frame of detections (markers and decoys) into the tracker, as marker_mapper does it;
+    /// true if a detected id is tentative
+    fn detect_markers(&mut self) -> bool {
+        let t = self.t;
+        let (truth, est) = (self.robot.pose, self.estimate());
+        let n = self.cfg.world.markers.len();
+        let mut detected = Vec::new();
+        for (i, mk) in self.cfg.world.markers.iter().chain(&self.cfg.world.decoys).enumerate() {
+            let Some((_, obs)) = detect(&self.cfg.world, truth, est, mk, &self.cfg.camera, &self.cfg.vision, &mut self.vision_rng)
+            else {
+                continue;
+            };
+            let rec = if i < n { &mut self.m.markers[i] } else { &mut self.m.decoys[i - n] };
+            rec.detections += 1;
+            self.tracker.observe(self.map.as_ref(), &obs, &self.cfg.locate);
+            detected.push(obs.id);
+        }
+        if detected.is_empty() {
+            return false;
+        }
+        let targets = self.tracker.targets();
+        let origin = self.cfg.world.start;
+        let mut notes = Vec::new();
+        for (i, mk) in self.cfg.world.markers.iter().chain(&self.cfg.world.decoys).enumerate() {
+            let Some(tg) = targets.iter().find(|tg| tg.id == mk.id as i64) else { continue };
+            let rec = if i < n { &mut self.m.markers[i] } else { &mut self.m.decoys[i - n] };
+            if rec.first_tentative.is_none() {
+                rec.first_tentative = Some(t);
+            }
+            if tg.confirmed && rec.first_confirmed.is_none() {
+                let truth = relative(origin, Pose2::new(mk.pos.0, mk.pos.1, 0.0));
+                let err = (tg.x - truth.x).hypot(tg.y - truth.y);
+                rec.first_confirmed = Some(t);
+                rec.err_confirmed = Some(err);
+                let kind = if i < n { "target" } else { "DECOY" };
+                notes.push(format!("tracker: CONFIRMED {kind} id={} from {} views, error {:.0} cm", mk.id, tg.views, 100.0 * err));
+                if i >= n {
+                    self.m.decoys_confirmed += 1;
+                }
+            }
+        }
+        for s in notes {
+            self.note(s);
+        }
+        let all: Option<Vec<f64>> = self.m.markers.iter().map(|r| r.first_confirmed).collect();
+        self.m.all_confirmed_at = all.filter(|v| !v.is_empty()).map(|v| v.into_iter().fold(0.0, f64::max));
+        detected.iter().any(|id| targets.iter().any(|tg| tg.id == *id && !tg.confirmed))
     }
 
     fn do_explore(&mut self) {
@@ -678,6 +752,16 @@ impl Sim {
         m.slam_fallbacks = s.match_fallbacks;
         let (est, truth) = (self.estimate(), self.truth_in_map());
         m.final_pose_error = ((est.x - truth.x).hypot(est.y - truth.y), wrap(est.yaw - truth.yaw).abs());
+        let origin = self.cfg.world.start;
+        let world = &self.cfg.world;
+        for (mk, rec) in world.markers.iter().zip(&mut m.markers).chain(world.decoys.iter().zip(&mut m.decoys)) {
+            if let Some(tg) = self.tracker.target(mk.id as i64) {
+                let truth = relative(origin, Pose2::new(mk.pos.0, mk.pos.1, 0.0));
+                rec.err_end = Some((tg.x - truth.x).hypot(tg.y - truth.y));
+                rec.confirmed_end = tg.confirmed;
+                rec.tracker_views = tg.views;
+            }
+        }
         m
     }
 }

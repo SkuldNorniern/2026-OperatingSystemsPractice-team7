@@ -44,6 +44,9 @@ pub struct World {
     pub segments: Vec<Segment>,
     pub posts: Vec<Post>,
     pub markers: Vec<Marker>,
+    /// ArUco-like patterns that are not targets (chair labels, a sticker in mid-air): the camera
+    /// finds them like markers, but nothing solid stands behind them at lidar height
+    pub decoys: Vec<Marker>,
     /// robot start pose (world frame); the map and odom frames start here
     pub start: Pose2,
     /// bounding box [x0, y0, x1, y1] for reference grids
@@ -93,6 +96,13 @@ impl World {
     pub fn marker(&mut self, id: u32, pos: (f64, f64), z: f64, normal: (f64, f64), size: f64) -> &mut Self {
         let n = normal.0.hypot(normal.1);
         self.markers.push(Marker { id, pos, z, normal: (normal.0 / n, normal.1 / n), size });
+        self
+    }
+
+    /// a decoy pattern; `normal` points to the side it can be seen from
+    pub fn decoy(&mut self, id: u32, pos: (f64, f64), z: f64, normal: (f64, f64), size: f64) -> &mut Self {
+        let n = normal.0.hypot(normal.1);
+        self.decoys.push(Marker { id, pos, z, normal: (normal.0 / n, normal.1 / n), size });
         self
     }
 

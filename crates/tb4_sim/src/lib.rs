@@ -2,7 +2,8 @@
 //!
 //! The robot, lidar, camera and world are simulated in 2D; the decision code is the real one:
 //! `tb4_slam` (scan matching map), the navigator logic (`nav`, a copy of the node's tick on
-//! `tb4_planning` + `tb4_control`), the velocity chain and `tb4_explore::ExplorerPolicy`.
+//! `tb4_planning` + `tb4_control`), the velocity chain, `tb4_explore::ExplorerPolicy` and the marker
+//! fusion `tb4_markers::Tracker` fed with simulated detections (`vision`).
 //! Everything runs on a simulated clock. `Sim::state` gives a snapshot for a later viewer.
 
 pub mod chain;
@@ -11,6 +12,7 @@ pub mod nav;
 pub mod robot;
 pub mod sensors;
 pub mod sim;
+pub mod vision;
 pub mod world;
 pub mod worlds;
 

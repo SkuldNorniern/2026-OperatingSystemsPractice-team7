@@ -97,6 +97,8 @@ pub struct CameraParams {
     pub max_incidence: f64,
     /// apparent side (px) a marker needs to be read
     pub min_side_px: f64,
+    /// smallest apparent side (px) the detector still finds, with a lower probability
+    pub detect_min_side_px: f64,
 }
 
 impl Default for CameraParams {
@@ -110,6 +112,7 @@ impl Default for CameraParams {
             height: 0.25,
             max_incidence: 75f64.to_radians(),
             min_side_px: 12.0,
+            detect_min_side_px: 8.0,
         }
     }
 }
@@ -140,6 +143,11 @@ pub fn camera_pose(robot: Pose2, p: &CameraParams) -> (f64, f64) {
 
 /// whether the marker can be read from the camera on `robot`
 pub fn view_marker(world: &World, robot: Pose2, m: &Marker, p: &CameraParams) -> Result<MarkerView, NotReadable> {
+    view_marker_px(world, robot, m, p, p.min_side_px)
+}
+
+/// `view_marker` with another floor for the apparent side (px)
+pub fn view_marker_px(world: &World, robot: Pose2, m: &Marker, p: &CameraParams, min_side_px: f64) -> Result<MarkerView, NotReadable> {
     let cam = camera_pose(robot, p);
     let (dx, dy) = (m.pos.0 - cam.0, m.pos.1 - cam.1);
     let range = dx.hypot(dy);
@@ -165,7 +173,7 @@ pub fn view_marker(world: &World, robot: Pose2, m: &Marker, p: &CameraParams) ->
         return Err(NotReadable::TooOblique);
     }
     let side_px = p.fx * m.size * cos_inc / range;
-    if side_px < p.min_side_px {
+    if side_px < min_side_px {
         return Err(NotReadable::TooSmall);
     }
     Ok(MarkerView { range, incidence, bearing, side_px })

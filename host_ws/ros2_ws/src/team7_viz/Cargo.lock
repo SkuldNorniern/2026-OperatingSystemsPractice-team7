@@ -29,8 +29,7 @@ dependencies = [
 [[package]]
 name = "aurea"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57df79737fd8ae864873497d9c180c61bf077cccafec12898e1e15602d36c4fa"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 dependencies = [
  "aurea-animation",
  "aurea-ffi",
@@ -38,15 +37,16 @@ dependencies = [
  "aurea-render",
  "aurea-runtime",
  "jni",
+ "libc",
  "log",
  "png",
+ "windows",
 ]
 
 [[package]]
 name = "aurea-animation"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a8f6fe66a87d5ffc5a2a10b448bde664c91ed101c9d1fdb09e8e450c0e71d96"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 dependencies = [
  "aurea-foundation",
 ]
@@ -54,8 +54,7 @@ dependencies = [
 [[package]]
 name = "aurea-ffi"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbfc80891c7635aa200a2d060d967bcf31f6b5647876e4f5d54a2e529f18fe48"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 dependencies = [
  "cc",
  "pkg-config",
@@ -64,14 +63,12 @@ dependencies = [
 [[package]]
 name = "aurea-foundation"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38dac6ad03e017568d30d0ae4c6676379b9763fc348be6bd1e6a45b219dfe9ba"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 
 [[package]]
 name = "aurea-render"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95139d81ff5a16e6bfd1e88b9910f3a76a1cd1cc1745c7b52fbbe511885a2666"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 dependencies = [
  "aurea-foundation",
  "harfrust",
@@ -86,8 +83,7 @@ dependencies = [
 [[package]]
 name = "aurea-runtime"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15b9835564a7114ca27de43417286febdf6ef538d8adc2e486fbb57e4f8581a2"
+source = "git+https://github.com/SkuldNorniern/aurea?rev=ed32453#ed32453e0f2a0c0f219ddeff8aab7b007d12e203"
 dependencies = [
  "aurea-foundation",
  "log",
@@ -1482,10 +1478,105 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
+dependencies = [
+ "windows-collections",
+ "windows-core",
+ "windows-future",
+ "windows-numerics",
+]
+
+[[package]]
+name = "windows-collections"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
+dependencies = [
+ "windows-core",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
+
+[[package]]
+name = "windows-future"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
+dependencies = [
+ "windows-core",
+ "windows-link",
+ "windows-threading",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.60.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.59.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-numerics"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
+dependencies = [
+ "windows-core",
+ "windows-link",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "windows-sys"
@@ -1518,6 +1609,15 @@ dependencies = [
  "windows_x86_64_gnu",
  "windows_x86_64_gnullvm",
  "windows_x86_64_msvc",
+]
+
+[[package]]
+name = "windows-threading"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
+dependencies = [
+ "windows-link",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ rust-version = "1.90"
 license.workspace = true
 
 [dependencies]
-aurea = "0.1"
+aurea = { git = "https://github.com/SkuldNorniern/aurea", rev = "ed32453" }
 tb4_core = { path = "../tb4_core" }
 tb4_draw = { path = "../tb4_draw" }
 tb4_explore = { path = "../tb4_explore" }

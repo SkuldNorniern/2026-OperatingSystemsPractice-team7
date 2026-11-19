@@ -15,7 +15,7 @@ publish = false
 r2r = "0.9.7"
 futures = "0.3"
 ctrlc = { version = "3.5", features = ["termination"] }
-aurea = "0.1"
+aurea = { git = "https://github.com/SkuldNorniern/aurea", rev = "ed32453" }
 tb4_core = { path = "../../../../crates/tb4_core" }
 tb4_draw = { path = "../../../../crates/tb4_draw" }
 png = "0.18"                        # --dump-frame and the test snapshot

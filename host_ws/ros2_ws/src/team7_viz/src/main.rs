@@ -17,7 +17,8 @@ use team7_viz::{outputs, ros, shots};
 
 const W: u32 = 1440;
 const H: u32 = 900;
-/// the canvas size request is a minimum in GTK: keep it small so a tiling compositor can shrink the window
+/// the canvas is made small: its first size is still a minimum when the window starts tiled
+/// (aurea ed32453 lets it shrink after the first layout, but a tiled start then overflows)
 const MIN_W: u32 = 320;
 const MIN_H: u32 = 240;
 /// redraw at most this often (60 Hz) while data streams in, and at least every `IDLE_REDRAW` (clocks, ages)
@@ -91,9 +92,13 @@ fn canvas_origin(_: &Canvas, _: *mut std::ffi::c_void) -> (f64, f64) {
 fn shifted(e: &WindowEvent, ox: f64, oy: f64) -> WindowEvent {
     let mut e = e.clone();
     match &mut e {
-        WindowEvent::MouseMove { x, y, .. } | WindowEvent::MouseButton { x, y, .. } | WindowEvent::MouseWheel { x, y, .. } => {
+        WindowEvent::MouseMove { x, y, .. } | WindowEvent::MouseButton { x, y, .. } => {
             *x -= ox;
             *y -= oy;
+        }
+        WindowEvent::Scroll(s) => {
+            s.x -= ox;
+            s.y -= oy;
         }
         _ => {}
     }
@@ -446,9 +451,10 @@ fn main() -> AureaResult<()> {
                 let used = a.moved(lx, ly);
                 c.handle(&e) || used || in_map(x, y)
             }
-            WindowEvent::MouseWheel { delta_y, x, y, .. } if in_map(x, y) => {
-                let (lx, ly) = local(x, y);
-                a.wheel(delta_y, lx, ly)
+            WindowEvent::Scroll(s) if in_map(s.x, s.y) => {
+                let (lx, ly) = local(s.x, s.y);
+                // a wheel detent is one zoom step; trackpads give pixels, about 40 per step
+                a.wheel(s.clicks.map_or(s.delta_y / 40.0, |c| c.1), lx, ly)
             }
             _ => c.handle(&e),
         };

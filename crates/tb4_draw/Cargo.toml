@@ -9,6 +9,6 @@ license.workspace = true
 
 [dependencies]
 # only the renderer part of aurea: no window toolkit, so this crate builds and tests without GTK
-aurea-render = "0.1"
-aurea-foundation = "0.1"
+aurea-render = { git = "https://github.com/SkuldNorniern/aurea", rev = "ed32453" }
+aurea-foundation = { git = "https://github.com/SkuldNorniern/aurea", rev = "ed32453" }
 tb4_core = { path = "../tb4_core" }

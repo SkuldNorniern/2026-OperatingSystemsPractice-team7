@@ -14,7 +14,8 @@ use tb4_viewer::scene::colors;
 
 const W: u32 = 1280;
 const H: u32 = 820;
-/// the canvas size request is a minimum in GTK: keep it small so a tiling compositor can shrink the window
+/// the canvas is made small: its first size is still a minimum when the window starts tiled
+/// (aurea ed32453 lets it shrink after the first layout, but a tiled start then overflows)
 const MIN_W: u32 = 320;
 const MIN_H: u32 = 240;
 

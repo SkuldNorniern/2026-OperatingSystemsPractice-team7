@@ -80,6 +80,8 @@ struct Ctx<'a> {
     goal_active: bool,
     heading_active: bool,
     angle_active: bool,
+    /// clearance below which a pose collides: robot_radius, or less when the robot already starts closer
+    collide_r: f64,
     df: Option<&'a DistanceField>,
 }
 
@@ -114,7 +116,7 @@ impl Ctx<'_> {
 
             if let Some(df) = self.df {
                 let clearance = df.at(pose.x, pose.y) as f64;
-                if clearance < p.robot_radius {
+                if clearance < self.collide_r {
                     collided = true;
                     out[t + 1..].copy_from_slice(&self.u[t + 1..]);
                     break;
@@ -303,11 +305,16 @@ impl Mppi {
         let h = self.u.len();
         let k = self.costs.len();
         let reach = p.vx_max.max(-p.vx_min) * h as f64 * p.dt + 0.3;
+        // Map cells inside the footprint (a SLAM ghost cell, or the dock just behind after undocking)
+        // would make every sample collide, standing still included, and the robot would stall for good.
+        // Starting that close, a pose only collides if it gets closer than the start: turning in place
+        // (round base) and driving away stay allowed.
+        let collide_r = df.map_or(p.robot_radius, |df| p.robot_radius.min((df.at(pose.x, pose.y) as f64 - 0.01).max(0.0)));
         let lo = path.index_at(s_r - 0.2);
         let hi = (path.index_at(s_r + reach) + 1).min(path.pts.len());
         let clear = |i: usize, margin: f64| df.is_none_or(|df| df.at(path.pts[i].0, path.pts[i].1) as f64 >= margin);
         // blocked local path: drop path-shape critics, score arc-length progress to a free point past it
-        let blocked = (idx..hi).any(|i| !clear(i, p.robot_radius));
+        let blocked = (idx..hi).any(|i| !clear(i, collide_r));
         let mut fi = path.index_at(s_r + p.follow_lookahead);
         if blocked {
             while fi + 1 < path.pts.len() && !clear(fi, p.robot_radius + 0.5 * p.inflation) {
@@ -323,10 +330,9 @@ impl Mppi {
             let a = if blocked { follow } else { path.pts[path.ahead[idx]] };
             let (dx, dy) = (a.0 - pose.x, a.1 - pose.y);
             let err = if dx * dx + dy * dy > 0.0025 { wrap_angle(dy.atan2(dx) - pose.yaw).abs() } else { 0.0 };
-            // turning in place does not move the robot, so it is safe on a blocked path as long as the
-            // footprint itself is clear here. Reverse stays off (vendor: it can damage the motors).
-            let footprint_clear = df.is_none_or(|df| df.at(pose.x, pose.y) as f64 >= p.robot_radius);
-            if err > p.rotate_in_place_angle && (!blocked || footprint_clear) {
+            // turning in place does not move the round base, so it is safe even on a blocked path or
+            // with an obstacle already inside the footprint. Reverse stays off (vendor: it can damage the motors).
+            if err > p.rotate_in_place_angle {
                 self.rotating = true;
             } else if err < p.rotate_exit_angle {
                 self.rotating = false;
@@ -355,6 +361,7 @@ impl Mppi {
             goal_active: path.length() - s_r < p.goal_activate_dist || dgoal < p.goal_activate_dist,
             heading_active,
             angle_active: !heading_active && !align && (!blocked || self.rotating),
+            collide_r,
             df,
         };
 
@@ -419,7 +426,7 @@ impl Mppi {
                 savgol(&mut u_new, start.control());
             }
             relimit(&mut u_new, start.control(), p, v_lo, v_hi);
-            if df.is_some_and(|df| collides(&start.pose, &u_new, p, df)) {
+            if df.is_some_and(|df| collides(&start.pose, &u_new, p, df, collide_r)) {
                 u_new.copy_from_slice(&self.ctrl[kbest * h..(kbest + 1) * h]);
                 relimit(&mut u_new, start.control(), p, v_lo, v_hi);
             }
@@ -454,11 +461,11 @@ fn relimit(u: &mut [Control], mut prev: Control, p: &MppiParams, v_lo: f64, v_hi
     }
 }
 
-fn collides(start: &Pose2, u: &[Control], p: &MppiParams, df: &DistanceField) -> bool {
+fn collides(start: &Pose2, u: &[Control], p: &MppiParams, df: &DistanceField, collide_r: f64) -> bool {
     let mut pose = *start;
     u.iter().any(|c| {
         pose = step(&pose, c.v, c.w, p.dt);
-        (df.at(pose.x, pose.y) as f64) < p.robot_radius
+        (df.at(pose.x, pose.y) as f64) < collide_r
     })
 }
 

@@ -172,25 +172,48 @@ fn empty_path_and_reset() {
     assert!(m.control_sequence().iter().all(|u| *u == Control::ZERO));
 }
 
-#[test]
-fn all_samples_colliding_stops() {
+fn ring(radius: f64) -> DistanceField {
     let meta = GridMeta { width: 40, height: 40, resolution: 0.05, origin_x: -1.0, origin_y: -1.0 };
     let mut g = Grid::filled(meta, 0);
-    // ring of obstacles 0.15 m around the robot
     for cy in 0..40u32 {
         for cx in 0..40u32 {
             let (x, y) = (cx as f64 * 0.05 - 0.975, cy as f64 * 0.05 - 0.975);
-            if (x.hypot(y) - 0.15).abs() < 0.04 {
+            if (x.hypot(y) - radius).abs() < 0.04 {
                 g.set(Cell { x: cx, y: cy }, 100);
             }
         }
     }
-    let df = DistanceField::from_grid(&g, 65, false);
+    DistanceField::from_grid(&g, 65, false)
+}
+
+#[test]
+fn all_samples_colliding_stops() {
+    // ring just outside the footprint, robot driving at full speed: every sample brakes into it
+    // the robot sits at the edge of a 5 cm cell, so the braking distance (about 4 cm) enters the next one
+    let df = ring(0.25);
+    let x0 = 0.049;
+    assert!(df.at(x0, 0.0) >= 0.18, "setup: ring must be outside the footprint, {}", df.at(x0, 0.0));
     let mut m = Mppi::new(params(2));
-    m.set_path(&[(0.0, 0.0), (0.8, 0.0)], None);
-    let c = m.compute(&RobotState { pose: Pose2::new(0.0, 0.0, 0.0), v: 0.2, w: 0.0 }, Some(&df));
+    m.set_path(&[(x0, 0.0), (0.8, 0.0)], None);
+    let c = m.compute(&RobotState { pose: Pose2::new(x0, 0.0, 0.0), v: 0.3, w: 0.0 }, Some(&df));
     assert!(!c.collision_free);
     assert_eq!(c.control(), Control::ZERO);
+}
+
+#[test]
+fn enclosed_inside_footprint_only_turns() {
+    // ring inside the footprint, robot at rest: it may turn the round base, never drive closer
+    let df = ring(0.15);
+    let start = df.at(0.0, 0.0);
+    let mut m = Mppi::new(params(2));
+    m.set_path(&[(0.0, 0.0), (0.0, 0.8)], None);
+    let p = params(2);
+    let mut s = RobotState { pose: Pose2::new(0.0, 0.0, 0.0), v: 0.0, w: 0.0 };
+    for _ in 0..40 {
+        let c = m.compute(&s, Some(&df));
+        s = tb4_control::simulate(&s, c.control(), p.dt);
+        assert!(df.at(s.pose.x, s.pose.y) >= start - 0.011, "drove closer: {:?}", s.pose);
+    }
 }
 
 #[test]

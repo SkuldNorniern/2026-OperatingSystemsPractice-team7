@@ -43,14 +43,21 @@ fn turns_in_place_when_goal_is_behind_and_path_blocked() {
 }
 
 #[test]
-fn no_turn_in_place_when_footprint_itself_touches_obstacle() {
+fn turns_in_place_but_never_closer_when_footprint_touches_obstacle() {
     let p = params();
     let df = wall_behind();
     let mut m = Mppi::new(p.clone());
-    // robot 0.1 m from the wall: footprint (0.18) overlaps it, so rotating here is not allowed
+    // robot 0.075 m from the wall (inside its 0.18 m footprint): turning the round base is still
+    // allowed, getting any closer to the wall is not
     m.set_path(&[(-0.2, 0.0), (-0.8, 0.0)], None);
-    let s = RobotState { pose: Pose2::new(-0.2, 0.0, 0.0), v: 0.0, w: 0.0 };
-    let c = m.compute(&s, Some(&df));
-    assert!(!m.is_rotating(), "must not rotate in place with the footprint in contact");
-    let _ = c;
+    let mut s = RobotState { pose: Pose2::new(-0.2, 0.0, 0.0), v: 0.0, w: 0.0 };
+    let start = df.at(-0.2, 0.0);
+    let mut turned = false;
+    for _ in 0..60 {
+        let c = m.compute(&s, Some(&df));
+        turned |= m.is_rotating();
+        s = tb4_control::simulate(&s, c.control(), p.dt);
+        assert!(df.at(s.pose.x, s.pose.y) >= start - 0.011, "moved toward the wall: {:?}", s.pose);
+    }
+    assert!(turned, "must turn in place toward the goal");
 }

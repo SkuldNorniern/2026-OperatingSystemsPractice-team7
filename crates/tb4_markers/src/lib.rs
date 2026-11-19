@@ -245,9 +245,11 @@ pub struct TrackParams {
     /// and at least this share of all views must be lidar-backed. A real marker has its wall behind
     /// it in most views; a chair label only now and then (field 184838: 3 of 39 views, 8 %)
     pub min_wall_fraction: f64,
-    /// once the views' bearings spread at least this much (rad), their line intersection is an
-    /// independent position: the fused position must lie within `max_triangulation_gap` of it.
-    /// A label whose rays land on the wall behind it intersects in front of that wall and fails.
+    /// the views' bearings must spread at least this much (rad) before a target is confirmed, and
+    /// their line intersection (independent of range) must lie within `max_triangulation_gap` of
+    /// the fused position. A label whose rays land on the wall behind it intersects in front of that
+    /// wall and fails; views from one spot never confirm (replay 184838: chair label confirmed from
+    /// 7 views at almost one bearing). 0 = off.
     pub min_triangulation_spread: f64,
     pub max_triangulation_gap: f64,
     /// fused position 1 sigma must be below this (m)
@@ -277,7 +279,7 @@ impl Default for TrackParams {
             min_views: 5,
             min_wall_views: 3,
             min_wall_fraction: 0.25,
-            min_triangulation_spread: 0.26,
+            min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
             max_spread: 0.08,
             max_consistency: 3.0,
@@ -468,9 +470,10 @@ impl Tracker {
             confirmed: v.len() >= p.min_views
                 && wall >= p.min_wall_views
                 && wall as f64 >= p.min_wall_fraction * v.len() as f64
-                && triangulate(v)
-                    .filter(|t| t.spread >= p.min_triangulation_spread)
-                    .is_none_or(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap)
+                && (p.min_triangulation_spread <= 0.0
+                    || triangulate(v).is_some_and(|t| {
+                        t.spread >= p.min_triangulation_spread && (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap
+                    }))
                 && f.sigma <= loose * p.max_spread
                 && f.consistency <= loose * p.max_consistency,
         })
@@ -693,7 +696,8 @@ mod tests {
 
     #[test]
     fn tracker_confirms_consistent_views_and_rejects_outliers() {
-        let mut t = Tracker::new(TrackParams { min_views: 3, ..Default::default() });
+        // all views share one bearing here: the spread rule has its own test
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
         let e = |x, y| Estimate::point(x, y, Source::Raycast);
         t.add(1, &e(1.0, 1.0));
         t.add(1, &e(1.02, 0.98));
@@ -746,11 +750,27 @@ mod tests {
         }
         assert!(!t.target(1).unwrap().confirmed, "{:?} vs {:?}", t.target(1), triangulate(t.estimates(1)));
         // the same views placed on the marker itself pass
-        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
         for c in [(0.0, -1.0), (0.0, -0.5), (0.0, 0.0), (0.0, 0.5), (0.0, 1.0)] {
             t.add(2, &view_at(c, label, 0.0, Source::Raycast));
         }
         assert!(t.target(2).unwrap().confirmed);
+    }
+
+    #[test]
+    fn views_from_one_spot_never_confirm() {
+        let m = (2.4, -1.3);
+        let mut t = Tracker::new(TrackParams::default());
+        // 7 perfect wall-backed views, robot nearly still (bearings within a few degrees)
+        for k in 0..7 {
+            t.add(1, &view_at((0.0, 0.02 * k as f64), m, 0.0, Source::Raycast));
+        }
+        assert!(!t.target(1).unwrap().confirmed, "{:?}", triangulate(t.estimates(1)));
+        // the robot drives on 1 m: bearings now spread, same marker confirms
+        for k in 0..4 {
+            t.add(1, &view_at((0.25 * k as f64, 0.6), m, 0.0, Source::Raycast));
+        }
+        assert!(t.target(1).unwrap().confirmed);
     }
 
     #[test]
@@ -784,7 +804,7 @@ mod tests {
 
     #[test]
     fn confirmation_needs_wall_supported_views() {
-        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
         let pnp = |x, y| Estimate::point(x, y, Source::PnpRange);
         let ray = |x, y| Estimate::point(x, y, Source::Raycast);
         // a tight cluster of pnp-only views (pattern with nothing behind it in the scan): never a target
@@ -798,7 +818,7 @@ mod tests {
         t.add(4, &ray(2.0, 1.01));
         assert!(t.target(4).unwrap().confirmed, "3 of 11 views lidar-backed (27 %)");
         // same count, smaller share: 3 lidar-backed of 15 (20 %) is not enough
-        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
         for k in 0..12 {
             t.add(6, &pnp(2.0 + 0.002 * k as f64, 1.0));
         }
@@ -807,7 +827,7 @@ mod tests {
         }
         assert!(!t.target(6).unwrap().confirmed, "20 % lidar-backed");
         // the chair label from field run 184838: 3 lidar-backed views out of 39
-        let mut t = Tracker::new(TrackParams::default());
+        let mut t = Tracker::new(TrackParams { min_triangulation_spread: 0.0, ..Default::default() });
         for k in 0..36 {
             t.add(5, &pnp(3.4 + 0.001 * (k % 5) as f64, -2.7));
         }

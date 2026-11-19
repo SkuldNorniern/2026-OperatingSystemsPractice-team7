@@ -19,6 +19,8 @@ aurea = { git = "https://github.com/SkuldNorniern/aurea", rev = "ed32453" }
 tb4_core = { path = "../../../../crates/tb4_core" }
 tb4_draw = { path = "../../../../crates/tb4_draw" }
 png = "0.18"                        # --dump-frame and the test snapshot
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"                        # per-mode profiles in ~/.config/team7_viz
 
 [profile.colcon]
 inherits = "release"

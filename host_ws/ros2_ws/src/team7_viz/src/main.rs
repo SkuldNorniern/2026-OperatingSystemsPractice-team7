@@ -13,6 +13,7 @@ use aurea::render::{CpuRasterizer, Renderer, request_canvas_redraw};
 use team7_viz::app::{Action, App, Button as MouseKey, Tool};
 use team7_viz::chrome::Chrome;
 use team7_viz::model::Model;
+use team7_viz::profile::{self, Profiles};
 use team7_viz::{outputs, ros, shots};
 
 const W: u32 = 1440;
@@ -35,6 +36,8 @@ const USAGE: &str = "usage: team7_viz [--allow-goals] [--output-dir DIR] [--scre
   --output-dir    run folder whose targets.csv and map.pgm the Targets panel checks
                   (default: the most recently active folder in ~/team7_runs)
   --screens-dir   where screenshots go (default ~/team7_runs/screens)
+  --profile NAME  use ~/.config/team7_viz/NAME.toml instead of the detected mode's profile
+                  (modes: team7-live, team7-replay, stock-live, stock-replay)
   --verbose       print received message counts every 2 s
   --dump-frame    on exit save the canvas (and PNG.ref.png drawn offscreen) for checks";
 
@@ -45,10 +48,11 @@ struct Options {
     allow_goals: bool,
     output_dir: Option<PathBuf>,
     screens_dir: Option<PathBuf>,
+    profile: Option<String>,
 }
 
 fn parse() -> Result<Options, String> {
-    let mut o = Options { exit_after: None, verbose: false, dump_frame: None, allow_goals: false, output_dir: None, screens_dir: None };
+    let mut o = Options { exit_after: None, verbose: false, dump_frame: None, allow_goals: false, output_dir: None, screens_dir: None, profile: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().ok_or(format!("{a} needs a value"));
@@ -62,6 +66,7 @@ fn parse() -> Result<Options, String> {
             "--allow-goals" => o.allow_goals = true,
             "--output-dir" => o.output_dir = Some(val()?.into()),
             "--screens-dir" => o.screens_dir = Some(val()?.into()),
+            "--profile" => o.profile = Some(val()?),
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -157,22 +162,24 @@ struct Menus {
     panel: MenuItem,
     follow: MenuItem,
     tools: Vec<(Tool, MenuItem)>,
-    last: Option<(bool, bool, Tool)>,
+    profile: MenuItem,
+    last: Option<(bool, bool, Tool, Option<String>)>,
 }
 
 impl Menus {
     fn sync(&mut self, chrome: &Chrome, app: &App) {
-        let now = (chrome.dock_open, app.camera.follow, app.tool);
-        if self.last == Some(now) {
+        let now = (chrome.dock_open, app.camera.follow, app.tool, chrome.profile.clone());
+        if self.last.as_ref() == Some(&now) {
             return;
         }
-        self.last = Some(now);
+        self.last = Some(now.clone());
         SYNCING.with(|s| s.set(true));
         let _ = self.panel.set_checked(now.0);
         let _ = self.follow.set_checked(now.1);
         for (t, item) in &self.tools {
             let _ = item.set_checked(*t == now.2);
         }
+        let _ = self.profile.set_label(&format!("Active: {}", now.3.as_deref().unwrap_or("detecting")));
         SYNCING.with(|s| s.set(false));
     }
 }
@@ -214,6 +221,7 @@ fn main() -> AureaResult<()> {
 
     let app = Rc::new(RefCell::new(App::new(opts.allow_goals)));
     let chrome = Rc::new(RefCell::new(Chrome::new(domain.clone(), opts.output_dir.clone())));
+    let profiles = Rc::new(RefCell::new(Profiles::new(profile::config_dir(), opts.profile.clone())));
     let screens_dir = opts.screens_dir.clone().unwrap_or_else(|| outputs::runs_root().join("screens"));
     let mut window = Window::new("team7 viewer", W as i32, H as i32)?;
     let canvas = Canvas::new(MIN_W, MIN_H, RendererBackend::Cpu)?;
@@ -310,7 +318,28 @@ fn main() -> AureaResult<()> {
             })?,
         ));
     }
-    let menus = Rc::new(RefCell::new(Menus { panel, follow, tools, last: None }));
+    let mut profile_menu = bar.add_submenu("Profile")?;
+    let profile_item = profile_menu.add_item("Active: detecting", || {})?;
+    let _ = profile_item.set_enabled(false);
+    profile_menu.add_separator()?;
+    {
+        let (p, a, c) = (profiles.clone(), app.clone(), chrome.clone());
+        profile_menu.add_item("Reset to defaults", move || {
+            if let (Ok(mut p), Ok(mut a), Ok(mut c)) = (p.try_borrow_mut(), a.try_borrow_mut(), c.try_borrow_mut()) {
+                p.reset(&mut a, &mut c);
+                a.say("profile reset to the defaults of this mode");
+            }
+            redraw();
+        })?;
+        let (p, a, c) = (profiles.clone(), app.clone(), chrome.clone());
+        profile_menu.add_item("Save as default for this mode", move || {
+            if let (Ok(mut p), Ok(a), Ok(c)) = (p.try_borrow_mut(), a.try_borrow(), c.try_borrow()) {
+                p.save_as_default(&a, &c);
+            }
+            redraw();
+        })?;
+    }
+    let menus = Rc::new(RefCell::new(Menus { panel, follow, tools, profile: profile_item, last: None }));
 
     let mut root = Stack::new(Orientation::Vertical)?;
     root.set_padding(0)?;
@@ -322,7 +351,7 @@ fn main() -> AureaResult<()> {
     *win_slot.borrow_mut() = Rc::downgrade(&window);
     let started = Instant::now();
 
-    let (dc, da, shared, menus_d) = (chrome.clone(), app.clone(), model.clone(), menus.clone());
+    let (dc, da, dp, shared, menus_d) = (chrome.clone(), app.clone(), profiles.clone(), model.clone(), menus.clone());
     let weak = Rc::downgrade(&window);
     let quit = interrupted.clone();
     let mut closing = false;
@@ -340,6 +369,19 @@ fn main() -> AureaResult<()> {
         a.publish_wants(&mut m);
         let paint = Instant::now();
         let req = c.frame(ctx, &mut a, &m, now)?;
+        // the profile of the detected mode (or the forced one), saved shortly after changes
+        if let Ok(mut p) = dp.try_borrow_mut() {
+            let mode = profile::mode_key(m.stack(), profile::is_replay(&c.domain, c.known_run_dir()));
+            if p.update(mode, &mut a, &mut c, now) {
+                c.profile = p.active.clone();
+                eprintln!("team7_viz: profile {}", p.active.as_deref().unwrap_or("-"));
+                redraw();
+            }
+            for msg in p.messages.drain(..) {
+                eprintln!("team7_viz: {msg}");
+                a.say(msg);
+            }
+        }
         STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), m.camera().map(|f| f.seq)));
         if c.ui.wants_frame() {
             redraw();
@@ -399,6 +441,7 @@ fn main() -> AureaResult<()> {
     };
 
     let weak = Rc::downgrade(&window);
+    let exit_state = (profiles.clone(), app.clone(), chrome.clone());
     let events_canvas = canvas.clone();
     let debug_input = std::env::var_os("TEAM7_VIZ_DEBUG_INPUT").is_some();
     window.on_event(move |event| {
@@ -472,6 +515,10 @@ fn main() -> AureaResult<()> {
 
     window.show();
     let result = window.run();
+    let (profiles, app, chrome) = exit_state;
+    if let (Ok(mut p), Ok(a), Ok(c)) = (profiles.try_borrow_mut(), app.try_borrow(), chrome.try_borrow()) {
+        p.flush(&a, &c);
+    }
 
     stop.store(true, Ordering::Relaxed);
     let _ = pump.join();

@@ -14,6 +14,7 @@ pub mod chrome;
 pub mod health;
 pub mod model;
 pub mod outputs;
+pub mod profile;
 pub mod ros;
 pub mod scene;
 pub mod shots;

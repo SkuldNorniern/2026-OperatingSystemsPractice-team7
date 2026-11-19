@@ -73,6 +73,8 @@ pub struct Chrome {
     /// the map's rectangle in the last frame, canvas pixels
     pub map_area: Rect,
     pub domain: String,
+    /// the active profile's name, shown in the toolbar
+    pub profile: Option<String>,
     pub layout: DockLayout,
     out_dir: Option<PathBuf>,
     fixed_out_dir: bool,
@@ -111,6 +113,7 @@ impl Chrome {
             sections: [true, true, true, false],
             map_area: Rect::new(0.0, 0.0, 1.0, 1.0),
             domain,
+            profile: None,
             layout: DockLayout::default(),
             fixed_out_dir: out_dir.is_some(),
             out_dir,
@@ -139,6 +142,11 @@ impl Chrome {
     }
 
     /// set the run folder (tests, `--output-dir`)
+    /// the run folder found last
+    pub fn known_run_dir(&self) -> Option<&std::path::Path> {
+        self.out_dir.as_deref()
+    }
+
     pub fn set_run_dir(&mut self, dir: Option<PathBuf>) {
         self.fixed_out_dir = true;
         self.out_dir = dir;
@@ -152,7 +160,7 @@ impl Chrome {
         let run_dir = self.run_dir(now);
         let theme = self.theme.clone();
         ctx.clear(theme.palette.background)?;
-        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, .. } = self;
+        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, profile, .. } = self;
         let mut ui = state.frame(ctx, &theme);
 
         let body = Rect::new(0.0, TOOLBAR_H + STRIP_H, w, (h - TOOLBAR_H - STRIP_H - STATUS_H).max(10.0));
@@ -171,7 +179,7 @@ impl Chrome {
         // the map first, so the chrome draws over its edges
         app.draw_in(&mut *ui.ctx, model, now, map)?;
 
-        toolbar(&mut ui, app, dock_open, &mut req, model, w)?;
+        toolbar(&mut ui, app, dock_open, &mut req, profile.as_deref(), w)?;
         let found = app.targets(model);
         strip(&mut ui, model, &found, now, w)?;
         if let Some(d) = dock {
@@ -189,7 +197,7 @@ impl Chrome {
     }
 }
 
-fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, dock_open: &mut bool, req: &mut Requests, model: &Model, w: f32) -> AureaResult<()> {
+fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, dock_open: &mut bool, req: &mut Requests, profile: Option<&str>, w: f32) -> AureaResult<()> {
     let t = ui.theme.clone();
     ui.fill(Rect::new(0.0, 0.0, w, TOOLBAR_H), t.palette.surface)?;
     let (y, bh) = (6.0, 28.0);
@@ -244,12 +252,11 @@ fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, dock_open: &mut bool,
     let r = Rect::new(rx, 11.0, bw, 18.0);
     ui.border(r, 9.0, 1.0, color)?;
     ui.text(badge, r, &f, color, Align::Center)?;
-    let stack = format!("{} stack", model.stack());
-    let sw = ui.text_width(&stack, &font(11.0));
+    // the active profile: stack and source, e.g. team7-replay
+    let label = profile.map_or_else(|| "profile: detecting".to_owned(), |p| format!("profile {p}"));
+    let sw = ui.text_width(&label, &font(11.0));
     rx -= sw + 12.0;
-    if model.stack() != "-" {
-        ui.text(&stack, Rect::new(rx, 11.0, sw, 18.0), &font(11.0), t.palette.dim, Align::Start)?;
-    }
+    ui.text(&label, Rect::new(rx, 11.0, sw, 18.0), &font(11.0), t.palette.dim, Align::Start)?;
     Ok(())
 }
 

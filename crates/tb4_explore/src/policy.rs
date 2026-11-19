@@ -1,8 +1,9 @@
 //! Explorer decision logic without ROS: the explorer node and the simulator both drive this.
 //! Time is passed in as seconds on any monotonic clock, nothing here reads the wall clock.
 
-use tb4_core::{Grid, Pose2};
+use tb4_core::{DistanceField, Grid, Pose2};
 
+use crate::approach::{self, Approach, ApproachParams, MarkerHint, Viewpoint};
 use crate::{Coverage, CoverageParams, ExploreParams, Frontier, View, find_frontiers, select_goal_with_heading};
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,9 @@ pub struct ExplorerParams {
     pub preempt_distance: f64,
     /// s a goal switched away from cannot be picked again
     pub switch_cooldown: f64,
+    /// approach on sight: markers the mapper holds but has not confirmed get close views from a few
+    /// angles, before frontiers and camera views. None = off
+    pub approach: Option<ApproachParams>,
 }
 
 impl Default for ExplorerParams {
@@ -66,6 +70,7 @@ impl Default for ExplorerParams {
             look_around_turns: 3,
             preempt_distance: 0.5,
             switch_cooldown: 20.0,
+            approach: None,
         }
     }
 }
@@ -77,6 +82,8 @@ pub enum GoalKind {
     View,
     /// in-place look-around turn
     Turn,
+    /// close view of a marker that is not confirmed yet
+    Approach,
 }
 
 /// terminal state of a navigation goal; everything that is neither success nor cancel counts as aborted
@@ -106,6 +113,8 @@ pub enum CancelReason {
     Timeout,
     NoProgress,
     WallSeen,
+    /// the marker of an approach goal got confirmed
+    MarkerConfirmed,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -131,6 +140,8 @@ pub struct TickInput<'a> {
     pub result: Option<((f64, f64), NavStatus)>,
     /// mission finished: cancel and stop
     pub done: bool,
+    /// markers seen but not confirmed (empty when none, or approach is off)
+    pub markers: &'a [MarkerHint],
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -139,6 +150,11 @@ pub struct ExplorerStats {
     pub sent_frontier: u64,
     pub sent_view: u64,
     pub sent_turn: u64,
+    pub sent_approach: u64,
+    /// approach goals cancelled because their marker got confirmed
+    pub approach_confirmed: u64,
+    /// markers given up (timeout, failed viewpoints, all viewpoints done)
+    pub approach_given_up: u64,
     /// frontier goals replaced by a new goal without stopping
     pub switched: u64,
     pub succeeded: u64,
@@ -159,6 +175,8 @@ struct Active {
     frontier_missing: u32,
     /// camera view goal: wall point it looks at
     view_target: Option<(f64, f64)>,
+    /// approach goal: marker position when sent, and the viewpoint slot
+    approach: Option<((f64, f64), usize)>,
     /// the navigator accepted it (cancel is possible from then on)
     accepted: bool,
     started: f64,
@@ -198,6 +216,8 @@ pub struct ExplorerPolicy {
     views: Vec<View>,
     viz_seq: u64,
     stats: ExplorerStats,
+    /// markers seen but not confirmed, and the ones given up
+    approaches: Vec<Approach>,
 }
 
 impl ExplorerPolicy {
@@ -216,8 +236,14 @@ impl ExplorerPolicy {
             views: Vec::new(),
             viz_seq: 0,
             stats: ExplorerStats::default(),
+            approaches: Vec::new(),
             p,
         }
+    }
+
+    /// markers the approach tracks: (position, given up)
+    pub fn approach_markers(&self, now: f64) -> impl Iterator<Item = ((f64, f64), bool)> + '_ {
+        self.approaches.iter().map(move |a| (a.pos, now < a.ignore_until))
     }
 
     pub fn params(&self) -> &ExplorerParams {
@@ -283,20 +309,126 @@ impl ExplorerPolicy {
             && a.accepted
         {
             a.cancelling = true;
-            a.cancel_ok = why == CancelReason::WallSeen;
+            a.cancel_ok = matches!(why, CancelReason::WallSeen | CancelReason::MarkerConfirmed);
             out.push(Action::Cancel(why));
             let s = &mut self.stats;
             match why {
                 CancelReason::Timeout => s.cancel_timeout += 1,
                 CancelReason::NoProgress => s.cancel_no_progress += 1,
                 CancelReason::WallSeen => s.cancel_wall_seen += 1,
+                CancelReason::MarkerConfirmed => s.approach_confirmed += 1,
                 _ => s.cancel_other += 1,
             }
         }
     }
 
+    fn approach_entry(&mut self, key: (f64, f64)) -> Option<&mut Approach> {
+        let r = 2.0 * self.p.approach.as_ref().map_or(0.5, |a| a.match_radius);
+        self.approaches
+            .iter_mut()
+            .map(|a| (dist(a.pos, key), a))
+            .filter(|(d, _)| *d <= r)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, a)| a)
+    }
+
+    fn give_up(&mut self, key: (f64, f64), now: f64, why: &str, out: &mut Vec<Action>) {
+        let Some(ap) = self.p.approach.clone() else { return };
+        if let Some(a) = self.approach_entry(key) {
+            a.ignore_until = now + ap.blacklist_duration;
+            a.started = None;
+            a.tried = [false; 3];
+            a.failures = 0;
+            let label = a.label();
+            self.stats.approach_given_up += 1;
+            out.push(Action::Info(format!("approach: giving up on {label} for {:.0} s: {why}", ap.blacklist_duration)));
+        }
+    }
+
+    /// outcome of an approach goal for its marker
+    fn approach_result(&mut self, key: (f64, f64), slot: usize, status: NavStatus, cancel_ok: bool, now: f64, out: &mut Vec<Action>) {
+        let max_failures = self.p.approach.as_ref().map_or(0, |a| a.max_failures);
+        let Some(a) = self.approach_entry(key) else { return };
+        if status == NavStatus::Succeeded {
+            a.tried[slot] = true;
+        } else if !cancel_ok {
+            a.tried[slot] = true;
+            a.failures += 1;
+            if a.failures >= max_failures {
+                self.give_up(key, now, "viewpoints failed", out);
+            }
+        }
+    }
+
+    /// approach on sight: update the markers from the hints, cancel an approach whose marker got
+    /// confirmed or timed out, and return the best viewpoint to go to next with its marker
+    fn approach_step(
+        &mut self,
+        now: f64,
+        markers: &[MarkerHint],
+        grid: Option<&Grid>,
+        robot: Pose2,
+        out: &mut Vec<Action>,
+    ) -> Option<(Viewpoint, (f64, f64))> {
+        let ap = self.p.approach.clone()?;
+        let gone = approach::sync(&mut self.approaches, markers, &ap, now);
+        let active = self.active.as_ref().filter(|a| a.accepted && !a.cancelling).and_then(|a| a.approach);
+        if let Some((key, _)) = active
+            && gone.iter().any(|g| dist(*g, key) <= 2.0 * ap.match_radius)
+            && !self.approaches.iter().any(|a| a.present && dist(a.pos, key) <= 2.0 * ap.match_radius)
+        {
+            out.push(Action::Info(format!("approach: marker at ({:.2}, {:.2}) confirmed, cancelling its view", key.0, key.1)));
+            self.cancel_active(CancelReason::MarkerConfirmed, out);
+        }
+        // time out, or every viewpoint done without a confirmation
+        let expired: Vec<((f64, f64), &str)> = self
+            .approaches
+            .iter()
+            .filter(|a| a.present && now >= a.ignore_until)
+            .filter_map(|a| {
+                if a.started.is_some_and(|s| now - s > ap.timeout) {
+                    Some((a.pos, "timeout"))
+                } else if a.tried.iter().all(|t| *t) {
+                    Some((a.pos, "all viewpoints done, still not confirmed"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (key, why) in expired {
+            if active.is_some_and(|(k, _)| dist(k, key) <= 2.0 * ap.match_radius) {
+                self.cancel_active(CancelReason::Timeout, out);
+            }
+            self.give_up(key, now, why, out);
+        }
+        let grid = grid?;
+        let open: Vec<usize> = (0..self.approaches.len())
+            .filter(|&i| self.approaches[i].present && now >= self.approaches[i].ignore_until)
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        let clearance = DistanceField::from_grid(grid, ap.occupied_threshold, true);
+        let mut best: Option<(Viewpoint, (f64, f64))> = None;
+        let cost = |v: &Viewpoint| robot.distance_to(v.x, v.y);
+        for i in open {
+            let a = &mut self.approaches[i];
+            let mut vps = approach::viewpoints(a, grid, &clearance, &ap);
+            // standing at one already: it counts as done
+            for v in vps.iter().filter(|v| robot.distance_to(v.x, v.y) < 0.25 && (robot.yaw - v.yaw).sin().atan2((robot.yaw - v.yaw).cos()).abs() < 0.35) {
+                a.tried[v.slot] = true;
+            }
+            vps.retain(|v| !a.tried[v.slot]);
+            if let Some(v) = approach::nearest(&vps, robot, self.p.turn_weight)
+                && best.is_none_or(|(b, _)| cost(&v) < cost(&b))
+            {
+                best = Some((v, a.pos));
+            }
+        }
+        best
+    }
+
     fn tick_inner(&mut self, now: f64, input: TickInput, out: &mut Vec<Action>) {
-        let p = &self.p;
         if input.done {
             if self.active.as_ref().is_some_and(|a| !a.cancelling) {
                 out.push(Action::Info("mission done, cancelling navigation".into()));
@@ -308,11 +440,17 @@ impl ExplorerPolicy {
         if let Some((goal, status)) = input.result
             && self.active.as_ref().is_some_and(|a| a.goal == goal)
         {
-            let ok = status == NavStatus::Succeeded || (status == NavStatus::Canceled && self.active.as_ref().is_some_and(|a| a.cancel_ok));
+            let cancel_ok = self.active.as_ref().is_some_and(|a| a.cancel_ok);
+            let ok = status == NavStatus::Succeeded || (status == NavStatus::Canceled && cancel_ok);
+            let finished = self.active.take();
             // a reached view whose wall still counts as unseen must not be picked again
-            if let Some(t) = self.active.take().and_then(|a| a.view_target) {
+            if let Some(t) = finished.as_ref().and_then(|a| a.view_target) {
                 self.visited_views.push(t);
             }
+            if let Some((key, slot)) = finished.and_then(|a| a.approach) {
+                self.approach_result(key, slot, status, cancel_ok, now, out);
+            }
+            let p = &self.p;
             // field runs lost about 5 s at every goal: chain straight on after a success,
             // wait only after a failure so the map / blacklist can change first
             // a view cancelled because its wall got seen on the way is done, not failed (sim studio:
@@ -329,6 +467,7 @@ impl ExplorerPolicy {
             }
         }
 
+        let p = &self.p;
         self.blacklist.retain(|(_, at)| now - *at < p.blacklist_duration);
         // Do not navigate using a costmap that stopped updating.
         if now - input.costmap_stamp > p.costmap_timeout {
@@ -420,11 +559,24 @@ impl ExplorerPolicy {
             }
             self.cancel_active(why, out);
         }
+        // Approach on sight comes first: a marker the mapper holds but has not confirmed is looked at
+        // from close by and from a few angles. It replaces a frontier, view or turn goal at once.
+        let approach_choice = self.approach_step(now, input.markers, input.map.or(Some(grid)), robot, out);
+        let mut approach_goal = None;
+        if abandon.is_none()
+            && let Some((vp, key)) = approach_choice
+        {
+            let replace = self.active.as_ref().is_some_and(|a| a.kind != GoalKind::Approach && a.accepted && !a.cancelling);
+            if replace || (self.active.is_none() && now >= self.next_goal_after) {
+                approach_goal = Some((vp, key, replace));
+            }
+        }
         // Keep moving: a frontier goal whose frontier was already seen on the way, or one that is almost
         // reached, is replaced by the next goal at once. The navigator takes the new goal without
         // stopping (it keeps the MPPI warm start), so the robot does not halt at every frontier.
         let mut preempt = None;
         if abandon.is_none()
+            && approach_goal.is_none()
             && let Some(a) = self.active.as_mut().filter(|a| a.kind == GoalKind::Frontier && !a.cancelling && a.accepted)
         {
             if frontiers.iter().any(|f| dist(f.goal, a.goal) < p.explore.blacklist_radius) {
@@ -438,7 +590,24 @@ impl ExplorerPolicy {
                 preempt = Some((a.goal, "almost there"));
             }
         }
-        let choice = if let Some((current, why)) = preempt {
+        let choice = if let Some((vp, key, replace)) = approach_goal {
+            let label = match self.approach_entry(key) {
+                Some(a) => {
+                    a.started.get_or_insert(now);
+                    a.label()
+                }
+                None => format!("marker at ({:.2}, {:.2})", key.0, key.1),
+            };
+            out.push(Action::Info(format!(
+                "new goal ({:.2}, {:.2}) yaw={:.2}: approach {label}, view {} of 3{}",
+                vp.x,
+                vp.y,
+                vp.yaw,
+                vp.slot + 1,
+                if replace { ", replacing the current goal" } else { "" }
+            )));
+            ((vp.x, vp.y), vp.yaw, None, GoalKind::Approach)
+        } else if let Some((current, why)) = preempt {
             let mut exclude = blacklist.clone();
             exclude.push(current);
             let next = select_goal_with_heading(&frontiers, &exclude, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight);
@@ -512,6 +681,7 @@ impl ExplorerPolicy {
             kind,
             frontier_missing: 0,
             view_target,
+            approach: approach_goal.map(|(vp, key, _)| (key, vp.slot)),
             accepted: false,
             started: now,
             progress_pose: (robot.x, robot.y, robot.yaw),
@@ -525,6 +695,7 @@ impl ExplorerPolicy {
             GoalKind::Frontier => s.sent_frontier += 1,
             GoalKind::View => s.sent_view += 1,
             GoalKind::Turn => s.sent_turn += 1,
+            GoalKind::Approach => s.sent_approach += 1,
         }
         if let Some((current, _)) = preempt {
             s.switched += 1;
@@ -537,7 +708,7 @@ impl ExplorerPolicy {
             // the lidar sees all round: no stop to turn to a heading at a frontier
             xy_only: kind == GoalKind::Frontier,
             kind,
-            preempts: preempt.is_some(),
+            preempts: preempt.is_some() || approach_goal.is_some_and(|(_, _, replace)| replace),
         }));
     }
 
@@ -578,7 +749,7 @@ mod tests {
     }
 
     fn input(g: &Grid, robot: Pose2, result: Option<((f64, f64), NavStatus)>, now: f64) -> TickInput<'_> {
-        TickInput { costmap: Some(g), costmap_stamp: now, map: Some(g), robot: Ok(robot), result, done: false }
+        TickInput { costmap: Some(g), costmap_stamp: now, map: Some(g), robot: Ok(robot), result, done: false, markers: &[] }
     }
 
     fn sent(actions: &[Action]) -> Option<GoalRequest> {
@@ -696,5 +867,176 @@ mod tests {
         assert!(next.preempts);
         assert_eq!(e.stats().switched, 1);
         assert!((next.x - goal.x).hypot(next.y - goal.y) > 0.5, "a different goal");
+    }
+
+    /// 4 x 4 m known free square in a 6 x 6 m unknown map, walls on the left and bottom
+    fn room() -> Grid {
+        let meta = GridMeta { width: 120, height: 120, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 0..80 {
+            for x in 0..80 {
+                g.set(Cell { x, y }, 0);
+            }
+        }
+        for i in 0..80 {
+            g.set(Cell { x: 0, y: i }, 100);
+            g.set(Cell { x: i, y: 0 }, 100);
+        }
+        g
+    }
+
+    fn approach_params() -> ExplorerParams {
+        ExplorerParams { approach: Some(ApproachParams::default()), ..params() }
+    }
+
+    /// marker on the left wall at y = 2, facing east (into the room)
+    const HINT: MarkerHint = MarkerHint { id: Some(7), x: 0.05, y: 2.0, facing: 0.0 };
+
+    fn with_markers<'a>(mut i: TickInput<'a>, m: &'a [MarkerHint]) -> TickInput<'a> {
+        i.markers = m;
+        i
+    }
+
+    fn check_view(g: &GoalRequest, h: &MarkerHint) {
+        assert_eq!(g.kind, GoalKind::Approach);
+        assert!(!g.xy_only, "approach views keep their heading");
+        let d = (g.x - h.x).hypot(g.y - h.y);
+        assert!(d > 0.9 && d < 2.0, "{d}");
+        let to_marker = (h.y - g.y).atan2(h.x - g.x);
+        assert!((g.yaw - to_marker).sin().abs() < 1e-6 && (g.yaw - to_marker).cos() > 0.0, "faces the marker");
+    }
+
+    #[test]
+    fn approach_replaces_a_frontier_goal_and_looks_from_three_angles() {
+        let g = room();
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        let f = sent(&e.tick(0.0, input(&g, r, None, 0.0))).unwrap();
+        assert_eq!(f.kind, GoalKind::Frontier);
+        e.goal_accepted((f.x, f.y));
+        let hints = [HINT];
+        let mut views = Vec::new();
+        let a = sent(&e.tick(1.0, with_markers(input(&g, r, None, 1.0), &hints))).expect("approach goal");
+        check_view(&a, &HINT);
+        assert!(a.preempts, "replaces the frontier goal without a cancel");
+        views.push(a);
+        // each success chains on to the next angle at once
+        for k in 0..2 {
+            let last = *views.last().unwrap();
+            e.goal_accepted((last.x, last.y));
+            let at = Pose2::new(last.x, last.y, last.yaw);
+            let t = 2.0 + k as f64;
+            let n = sent(&e.tick(t, with_markers(input(&g, at, Some(((last.x, last.y), NavStatus::Succeeded)), t), &hints)))
+                .expect("next view");
+            check_view(&n, &HINT);
+            views.push(n);
+        }
+        // three different angles around the facing direction
+        let mut angles: Vec<f64> = views.iter().map(|v| (v.y - HINT.y).atan2(v.x - HINT.x)).collect();
+        angles.sort_by(f64::total_cmp);
+        assert!(angles[0] < -0.4 && angles[1].abs() < 0.1 && angles[2] > 0.4, "{angles:?}");
+        assert_eq!(e.stats().sent_approach, 3);
+        // all three done and still not confirmed: given up, exploration goes on
+        let last = views[2];
+        e.goal_accepted((last.x, last.y));
+        let next = sent(&e.tick(5.0, with_markers(input(&g, r, Some(((last.x, last.y), NavStatus::Succeeded)), 5.0), &hints)));
+        assert_ne!(next.map(|n| n.kind), Some(GoalKind::Approach));
+        assert_eq!(e.stats().approach_given_up, 1);
+    }
+
+    #[test]
+    fn confirmation_cancels_the_approach_and_exploration_goes_on_at_once() {
+        let g = room();
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        let hints = [HINT];
+        let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
+        assert_eq!(a.kind, GoalKind::Approach);
+        e.goal_accepted((a.x, a.y));
+        // the mapper confirmed it: the marker leaves the list
+        let c = e.tick(1.0, input(&g, r, None, 1.0));
+        assert!(c.contains(&Action::Cancel(CancelReason::MarkerConfirmed)), "{c:?}");
+        // the cancel is not a failure: no retry delay, no blacklist
+        let next = sent(&e.tick(2.0, input(&g, r, Some(((a.x, a.y), NavStatus::Canceled)), 2.0))).expect("next goal at once");
+        assert_ne!(next.kind, GoalKind::Approach);
+        assert_eq!(e.blacklist().count(), 0);
+        assert_eq!(e.stats().approach_confirmed, 1);
+    }
+
+    #[test]
+    fn a_decoy_cannot_trap_the_robot() {
+        let g = room();
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        // a pattern in mid-air that never confirms, and whose views keep failing
+        let hints = [MarkerHint { id: Some(1023), x: 1.0, y: 3.0, facing: 0.0 }];
+        let mut t = 0.0;
+        for _ in 0..2 {
+            let a = loop {
+                t += 1.0;
+                if let Some(a) = sent(&e.tick(t, with_markers(input(&g, r, None, t), &hints))) {
+                    break a;
+                }
+                assert!(t < 30.0, "no approach goal");
+            };
+            assert_eq!(a.kind, GoalKind::Approach);
+            e.goal_accepted((a.x, a.y));
+            t += 1.0;
+            e.tick(t, with_markers(input(&g, r, Some(((a.x, a.y), NavStatus::Aborted)), t), &hints));
+        }
+        assert_eq!(e.stats().approach_given_up, 1);
+        // ignored from now on while it stays tentative
+        for _ in 0..20 {
+            t += 1.0;
+            let a = e.tick(t, with_markers(input(&g, r, None, t), &hints));
+            assert!(sent(&a).is_none_or(|g| g.kind != GoalKind::Approach), "{a:?}");
+            if let Some(g) = sent(&a) {
+                e.goal_accepted((g.x, g.y));
+            }
+        }
+    }
+
+    #[test]
+    fn approach_times_out() {
+        let g = room();
+        // a goal timeout longer than the approach timeout
+        let mut e = ExplorerPolicy::new(ExplorerParams { goal_timeout: 200.0, ..approach_params() }, 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        let hints = [HINT];
+        let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
+        e.goal_accepted((a.x, a.y));
+        // keeps turning (progress) but never gets there
+        let mut cancelled = None;
+        for k in 1..120 {
+            let yaw = 0.4 * k as f64;
+            let acts = e.tick(k as f64, with_markers(input(&g, Pose2::new(2.5, 1.0, yaw), None, k as f64), &hints));
+            if acts.contains(&Action::Cancel(CancelReason::Timeout)) {
+                cancelled = Some(k);
+                break;
+            }
+        }
+        let k = cancelled.expect("approach timeout");
+        assert!((90..=92).contains(&k), "{k}");
+        assert_eq!(e.stats().approach_given_up, 1);
+    }
+
+    #[test]
+    fn viewpoints_skip_obstacles_and_hints_are_ignored_when_off() {
+        let mut g = room();
+        // a box where the head-on view at 1.3 m (and 1.04 m, 1.625 m) would stand
+        for y in 36..44 {
+            for x in 16..38 {
+                g.set(Cell { x, y }, 100);
+            }
+        }
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        let hints = [HINT];
+        let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
+        check_view(&a, &HINT);
+        assert!((a.y - HINT.y).abs() > 0.4, "not head-on through the box: ({:.2}, {:.2})", a.x, a.y);
+        let mut off = ExplorerPolicy::new(params(), 0.0);
+        let f = sent(&off.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
+        assert_ne!(f.kind, GoalKind::Approach);
     }
 }

@@ -112,6 +112,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
         look_around_turns: 3,
         preempt_distance: 0.5,
         switch_cooldown: 20.0,
+        approach: None,
     }
 }
 
@@ -596,6 +597,7 @@ impl Sim {
             robot: Ok(self.estimate()),
             result: self.nav_result.take(),
             done: false,
+            markers: &[],
         };
         let actions = self.explorer.tick(t, input);
         for a in actions {

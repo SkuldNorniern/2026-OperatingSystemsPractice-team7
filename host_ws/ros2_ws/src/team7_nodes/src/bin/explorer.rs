@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         look_around_turns: p.i64("look_around_turns", 3).max(0) as u32,
         preempt_distance: p.f64("preempt_distance", 0.5),
         switch_cooldown: p.f64("switch_cooldown", 20.0),
+        approach: None,
     };
     let map_frame = Rc::new(p.string("map_frame", "map"));
     let base_frame = Rc::new(p.string("base_frame", "base_link"));
@@ -211,6 +212,7 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
         robot,
         result: s.result.take(),
         done: s.done,
+        markers: &[],
     };
     let actions = s.policy.tick(now, input);
     let (frontiers, views, seq) = s.policy.viz();

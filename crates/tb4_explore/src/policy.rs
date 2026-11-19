@@ -70,7 +70,7 @@ impl Default for ExplorerParams {
             look_around_turns: 3,
             preempt_distance: 0.5,
             switch_cooldown: 20.0,
-            approach: None,
+            approach: Some(ApproachParams::default()),
         }
     }
 }
@@ -1048,7 +1048,7 @@ mod tests {
         let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
         check_view(&a, &HINT);
         assert!((a.y - HINT.y).abs() > 0.4, "not head-on through the box: ({:.2}, {:.2})", a.x, a.y);
-        let mut off = ExplorerPolicy::new(params(), 0.0);
+        let mut off = ExplorerPolicy::new(ExplorerParams { approach: None, ..params() }, 0.0);
         let f = sent(&off.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
         assert_ne!(f.kind, GoalKind::Approach);
     }

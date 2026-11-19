@@ -112,7 +112,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
         look_around_turns: 3,
         preempt_distance: 0.5,
         switch_cooldown: 20.0,
-        approach: None,
+        approach: Some(ApproachParams::default()),
     }
 }
 

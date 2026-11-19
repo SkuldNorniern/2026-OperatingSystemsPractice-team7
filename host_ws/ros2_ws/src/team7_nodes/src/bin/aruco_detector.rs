@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_hamming: p.i64("max_hamming", d.max_hamming as i64) as u32,
         min_side_px: p.f64("min_side_px", d.min_side_px),
         refine_corners: p.bool("refine_corners", d.refine_corners),
+        max_border_errors: p.i64("max_border_errors", d.max_border_errors as i64).max(0) as u32,
         // barcode filter: -1 = off
         max_stripe_flips: u32::try_from(p.i64("max_stripe_flips", d.max_stripe_flips.map_or(-1, i64::from))).ok(),
         ..d

@@ -507,6 +507,63 @@ impl Tracker {
         let (ux, uy) = (sx / n, sy / n);
         Some((t.x - standoff * ux, t.y - standoff * uy, uy.atan2(ux)))
     }
+
+    /// Direction target `id` faces (yaw of its face normal, pointing to the side it was seen from).
+    /// With a map: normal of the wall line through the occupied cells within 0.25 m of the fused
+    /// position, if there is one and it is within 75 deg of the viewing side. Else (no wall, a
+    /// corner, a label in mid-air): the reverse of the mean view direction. None without views.
+    pub fn facing(&self, id: i64, grid: Option<&Grid>, occupied_threshold: i8) -> Option<f64> {
+        let v = self.estimates.get(&id).filter(|v| !v.is_empty())?;
+        let t = self.target(id)?;
+        let (sx, sy) = v.iter().fold((0.0, 0.0), |a, e| (a.0 - e.dir.0, a.1 - e.dir.1));
+        let n = sx.hypot(sy);
+        if n < 1e-9 {
+            return None;
+        }
+        let back = (sx / n, sy / n);
+        let fallback = back.1.atan2(back.0);
+        let Some(g) = grid else { return Some(fallback) };
+        let r = 0.25;
+        let res = g.meta.resolution;
+        let (cx, cy) = g.world_to_cell_signed(t.x, t.y);
+        let k = (r / res).ceil() as i64;
+        let mut pts = Vec::new();
+        for y in cy - k..=cy + k {
+            for x in cx - k..=cx + k {
+                if let Some(c) = g.cell_checked(x, y).filter(|c| g.get(*c) >= occupied_threshold) {
+                    let w = g.cell_to_world(c);
+                    if (w.0 - t.x).hypot(w.1 - t.y) <= r {
+                        pts.push(w);
+                    }
+                }
+            }
+        }
+        if pts.len() < 4 {
+            return Some(fallback);
+        }
+        let m = pts.len() as f64;
+        let (mx, my) = (pts.iter().map(|p| p.0).sum::<f64>() / m, pts.iter().map(|p| p.1).sum::<f64>() / m);
+        let (mut cxx, mut cyy, mut cxy) = (0.0, 0.0, 0.0);
+        for (x, y) in &pts {
+            cxx += (x - mx).powi(2);
+            cyy += (y - my).powi(2);
+            cxy += (x - mx) * (y - my);
+        }
+        let disc = ((cxx - cyy).powi(2) / 4.0 + cxy * cxy).sqrt();
+        let (l1, l2) = ((cxx + cyy) / 2.0 + disc, (cxx + cyy) / 2.0 - disc);
+        if l1 <= 0.0 || l2 / l1 > 0.15 {
+            return Some(fallback);
+        }
+        let ang = 0.5 * (2.0 * cxy).atan2(cxx - cyy);
+        let (mut nx, mut ny) = (-ang.sin(), ang.cos());
+        if nx * back.0 + ny * back.1 < 0.0 {
+            (nx, ny) = (-nx, -ny);
+        }
+        if nx * back.0 + ny * back.1 < 75f64.to_radians().cos() {
+            return Some(fallback);
+        }
+        Some(ny.atan2(nx))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -825,6 +882,22 @@ mod tests {
         assert!(((x - m.0).hypot(y - m.1) - 1.3).abs() < 0.05);
         assert!(x < m.0, "on the side the robot looked from");
         assert!(yaw.abs() < 0.05, "facing +x toward the marker");
+    }
+
+    #[test]
+    fn facing_is_the_wall_normal_not_the_view_direction() {
+        let g = wall_map();
+        let mut t = Tracker::new(TrackParams::default());
+        // marker on the wall at x = 3, seen only from the lower left at about 30 deg off its normal
+        let m = (3.0, 1.0);
+        for c in [(0.4, -0.5), (0.5, -0.4), (0.3, -0.45)] {
+            t.add(7, &view_at(c, m, 0.0, Source::Raycast));
+        }
+        let wall = t.facing(7, Some(&g), 65).unwrap();
+        assert!((wall.cos() + 1.0).abs() < 0.02, "faces -x: {wall}");
+        // without a map: back along the views
+        let views = t.facing(7, None, 65).unwrap();
+        assert!((views - (-1.5f64).atan2(-2.6)).abs() < 0.05, "{views}");
     }
 
     #[test]

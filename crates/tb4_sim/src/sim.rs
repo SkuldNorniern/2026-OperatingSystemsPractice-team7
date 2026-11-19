@@ -157,7 +157,8 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 32] = [
+pub const SET_NAMES: [&str; 33] = [
+    "require_scale_all",
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
     "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
@@ -202,6 +203,7 @@ impl SimConfig {
             "vision" => self.vision.enabled = x != 0.0,
             "pnp_sigma" => self.vision.pnp_sigma = x,
             "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
+            "require_scale_all" => self.track.require_scale_all = x != 0.0,
             "approach_markers" if x == 0.0 => e.approach = None,
             "approach_markers" => {
                 e.approach.get_or_insert_with(ApproachParams::default);

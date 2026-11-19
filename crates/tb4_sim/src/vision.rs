@@ -54,6 +54,7 @@ pub fn team7_track_params() -> TrackParams {
         min_triangulation_spread: 0.2,
         max_triangulation_gap: 0.3,
         strict_ids: vec![0, 341, 682, 1023],
+        require_scale_all: true,
         max_spread: 0.08,
         max_consistency: 3.0,
         max_history: 200,

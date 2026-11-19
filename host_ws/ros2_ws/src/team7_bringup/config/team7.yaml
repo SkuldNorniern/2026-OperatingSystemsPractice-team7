@@ -24,6 +24,9 @@ marker_mapper:
     min_range: 0.3            # m, ignore hits / pnp ranges closer to the camera (robot's own cells)
     strict_ids: [0, 341, 682, 1023]  # ARUCO_ORIGINAL codes with all rows equal (= chair barcode labels): these
                               # also need a learned marker size from clean wall hits (label 1023 had none)
+    require_scale_all: true   # every id needs a consistent learned size (wall range vs pnp agree across views). Sim
+                              # (approach on, 12 runs): all 3 confirmed 11/12 vs 10/12 without, 0 decoys; closes the
+                              # case of a mid-air sticker confirmed after approach views (1 of 30 runs)
     max_spread: 0.08          # m, fused position 1 sigma
     max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
     max_history: 200

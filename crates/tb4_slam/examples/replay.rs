@@ -172,6 +172,9 @@ fn main() {
         } else if k == "time_offset" {
             // look odometry up at scan stamp + this (s)
             time_offset = v.parse().expect("seconds");
+        } else if k == "keep_spikes" {
+            // scan_filter parameter: keep one/two-beam returns in front of the background (poles)
+            sp.keep_foreground_spikes = matches!(v, "1" | "true");
         } else if k == "stamp_at_end" {
             // scan_filter parameter: deskew to the last beam instead of the first
             sp.stamp_at_end = matches!(v, "1" | "true");

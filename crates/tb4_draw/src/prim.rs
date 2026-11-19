@@ -113,12 +113,18 @@ pub fn view(c: Pt, yaw: f64, color: Rgba) -> [Prim; 2] {
     [dot(c, 4.0, color), Prim::Line { a: c, b: tip, color, width: 1.5, dashed: false }]
 }
 
-/// a labelled target: dot with a dark rim and the label to its upper right
-pub fn target(c: Pt, r: f32, label: &str, color: Rgba) -> [Prim; 2] {
-    [
-        Prim::Circle { c, r, fill: Some(color), stroke: Some((palette::ROBOT_EDGE, 1.5)) },
-        Prim::Text { at: (c.0 + r + 3.0, c.1 - r - 2.0), text: label.to_owned(), color, size: 14.0 },
-    ]
+/// text with a 1 px dark outline, readable on the light map and on the dark background
+pub fn outlined_text(at: Pt, text: &str, color: Rgba, size: f32) -> [Prim; 5] {
+    let t = |dx: f32, dy: f32, color: Rgba| Prim::Text { at: (at.0 + dx, at.1 + dy), text: text.to_owned(), color, size };
+    let o = palette::ROBOT_EDGE;
+    [t(-1.0, 0.0, o), t(1.0, 0.0, o), t(0.0, -1.0, o), t(0.0, 1.0, o), t(0.0, 0.0, color)]
+}
+
+/// a labelled target: dot with a dark rim and the outlined label to its upper right
+pub fn target(c: Pt, r: f32, label: &str, color: Rgba) -> Vec<Prim> {
+    let mut out = vec![Prim::Circle { c, r, fill: Some(color), stroke: Some((palette::ROBOT_EDGE, 1.5)) }];
+    out.extend(outlined_text((c.0 + r + 3.0, c.1 - r - 2.0), label, color, 14.0));
+    out
 }
 
 #[cfg(test)]

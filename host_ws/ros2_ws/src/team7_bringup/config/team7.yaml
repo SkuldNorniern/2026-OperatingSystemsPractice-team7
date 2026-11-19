@@ -118,6 +118,18 @@ slam:
                              # map->odom jump per update 6.0 -> 3.5 cm mean, 1.0 -> 0.5 deg; about one A1 rotation,
                              # so likely the driver stamping the end of the sweep (see stamp_at_end)
     transform_publish_period: 0.05
+    # published map->odom blends each correction in with this time constant (s, 0 = off); corrections
+    # beyond jump_lin (m) / jump_ang (rad) are applied at once. Offline replay of the 3 field bags:
+    # visible robot hops (>1 cm or 0.3 deg per 50 ms tick) -60..-75 %, added lag mean 2-3 mm, p95 1-1.4 cm
+    map_odom_smoothing: 0.3
+    map_odom_jump_lin: 0.1
+    map_odom_jump_ang: 0.03
+    # published /map only: occupied above publish_occupied_on, stays occupied while above
+    # publish_occupied_keep (log-odds, keep > 0 so redraws still clear old walls). Offline: cells that
+    # drop out and come back between maps -25..-45 %, ~5-12 % more occupied cells
+    publish_occupied_on: 0.6
+    publish_occupied_keep: 0.3
+    icp_max_flatness: 0.1  # 0.3-0.6 makes icp engage on A1 data but was not better offline
 
 navigator:
   ros__parameters:

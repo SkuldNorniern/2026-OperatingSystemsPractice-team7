@@ -13,6 +13,7 @@ use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{QosProfile, log_info, log_warn};
 use tb4_core::nalgebra::Point3;
 use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
+use tb4_slam::smooth::PoseSmoother;
 use tb4_slam::{Slam, SlamParams};
 use team7_nodes::{Params, pose_msg, spawn_tf_listener, stamp, viz};
 
@@ -24,6 +25,9 @@ struct State {
     grid: Option<OccupancyGrid>,
     last_stamp: r2r::builtin_interfaces::msg::Time,
     tf_failures: u64,
+    /// published map->odom, blended towards the estimate
+    smoother: PoseSmoother,
+    last_tick: Instant,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,6 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop_search_radius: p.f64("loop_search_radius", d.loop_search_radius),
         loop_prefer_oldest: p.bool("loop_prefer_oldest", d.loop_prefer_oldest),
         icp: p.bool("icp", d.icp),
+        icp_max_flatness: p.f64("icp_max_flatness", d.icp_max_flatness),
+        publish_occupied_on: p.f64("publish_occupied_on", d.publish_occupied_on as f64) as f32,
+        publish_occupied_keep: p.f64("publish_occupied_keep", d.publish_occupied_keep as f64) as f32,
         loop_min_score: p.f64("loop_min_score", d.loop_min_score),
         ..d
     };
@@ -55,6 +62,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scan_stamp_tf = p.f64("map_odom_scan_stamp", 0.0) > 0.5;
     let tf_period = Duration::from_secs_f64(p.f64("transform_publish_period", 0.05));
     // odometry is looked up at scan stamp + this (s); negative when scan stamps run ahead of odom
+    // published map->odom: correction time constant (s, 0 = off) and jump limits (m, rad)
+    let smoother = PoseSmoother::new(
+        p.f64("map_odom_smoothing", 0.3),
+        p.f64("map_odom_jump_lin", 0.1),
+        p.f64("map_odom_jump_ang", 0.03),
+    );
     let scan_time_offset_ns = (p.f64("scan_time_offset", 0.0) * 1e9).round() as i64;
     log_info!(&log, "own slam on {scan_topic}, map every {:.1}s", map_period.as_secs_f64());
 
@@ -71,6 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grid: None,
         last_stamp: Default::default(),
         tf_failures: 0,
+        smoother,
+        last_tick: Instant::now(),
     }));
 
     let scans = node.subscribe::<LaserScan>(&scan_topic, QosProfile::sensor_data())?;
@@ -137,7 +152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let now = clock.lock().unwrap().get_now().map(|d| r2r::Clock::to_builtin_time(&d)).unwrap_or_default();
             let mut s = st.borrow_mut();
-            let m2o = s.slam.map_to_odom();
+            let dt = s.last_tick.elapsed().as_secs_f64();
+            s.last_tick = Instant::now();
+            let target = s.slam.map_to_odom();
+            let m2o = s.smoother.step(target, dt);
             // stamped slightly ahead like slam_toolbox so lookups at scan time succeed
             let mut ahead = now.clone();
             ahead.nanosec += 100_000_000;
@@ -159,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 s.last_map = Instant::now();
                 if s.map_dirty || s.grid.is_none() {
                     s.map_dirty = false;
-                    s.grid = Some(grid_msg(&s.slam.occupancy(), &map_frame, &now));
+                    s.grid = Some(grid_msg(&s.slam.published_map(), &map_frame, &now));
                     let _ = graph_pub.publish(&graph_markers(&s.slam, &map_frame));
                 }
                 if let Some(g) = s.grid.as_mut() {

@@ -281,6 +281,8 @@ pub struct Model {
     pub wanted: Vec<(String, MsgKind)>,
     /// the camera image topic in use (the health panel rates it)
     pub camera_topic: Option<String>,
+    /// the camera topic's last frames, oldest first, so a burst is still shown frame by frame
+    pub camera_queue: VecDeque<CameraFrame>,
 }
 
 impl Model {
@@ -352,6 +354,29 @@ impl Model {
     /// the camera frame of the topic in use
     pub fn camera(&self) -> Option<&CameraFrame> {
         self.image(self.camera_topic.as_deref()?)
+    }
+
+    /// keep a camera frame for showing; the queue holds the last few, older ones drop
+    pub fn queue_camera(&mut self, f: CameraFrame) {
+        const KEEP: usize = 4;
+        if self.camera_queue.back().is_some_and(|b| f.seq <= b.seq) {
+            // a new topic or a restart: start over
+            self.camera_queue.clear();
+        }
+        self.camera_queue.push_back(f);
+        while self.camera_queue.len() > KEEP {
+            self.camera_queue.pop_front();
+        }
+    }
+
+    /// the frame to show after `shown`: the oldest queued one newer than it, else the latest of
+    /// the camera topic; and whether more are waiting after that one
+    pub fn next_camera(&self, shown: u64) -> (Option<&CameraFrame>, bool) {
+        let mut newer = self.camera_queue.iter().filter(|f| f.seq > shown);
+        match newer.next() {
+            Some(f) => (Some(f), newer.next().is_some()),
+            None => (self.camera(), false),
+        }
     }
 
     /// publishers of a topic in the last graph poll; None when the topic is not in the graph
@@ -699,6 +724,35 @@ pub(crate) mod tests {
         };
         let names: Vec<&str> = m.topics_of(MsgKind::Path).iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, ["/a_path", "/c_path", "/b_path"]);
+    }
+
+    #[test]
+    fn camera_frames_that_come_together_are_shown_one_by_one() {
+        let now = Instant::now();
+        let frame = |seq: u64| CameraFrame { width: 1, height: 1, rgba: vec![0; 4], seq, at: now };
+        let mut m = Model { camera_topic: Some("/cam".into()), ..Model::default() };
+        assert!(m.next_camera(0).0.is_none());
+        // three frames in one burst, between two paints
+        for s in 1..=3 {
+            m.queue_camera(frame(s));
+            m.put("/cam", Feed::Image(frame(s)), now);
+        }
+        let (f, more) = m.next_camera(0);
+        assert_eq!((f.unwrap().seq, more), (1, true));
+        let (f, more) = m.next_camera(1);
+        assert_eq!((f.unwrap().seq, more), (2, true));
+        let (f, more) = m.next_camera(2);
+        assert_eq!((f.unwrap().seq, more), (3, false));
+        // all shown: the latest stays
+        assert_eq!(m.next_camera(3).0.unwrap().seq, 3);
+        // the queue keeps only the last few; a restart (lower seq) starts over
+        for s in 4..=10 {
+            m.queue_camera(frame(s));
+        }
+        assert_eq!(m.camera_queue.len(), 4);
+        assert_eq!(m.next_camera(3).0.unwrap().seq, 7);
+        m.queue_camera(frame(1));
+        assert_eq!(m.camera_queue.len(), 1);
     }
 
     #[test]

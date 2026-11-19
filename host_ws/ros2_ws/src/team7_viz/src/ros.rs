@@ -536,7 +536,11 @@ fn subscribe_feed(node: &mut r2r::Node, pool: &LocalPool, ctx: &Rc<Ctx>, topic: 
                     m.count(&t);
                     if let Some((width, height, rgba)) = frame {
                         let seq = m.image(&t).map_or(1, |f| f.seq + 1);
-                        m.put(&t, Feed::Image(CameraFrame { width, height, rgba, seq, at: now }), now);
+                        let frame = CameraFrame { width, height, rgba, seq, at: now };
+                        if m.camera_topic.as_deref() == Some(t.as_str()) {
+                            m.queue_camera(frame.clone());
+                        }
+                        m.put(&t, Feed::Image(frame), now);
                     }
                 });
             })

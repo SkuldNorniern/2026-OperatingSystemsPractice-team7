@@ -62,6 +62,8 @@ pub enum Wid {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Requests {
     pub screenshot: bool,
+    /// camera frames are waiting to be shown: draw again soon
+    pub more: bool,
 }
 
 pub struct Chrome {
@@ -80,6 +82,8 @@ pub struct Chrome {
     fixed_out_dir: bool,
     out_checked: Option<Instant>,
     camera_image: Option<(u64, bool, Image)>,
+    /// the last camera frame drawn (its seq)
+    camera_shown: u64,
 }
 
 fn rgba(c: [u8; 4]) -> Color {
@@ -119,6 +123,7 @@ impl Chrome {
             out_dir,
             out_checked: None,
             camera_image: None,
+            camera_shown: 0,
         }
     }
 
@@ -142,6 +147,11 @@ impl Chrome {
     }
 
     /// set the run folder (tests, `--output-dir`)
+    /// the seq of the last camera frame drawn
+    pub fn camera_shown(&self) -> u64 {
+        self.camera_shown
+    }
+
     /// the run folder found last
     pub fn known_run_dir(&self) -> Option<&std::path::Path> {
         self.out_dir.as_deref()
@@ -160,7 +170,7 @@ impl Chrome {
         let run_dir = self.run_dir(now);
         let theme = self.theme.clone();
         ctx.clear(theme.palette.background)?;
-        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, profile, .. } = self;
+        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, camera_shown, profile, .. } = self;
         let mut ui = state.frame(ctx, &theme);
 
         let body = Rect::new(0.0, TOOLBAR_H + STRIP_H, w, (h - TOOLBAR_H - STRIP_H - STATUS_H).max(10.0));
@@ -184,7 +194,15 @@ impl Chrome {
         strip(&mut ui, model, &found, now, w)?;
         if let Some(d) = dock {
             ui.fill(d, theme.palette.surface)?;
-            dock_sections(&mut ui, d, layout, sections, camera_image, app, model, now, run_dir.as_deref())?;
+            // the next camera frame: each one is drawn once even when several came at once
+            let (cam, more) = model.next_camera(*camera_shown);
+            dock_sections(&mut ui, d, layout, sections, camera_image, cam, app, model, now, run_dir.as_deref())?;
+            if sections[1]
+                && let Some(f) = cam
+            {
+                *camera_shown = f.seq;
+                req.more = more;
+            }
             ui.line(aurea::render::Point::new(d.right(), d.y), aurea::render::Point::new(d.right(), d.bottom()), 1.0, theme.palette.border)?;
         }
         status_bar(&mut ui, app, model, now, domain, Rect::new(0.0, h - STATUS_H, w, STATUS_H))?;
@@ -378,6 +396,7 @@ fn dock_sections(
     layout: &mut DockLayout,
     sections: &mut [bool; 4],
     camera_image: &mut Option<(u64, bool, Image)>,
+    cam: Option<&crate::model::CameraFrame>,
     app: &mut App,
     model: &Model,
     now: Instant,
@@ -407,7 +426,7 @@ fn dock_sections(
                 let end = match i {
                     0 => layers(ui, app, model, cx, c.y, cw)?,
                     // image, 4 px gap, 16 px info line, 6 px bottom margin: fits without a bar
-                    1 => camera(ui, camera_image, app, model, now, cx, c.y, cw, body.height - 28.0)?,
+                    1 => camera(ui, camera_image, cam, app, model, now, cx, c.y, cw, body.height - 28.0)?,
                     2 => targets(ui, model, &app.targets(model), cx, c.y, cw, run_dir)?,
                     _ => health_rows(ui, model, now, cx, c.y, cw)?,
                 };
@@ -666,7 +685,7 @@ fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], x: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)>, app: &mut App, model: &Model, now: Instant, x: f32, mut y: f32, w: f32, max_h: f32) -> AureaResult<f32> {
+fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)>, cam: Option<&crate::model::CameraFrame>, app: &mut App, model: &Model, now: Instant, x: f32, mut y: f32, w: f32, max_h: f32) -> AureaResult<f32> {
     let t = ui.theme.clone();
     // the image topic, picked like a layer's
     let choices = topic_choices(model, MsgKind::Image, &app.layers.camera, model.bound(Slot::Camera), now);
@@ -679,7 +698,9 @@ fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)
     y += ROW_H;
     let max_h = max_h - ROW_H;
     let topic = app.layers.camera_topic(model);
-    let Some(f) = topic.as_deref().and_then(|tp| model.image(tp)) else {
+    // the queued frame of the camera topic; right after a topic change, that topic's latest
+    let queued = cam.filter(|_| topic == model.camera_topic);
+    let Some(f) = queued.or_else(|| topic.as_deref().and_then(|tp| model.image(tp))) else {
         let text = match topic {
             Some(tp) => format!("waiting for {tp}"),
             None => "no camera debug image published".into(),

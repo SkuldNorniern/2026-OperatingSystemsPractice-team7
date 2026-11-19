@@ -119,20 +119,30 @@ thread_local! {
     static STATS: RefCell<Stats> = RefCell::new(Stats::default());
 }
 
+/// redraws the pump asked for, to compare with the paints that happened
+static REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// paint times and camera frames shown, for the line printed at exit
 #[derive(Default)]
 struct Stats {
     paints: Vec<f64>,
     last_seq: Option<u64>,
     shown: u64,
+    /// frames between two shown ones that were never drawn
+    skipped: u64,
 }
 
 impl Stats {
-    fn frame(&mut self, paint: Duration, camera_seq: Option<u64>) {
+    fn frame(&mut self, paint: Duration, camera_seq: u64) {
         self.paints.push(paint.as_secs_f64() * 1000.0);
-        if camera_seq.is_some() && camera_seq != self.last_seq {
+        if camera_seq > 0 && Some(camera_seq) != self.last_seq {
+            if let Some(l) = self.last_seq
+                && camera_seq > l + 1
+            {
+                self.skipped += camera_seq - l - 1;
+            }
             self.shown += 1;
-            self.last_seq = camera_seq;
+            self.last_seq = Some(camera_seq);
         }
     }
 
@@ -140,16 +150,19 @@ impl Stats {
         let mut p = self.paints.clone();
         p.sort_by(f64::total_cmp);
         let q = |f: f64| p.get(((p.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(0.0);
+        let pct = if received > 0 { 100.0 * self.shown as f64 / received as f64 } else { 0.0 };
         format!(
-            "{} frames ({:.1} fps), paint p50 {:.1} ms p95 {:.1} ms max {:.1} ms; camera received {received} ({:.1} Hz), shown {} ({:.1} Hz)",
+            "{} paints ({:.1} fps) for {} pump requests, paint p50 {:.1} ms p95 {:.1} ms max {:.1} ms; camera received {received} ({:.1} Hz), shown {} ({:.1} Hz, {pct:.0}%), never drawn {}",
             p.len(),
             p.len() as f64 / secs,
+            REQUESTS.load(Ordering::Relaxed),
             q(0.5),
             q(0.95),
             q(1.0),
             received as f64 / secs,
             self.shown,
-            self.shown as f64 / secs
+            self.shown as f64 / secs,
+            self.skipped
         )
     }
 }
@@ -382,7 +395,11 @@ fn main() -> AureaResult<()> {
                 a.say(msg);
             }
         }
-        STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), m.camera().map(|f| f.seq)));
+        STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), c.camera_shown()));
+        // more camera frames waiting: paint again as soon as this one is out
+        if req.more {
+            redraw();
+        }
         if c.ui.wants_frame() {
             redraw();
         }
@@ -428,6 +445,7 @@ fn main() -> AureaResult<()> {
                 let due = last_draw.elapsed() >= FRAME;
                 if (due && dirty.swap(false, Ordering::Relaxed)) || last_draw.elapsed() >= IDLE_REDRAW {
                     request_canvas_redraw(id);
+                    REQUESTS.fetch_add(1, Ordering::Relaxed);
                     last_draw = Instant::now();
                 }
                 if verbose && last_log.elapsed() >= Duration::from_secs(2) {

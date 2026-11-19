@@ -24,6 +24,11 @@ pub struct ExploreParams {
     /// of a box or the space under a desk is never mapped, and its edge stays a frontier for the
     /// whole run (sim studio: two such goals swapped for 8 min). 0 = off
     pub min_unknown_area: f64,
+    /// share of unknown cells allowed within goal_standoff of a frontier goal. 0 = none (strict).
+    /// A parked robot's map is one A1 scan with unknown speckles between the beams: strict
+    /// placement walked every goal back onto the robot and the explorer waited until someone pushed
+    /// it (field run 184838, 75 s; recorded costmap at 30 s: 0 goals strict, 11 with 15 %)
+    pub goal_max_unknown: f64,
 }
 
 impl Default for ExploreParams {
@@ -39,6 +44,7 @@ impl Default for ExploreParams {
             traversable_threshold: 99,
             frontier_segment_length: 0.0,
             min_unknown_area: 0.0,
+            goal_max_unknown: 0.0,
         }
     }
 }
@@ -194,10 +200,16 @@ pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Fro
         let radius = (p.goal_standoff / g.meta.resolution).ceil() as i64;
         let clear_of_unknown = |i: usize| {
             let (x, y) = ((i % w) as i64, (i / w) as i64);
-            (-radius..=radius).all(|dy| (-radius..=radius).all(|dx| {
-                dx * dx + dy * dy > radius * radius
-                    || g.cell_checked(x + dx, y + dy).is_some_and(|c| g.get(c) != UNKNOWN)
-            }))
+            let (mut all, mut unknown) = (0usize, 0usize);
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx * dx + dy * dy <= radius * radius {
+                        all += 1;
+                        unknown += g.cell_checked(x + dx, y + dy).is_none_or(|c| g.get(c) == UNKNOWN) as usize;
+                    }
+                }
+            }
+            unknown as f64 <= p.goal_max_unknown * all as f64
         };
         while goal_index != root && (!clear_of_unknown(goal_index)
             || !is_free(g.data[goal_index], p.free_threshold)) {
@@ -275,6 +287,27 @@ mod tests {
             g.set(Cell { x: i, y: 0 }, 100);
         }
         g
+    }
+
+    #[test]
+    fn speckled_start_map_still_gives_goals() {
+        // parked robot, one scan: 3 m disc of known free space, about 1 cell in 9 unknown (gaps between
+        // beams), unknown beyond. Strict goal placement walks everything back onto the robot.
+        let meta = GridMeta { width: 160, height: 160, resolution: 0.05, origin_x: -4.0, origin_y: -4.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 0..160u32 {
+            for x in 0..160u32 {
+                let (wx, wy) = g.cell_to_world(Cell { x, y });
+                if wx.hypot(wy) < 1.6 && (x * 7 + y * 13) % 9 != 0 {
+                    g.set(Cell { x, y }, 0);
+                }
+            }
+        }
+        g.set(g.world_to_cell(0.0, 0.0).unwrap(), 0);
+        let p = ExploreParams { goal_standoff: 0.3, min_goal_distance: 0.65, frontier_segment_length: 1.2, ..Default::default() };
+        let ok = |p: &ExploreParams| find_frontiers(&g, (0.0, 0.0), p).iter().filter(|f| f.distance >= 0.65).count();
+        assert_eq!(ok(&p), 0, "strict: every goal ends on the robot");
+        assert!(ok(&ExploreParams { goal_max_unknown: 0.15, ..p }) > 0, "speckle-tolerant: goals away from the robot");
     }
 
     #[test]

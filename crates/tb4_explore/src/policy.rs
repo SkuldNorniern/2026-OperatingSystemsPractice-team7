@@ -55,6 +55,7 @@ impl Default for ExplorerParams {
                 traversable_threshold: 99,
                 frontier_segment_length: 1.2,
                 min_unknown_area: 1.0,
+                goal_max_unknown: 0.15,
             },
             coverage: Some({
                 let mut c = CoverageParams::default();

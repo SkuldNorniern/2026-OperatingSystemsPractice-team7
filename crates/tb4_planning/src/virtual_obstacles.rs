@@ -21,6 +21,44 @@ pub fn bump_zone_angle(frame_id: &str) -> Option<f64> {
     Some(f64::to_radians(deg))
 }
 
+/// Create 3 IR proximity sensors (`/ir_intensity` frame ids): position (m) and facing (rad) in
+/// base_link, from the robot's TF (bag 20261118_184838).
+pub const IR_SENSORS: [(&str, f64, f64, f64); 7] = [
+    ("ir_intensity_side_left", 0.095, 0.147, 1.0001),
+    ("ir_intensity_left", 0.141, 0.103, 0.6283),
+    ("ir_intensity_front_left", 0.165, 0.057, 0.3334),
+    ("ir_intensity_front_center_left", 0.175, 0.008, 0.0454),
+    ("ir_intensity_front_center_right", 0.170, -0.042, -0.2409),
+    ("ir_intensity_front_right", 0.148, -0.094, -0.5637),
+    ("ir_intensity_right", 0.081, -0.155, -1.0926),
+];
+
+/// IR reading -> obstacle point. The Create 3 reports raw intensity (higher = closer), not range,
+/// so both numbers below are placeholders until recorded readings at known distances set them.
+#[derive(Debug, Clone)]
+pub struct IrParams {
+    /// raw intensity at or above which a sensor counts as "something close"
+    pub threshold: i32,
+    /// distance in front of the sensor where that something is placed (m)
+    pub range: f64,
+}
+
+/// Obstacle points (map frame) for the IR readings `(frame_id, value)` at robot `pose`. Unknown
+/// frame ids and readings below the threshold give nothing.
+pub fn ir_points(pose: Pose2, readings: &[(&str, i32)], p: &IrParams) -> Vec<(f64, f64)> {
+    let (s, c) = pose.yaw.sin_cos();
+    readings
+        .iter()
+        .filter(|(_, v)| *v >= p.threshold)
+        .filter_map(|(id, _)| IR_SENSORS.iter().find(|q| q.0 == id.trim_start_matches('/')))
+        .map(|&(_, sx, sy, sa)| {
+            // sensor position plus `range` along its facing, in base_link, then into the map
+            let (bx, by) = (sx + p.range * sa.cos(), sy + p.range * sa.sin());
+            (pose.x + c * bx - s * by, pose.y + s * bx + c * by)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct VirtualParams {
     /// distance from the robot centre where a bump contact is placed (m): bumper radius + a little
@@ -156,6 +194,24 @@ mod tests {
         assert_eq!(v.points().len(), n, "refreshed at 30 s, ttl 60 s");
         v.expire(91.0);
         assert!(v.points().is_empty());
+    }
+
+    #[test]
+    fn ir_points_in_front_of_the_firing_sensor() {
+        let p = IrParams { threshold: 100, range: 0.10 };
+        // robot at (2, 0) facing -x (yaw pi): front-centre sensors point toward x < 2
+        let pose = Pose2::new(2.0, 0.0, std::f64::consts::PI);
+        let pts = ir_points(pose, &[("ir_intensity_front_center_left", 400), ("ir_intensity_right", 20), ("bogus", 999)], &p);
+        assert_eq!(pts.len(), 1, "below threshold and unknown ids give nothing");
+        let (x, y) = pts[0];
+        // base_link (0.175 + 0.1*cos(2.6 deg), 0.008 + 0.1*sin(2.6 deg)) rotated by 180 deg
+        assert!((x - (2.0 - 0.2749)).abs() < 1e-3 && (y - (-0.0125)).abs() < 1e-3, "({x}, {y})");
+        // and they go into the layer like bump points
+        let mut v = VirtualObstacles::default();
+        for (x, y) in pts {
+            v.add_point(x, y, 1.0);
+        }
+        assert_eq!(v.points().len(), 1);
     }
 
     #[test]

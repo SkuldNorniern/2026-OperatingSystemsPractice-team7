@@ -16,6 +16,8 @@ use tb4_planning::{CSpace, CSpaceParams, Planner, PlannerParams};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener};
 
 type Nav = NavigateToPose::Action;
+/// NavigateToPose behavior_tree value for a goal without a final heading
+const XY_ONLY: &str = "xy_only";
 type Follow = FollowPath::Action;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -28,7 +30,8 @@ struct Goal {
     handle: ActionServerGoal<Nav>,
     x: f64,
     y: f64,
-    yaw: f64,
+    /// None: goal with behavior_tree "xy_only", the final heading does not matter
+    yaw: Option<f64>,
     started: Instant,
     cancel: bool,
 }
@@ -46,6 +49,8 @@ struct Cfg {
     use_scan_obstacles: bool,
     scan_obstacle_range: f64,
     controller_id: String,
+    /// keep the current route while it is free unless a new one is shorter than this fraction of it
+    path_switch_ratio: f64,
 }
 
 struct State {
@@ -198,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use_scan_obstacles: p.bool("use_scan_obstacles", true),
         scan_obstacle_range: p.f64("scan_obstacle_range", 2.5),
         controller_id: p.string("controller_id", "FollowPath"),
+        path_switch_ratio: p.f64("path_switch_ratio", 0.8),
     });
     let mp = MppiParams {
         samples: p.i64("mppi_samples", 1000) as usize,
@@ -332,7 +338,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let gp = &handle.goal.pose.pose;
             let q = &gp.orientation;
-            let yaw = (2.0 * (q.w * q.z + q.x * q.y)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+            // frontier goals: the lidar sees all round, so stopping to turn at every goal only costs
+            // time (the explorer marks them "xy_only"); camera views keep their heading
+            let yaw = (handle.goal.behavior_tree != XY_ONLY)
+                .then(|| (2.0 * (q.w * q.z + q.x * q.y)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z)));
             let g = Goal { x: gp.position.x, y: gp.position.y, yaw, handle: handle.clone(), started: Instant::now(), cancel: false };
             log_info!(&log2, "goal ({:.2}, {:.2})", g.x, g.y);
             {
@@ -500,15 +509,24 @@ fn tick(
                 } else {
                     p.points
                 };
+                // Field run 20261118_184838: among chair legs every 2 s replan picked another way
+                // round, and the robot circled for 45 s until the goal timed out. Keep the route
+                // it is on while that is still free, unless the new one is clearly shorter.
+                let pts = match remaining_free(&cs, &s.path, (robot.x, robot.y)) {
+                    Some(rest) if tb4_planning::path_length(&pts) >= cfg.path_switch_ratio * tb4_planning::path_length(&rest) => s.path.clone(),
+                    _ => pts,
+                };
                 let changed = pts != s.path;
                 s.path = pts;
                 let msg = path_msg(&cfg.map_frame, &s.path, &now);
                 let _ = io.path.publish(&msg);
                 match cfg.mode {
-                    Mode::Mppi => {
+                    // same route kept: leave MPPI's tracking state (rotate / goal reached) alone
+                    Mode::Mppi if changed => {
                         let st = &mut *s;
-                        st.mppi.set_path(&st.path, Some(gyaw));
+                        st.mppi.set_path(&st.path, gyaw);
                     }
+                    Mode::Mppi => {}
                     Mode::Nav2Controller if changed || s.follow.is_none() => {
                         // nav2 critics index path points, any-angle corners alone give them nothing to follow
                         let dense = tb4_planning::densify(&s.path, 0.05);
@@ -566,6 +584,18 @@ fn tick(
             }
         }
     }
+}
+
+/// rest of `path` from the point nearest `robot`, starting at the robot, if every segment past that
+/// point is still free (the first one may start inside inflation, as the planner snaps its start)
+fn remaining_free(cs: &CSpace, path: &[(f64, f64)], robot: (f64, f64)) -> Option<Vec<(f64, f64)>> {
+    let d = |p: &(f64, f64)| (p.0 - robot.0).hypot(p.1 - robot.1);
+    let i = (0..path.len()).min_by(|&a, &b| d(&path[a]).total_cmp(&d(&path[b])))?;
+    let ahead = &path[(i + 1).min(path.len() - 1)..];
+    if ahead.windows(2).any(|w| !tb4_planning::segment_free(cs, w[0], w[1])) {
+        return None;
+    }
+    Some(std::iter::once(robot).chain(ahead.iter().copied()).collect())
 }
 
 fn send_follow(s: &mut State, state: &Rc<RefCell<State>>, io: &Rc<Io>, cfg: &Cfg, spawner: &LocalSpawner, path: PathMsg) {

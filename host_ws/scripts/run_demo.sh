@@ -12,6 +12,7 @@
 #            never records a bag; map/targets go to the replay log folder, not ~/team7_run.
 #   --start-offset SEC: with --replay, start the bag SEC seconds in. Default: just after the odometry
 #            reset that the live run recorded during its preparation (0 = from the very start).
+#   --graph: also open rqt_graph on the run's ROS domain (save the node graph from its window)
 #   --no-prepare: live only; skip undock and odometry reset (stationary diagnostics).
 #   --no-record / record:=: live only. A replay never records (a bag of a bag only fills the disk).
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2, explorer:=none, output_dir:=DIR
@@ -24,6 +25,7 @@ BAG=""
 OFFSET=""
 STOCK=false
 PREPARE=true
+GRAPH=false
 RECORD=true
 RECORD_SET=false
 RUN_DIR=""
@@ -36,8 +38,9 @@ while [ $# -gt 0 ]; do
     --replay) BAG="${2:?--replay needs a bag directory}"; shift ;;
     --start-offset) OFFSET="${2:?--start-offset needs seconds}"; shift ;;
     --no-prepare) PREPARE=false ;;
+    --graph) GRAPH=true ;;
     --no-record) RECORD=false; RECORD_SET=true ;;
-    --help|-h) sed -n 2,17p "$0"; exit 0 ;;
+    --help|-h) sed -n "2,/^set -euo/{/^#/p}" "$0"; exit 0 ;;
     output_dir:=*) RUN_DIR="${1#output_dir:=}" ;;
     record:=*) RECORD="${1#record:=}"; RECORD_SET=true ;;
     *) EXTRA+=("$1") ;;
@@ -315,6 +318,13 @@ if [ -n "$BAG" ]; then
 fi
 echo "[*] run logs: $LOG_DIR"
 
+if [ "$GRAPH" = true ]; then
+  # same ROS_DOMAIN_ID as the run (79 on replays); give the nodes time to come up, then refresh in the window.
+  # A Nix glibc on LD_LIBRARY_PATH (desktop Mesa setup) breaks PySide2, so leave /nix paths out for it.
+  (sleep 15; LD_LIBRARY_PATH="$(tr ':' '\n' <<<"${LD_LIBRARY_PATH:-}" | grep -v '^/nix/' | paste -sd: -)" \
+    exec ros2 run rqt_graph rqt_graph) > "$LOG_DIR/rqt_graph.log" 2>&1 &
+  PIDS+=($!)
+fi
 echo "launch: team7.launch.py ${LAUNCH_ARGS[*]}"
 # Started from a script or in the background, bash hands SIGINT down as ignored, and the documented
 # stop (kill -INT on the launch) would do nothing. Reset it to the default for the launch and its nodes.

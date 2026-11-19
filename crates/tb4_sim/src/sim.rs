@@ -88,7 +88,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
         costmap_timeout: 5.0,
         explore: ExploreParams {
             free_threshold: 50,
-            min_frontier_cells: 8,
+            min_frontier_cells: 12,
             size_weight: 1.0,
             distance_weight: 1.5,
             blacklist_radius: 0.7,
@@ -96,11 +96,13 @@ pub fn team7_explorer_params() -> ExplorerParams {
             goal_standoff: 0.3,
             traversable_threshold: 99,
             frontier_segment_length: 1.2,
+            min_unknown_area: 1.0,
         },
         coverage: Some(cov),
         view_detour: 1.0,
         look_around_turns: 3,
         preempt_distance: 0.5,
+        switch_cooldown: 20.0,
     }
 }
 

@@ -66,10 +66,10 @@ fn usage(msg: &str) -> ! {
     std::process::exit(2)
 }
 
-const SET_NAMES: [&str; 20] = [
+const SET_NAMES: [&str; 23] = [
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
-    "view_detour", "preempt_distance", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
+    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative",
 ];
 
@@ -92,6 +92,9 @@ fn set(cfg: &mut SimConfig, kv: &str) -> Result<(), String> {
         "view_standoff" => e.coverage.iter_mut().for_each(|c| c.standoff = x),
         "view_detour" => e.view_detour = x,
         "preempt_distance" => e.preempt_distance = x,
+        "switch_cooldown" => e.switch_cooldown = x,
+        "min_unknown_area" => e.explore.min_unknown_area = x,
+        "min_frontier_cells" => e.explore.min_frontier_cells = x as usize,
         "look_around_turns" => e.look_around_turns = x as u32,
         "camera_coverage" if x == 0.0 => e.coverage = None,
         "camera_coverage" => {}

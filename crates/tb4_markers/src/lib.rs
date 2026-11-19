@@ -47,6 +47,9 @@ pub struct LocateParams {
     pub max_abs_bearing_z: f64,
     /// wall cells within this radius of a ray hit get a line fit, 0 = off (m)
     pub wall_fit_radius: f64,
+    /// hits and pnp ranges closer than this to the camera are ignored (m): nothing real sits inside
+    /// the robot (bench run 183350 put every marker at the robot centre from a ray hitting its own cell)
+    pub min_range: f64,
 }
 
 impl Default for LocateParams {
@@ -58,6 +61,7 @@ impl Default for LocateParams {
             allow_pnp_fallback: true,
             max_abs_bearing_z: 0.8,
             wall_fit_radius: 0.2,
+            min_range: 0.3,
         }
     }
 }
@@ -241,6 +245,11 @@ pub struct TrackParams {
     /// and at least this share of all views must be lidar-backed. A real marker has its wall behind
     /// it in most views; a chair label only now and then (field 184838: 3 of 39 views, 8 %)
     pub min_wall_fraction: f64,
+    /// once the views' bearings spread at least this much (rad), their line intersection is an
+    /// independent position: the fused position must lie within `max_triangulation_gap` of it.
+    /// A label whose rays land on the wall behind it intersects in front of that wall and fails.
+    pub min_triangulation_spread: f64,
+    pub max_triangulation_gap: f64,
     /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
     /// median mahalanobis distance of views must be below this, else views disagree
@@ -268,6 +277,8 @@ impl Default for TrackParams {
             min_views: 5,
             min_wall_views: 3,
             min_wall_fraction: 0.25,
+            min_triangulation_spread: 0.26,
+            max_triangulation_gap: 0.3,
             max_spread: 0.08,
             max_consistency: 3.0,
             max_history: 200,
@@ -339,8 +350,14 @@ impl Tracker {
             sigma_across: across(r),
         };
         // (range, sigma along, kind)
+        if pnp < p.min_range {
+            return None;
+        }
         let hit = grid.and_then(|g| {
             let h = g.raycast(o.camera.0, o.camera.1, dx, dy, p.max_range, p.occupied_threshold)?;
+            if h.range < p.min_range {
+                return None;
+            }
             let surface = surface_around(g, (o.camera.0, o.camera.1), ang, h.range, p);
             let fit = wall_hit(g, (o.camera.0, o.camera.1), (dx, dy), h.range, p);
             // bearing error slides the hit along a slanted wall by tan(incidence)
@@ -451,6 +468,9 @@ impl Tracker {
             confirmed: v.len() >= p.min_views
                 && wall >= p.min_wall_views
                 && wall as f64 >= p.min_wall_fraction * v.len() as f64
+                && triangulate(v)
+                    .filter(|t| t.spread >= p.min_triangulation_spread)
+                    .is_none_or(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap)
                 && f.sigma <= loose * p.max_spread
                 && f.consistency <= loose * p.max_consistency,
         })
@@ -463,6 +483,60 @@ impl Tracker {
     pub fn confirmed(&self) -> Vec<Target> {
         self.targets().into_iter().filter(|t| t.confirmed).collect()
     }
+
+    /// Where to stand to look at target `id` from `standoff` m: in front of it, on the side its views
+    /// came from, facing it. (x, y, yaw). None without views.
+    pub fn approach(&self, id: i64, standoff: f64) -> Option<(f64, f64, f64)> {
+        let v = self.estimates.get(&id).filter(|v| !v.is_empty())?;
+        let t = self.target(id)?;
+        let (sx, sy) = v.iter().fold((0.0, 0.0), |a, e| (a.0 + e.dir.0, a.1 + e.dir.1));
+        let n = sx.hypot(sy);
+        if n < 1e-9 {
+            return None;
+        }
+        let (ux, uy) = (sx / n, sy / n);
+        Some((t.x - standoff * ux, t.y - standoff * uy, uy.atan2(ux)))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangulated {
+    pub x: f64,
+    pub y: f64,
+    /// widest angle between view bearings (rad)
+    pub spread: f64,
+}
+
+/// Bearing-only position: least-squares intersection of the views' bearing lines (each passes
+/// through its estimate along `dir`, so the range of the view does not matter). None if the lines
+/// are (nearly) parallel.
+pub fn triangulate(v: &[Estimate]) -> Option<Triangulated> {
+    if v.len() < 2 {
+        return None;
+    }
+    let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for e in v {
+        let (ux, uy) = e.dir;
+        // projector onto the line normal: I - u u^T
+        let (p11, p12, p22) = (1.0 - ux * ux, -ux * uy, 1.0 - uy * uy);
+        a11 += p11;
+        a12 += p12;
+        a22 += p22;
+        b1 += p11 * e.x + p12 * e.y;
+        b2 += p12 * e.x + p22 * e.y;
+    }
+    let det = a11 * a22 - a12 * a12;
+    if det.abs() < 1e-6 * (a11 + a22).powi(2) {
+        return None;
+    }
+    let angles: Vec<f64> = v.iter().map(|e| e.dir.1.atan2(e.dir.0)).collect();
+    let mut spread: f64 = 0.0;
+    for (i, a) in angles.iter().enumerate() {
+        for b in &angles[i + 1..] {
+            spread = spread.max((a - b).sin().atan2((a - b).cos()).abs());
+        }
+    }
+    Some(Triangulated { x: (a22 * b1 - a12 * b2) / det, y: (a11 * b2 - a12 * b1) / det, spread })
 }
 
 /// robust weighted least squares over views, each a point with its own along/across ray sigma.
@@ -635,6 +709,77 @@ mod tests {
         assert!(!t.target(2).unwrap().confirmed);
         assert_eq!(t.confirmed().len(), 1);
         assert_eq!(to_csv(&t.confirmed()), "id,x,y\n1,1.003,0.997\n");
+    }
+
+    /// view of a marker at `m` from camera `c`, placed at `m + err` along the ray (wrong range)
+    fn view_at(c: (f64, f64), m: (f64, f64), err: f64, source: Source) -> Estimate {
+        let (dx, dy) = (m.0 - c.0, m.1 - c.1);
+        let r = dx.hypot(dy);
+        let u = (dx / r, dy / r);
+        Estimate { x: m.0 + u.0 * err, y: m.1 + u.1 * err, source, dir: u, sigma_along: 0.05, sigma_across: 0.02 }
+    }
+
+    #[test]
+    fn triangulation_finds_the_marker_from_bearings_alone() {
+        let m = (3.0, 1.0);
+        // ranges wrong by up to 0.8 m, bearings right
+        let v: Vec<_> = [((0.0, 0.0), 0.5), ((0.0, 2.0), -0.8), ((1.0, -1.0), 0.3)]
+            .iter()
+            .map(|&(c, e)| view_at(c, m, e, Source::PnpRange))
+            .collect();
+        let t = triangulate(&v).unwrap();
+        assert!((t.x - m.0).abs() < 1e-9 && (t.y - m.1).abs() < 1e-9, "{t:?}");
+        assert!(t.spread > 0.8, "views from 3 sides");
+        // all from one spot: no intersection
+        let same: Vec<_> = (0..3).map(|k| view_at((0.0, 0.0), m, 0.1 * k as f64, Source::PnpRange)).collect();
+        assert!(triangulate(&same).is_none());
+    }
+
+    #[test]
+    fn rays_landing_behind_the_pattern_fail_the_triangulation_check() {
+        // a label at (2, 0); every "wall hit" lands on a wall 1 m behind it, along each ray
+        let label: (f64, f64) = (2.0, 0.0);
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, max_spread: 1.0, max_consistency: 100.0, ..Default::default() });
+        for c in [(0.0, -1.0), (0.0, -0.5), (0.0, 0.0), (0.0, 0.5), (0.0, 1.0)] {
+            let r = (label.0 - c.0).hypot(label.1 - c.1);
+            t.add(1, &view_at(c, label, 1.0 * r / 2.0, Source::Raycast));
+        }
+        assert!(!t.target(1).unwrap().confirmed, "{:?} vs {:?}", t.target(1), triangulate(t.estimates(1)));
+        // the same views placed on the marker itself pass
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        for c in [(0.0, -1.0), (0.0, -0.5), (0.0, 0.0), (0.0, 0.5), (0.0, 1.0)] {
+            t.add(2, &view_at(c, label, 0.0, Source::Raycast));
+        }
+        assert!(t.target(2).unwrap().confirmed);
+    }
+
+    #[test]
+    fn approach_point_stands_in_front_on_the_viewing_side() {
+        let mut t = Tracker::new(TrackParams::default());
+        let m = (3.0, 1.0);
+        for c in [(0.0, 0.5), (0.0, 1.5)] {
+            t.add(7, &view_at(c, m, 0.0, Source::Raycast));
+        }
+        let (x, y, yaw) = t.approach(7, 1.3).unwrap();
+        assert!(((x - m.0).hypot(y - m.1) - 1.3).abs() < 0.05);
+        assert!(x < m.0, "on the side the robot looked from");
+        assert!(yaw.abs() < 0.05, "facing +x toward the marker");
+    }
+
+    #[test]
+    fn hits_inside_the_robot_are_ignored() {
+        // occupied cell right in front of the camera (robot footprint / ghost), marker on a wall at 3 m
+        let mut g = wall_map();
+        let c = g.world_to_cell(0.15, 0.45).unwrap();
+        g.set(c, 100);
+        let mut t = Tracker::new(TrackParams::default());
+        let p = LocateParams::default();
+        let o = Observation { id: 3, camera: (0.0, 0.45, 0.25), bearing: (1.0, 0.0, 0.0), pnp_range: 3.0 };
+        let e = t.observe(Some(&g), &o, &p).unwrap();
+        assert!(e.x > 1.0, "not placed at the robot: {e:?}");
+        // a pattern held 0.2 m from the camera gives nothing at all
+        let near = Observation { id: 4, pnp_range: 0.2, ..o };
+        assert!(t.observe(Some(&g), &near, &p).is_none());
     }
 
     #[test]

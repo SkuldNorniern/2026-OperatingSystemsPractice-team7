@@ -59,6 +59,10 @@ pub struct SlamParams {
     pub loop_sigma_ang: f64,
     pub loop_max_chi2: f64,
     pub opt_iterations: usize,
+    /// after a loop closure the map is redrawn only if a keyframe moved more than this (m) or
+    /// turned more than redraw_min_turn (rad) from the pose it is drawn at
+    pub redraw_min_shift: f64,
+    pub redraw_min_turn: f64,
     /// point-to-line icp after grid match, against raw keyframe points
     pub icp: bool,
     pub icp_voxel: f64,
@@ -106,6 +110,8 @@ impl Default for SlamParams {
             loop_sigma_ang: 0.02,
             loop_max_chi2: 30.0,
             opt_iterations: 15,
+            redraw_min_shift: 0.05,
+            redraw_min_turn: 0.015,
             icp: true,
             icp_voxel: 0.025,
             icp_normal_radius: 0.12,
@@ -135,6 +141,7 @@ pub struct SlamStats {
     /// how far the last accepted loop match moved the current keyframe from its estimate (m, rad)
     pub last_loop_correction: (f64, f64),
     pub last_rebuild_ms: f64,
+    pub map_redraws: u64,
     pub icp_used: u64,
     pub icp_rejected: u64,
 }
@@ -149,6 +156,8 @@ struct StoredScan {
 struct Keyframe {
     pose: Pose2,
     scans: Vec<StoredScan>,
+    /// pose its scans are drawn at in the current map
+    drawn: Pose2,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -400,6 +409,7 @@ impl Slam {
                 rel: Pose2::default(),
                 points,
             }],
+            drawn: pose,
         });
         let t = Instant::now();
         self.try_loop_closure();
@@ -541,18 +551,24 @@ impl Slam {
             self.stats.loop_rejections += 1;
             return;
         }
+        // redraw only when some keyframe is now further than the tolerance from where the map has it:
+        // redrawing for sub-cell moves shifts walls by a cell here and there on every loop
         let (mut moved, mut turned) = (0.0f64, 0.0f64);
         for (k, &np) in self.kfs.iter_mut().zip(&poses) {
-            moved = moved.max(k.pose.distance_to(np.x, np.y));
-            turned = turned.max(wrap(k.pose.yaw - np.yaw).abs());
+            moved = moved.max(k.drawn.distance_to(np.x, np.y));
+            turned = turned.max(wrap(k.drawn.yaw - np.yaw).abs());
             k.pose = np;
         }
         let last = self.kfs.last().expect("keyframes exist");
         self.pose = compose(last.pose, last.scans.last().expect("keyframe has a scan").rel);
-        if moved > 0.5 * self.p.resolution || turned > 0.005 {
+        if moved > self.p.redraw_min_shift || turned > self.p.redraw_min_turn {
             let t = Instant::now();
             self.rebuild_map();
+            for k in &mut self.kfs {
+                k.drawn = k.pose;
+            }
             self.stats.last_rebuild_ms = ms(t);
+            self.stats.map_redraws += 1;
         }
         self.stats.loop_closures += 1;
         self.stats.last_loop_correction = correction;
@@ -624,5 +640,18 @@ mod tests {
         let slam = run_room(p, |s| most = most.max(s.points.as_ref().map_or(0, |(tag, _)| tag.0.len())));
         assert!(slam.kfs.len() > 20, "{}", slam.kfs.len());
         assert_eq!(most, 6);
+    }
+
+    #[test]
+    fn map_is_redrawn_only_for_large_corrections() {
+        let always = run_room(SlamParams { redraw_min_shift: 0.0, redraw_min_turn: 0.0, ..SlamParams::default() }, |_| ());
+        let st = always.stats();
+        assert!(st.loop_closures >= 2, "{st:?}");
+        assert_eq!(st.map_redraws, st.loop_closures);
+        let never = run_room(SlamParams { redraw_min_shift: 1e3, redraw_min_turn: 1e3, ..SlamParams::default() }, |_| ());
+        assert!(never.stats().loop_closures >= 2);
+        assert_eq!(never.stats().map_redraws, 0);
+        // keyframes keep their optimised poses either way, only the drawing lags
+        assert!(never.kfs.iter().any(|k| k.drawn.distance_to(k.pose.x, k.pose.y) > 1e-6 || k.drawn.yaw != k.pose.yaw));
     }
 }

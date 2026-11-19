@@ -103,6 +103,8 @@ fn set_param(p: &mut SlamParams, key: &str, val: &str) -> bool {
         "loop_min_score" => p.loop_min_score = f().unwrap(),
         "icp" => p.icp = b(),
         "icp_max_keyframes" => p.icp_max_keyframes = f().unwrap() as usize,
+        "redraw_min_shift" => p.redraw_min_shift = f().unwrap(),
+        "redraw_min_turn" => p.redraw_min_turn = f().unwrap(),
         "opt_iterations" => p.opt_iterations = f().unwrap() as usize,
         _ => return false,
     }
@@ -348,9 +350,10 @@ fn main() {
     );
     println!("  update ms       {all}");
     println!(
-        "  loops {} rejected {} | fallbacks {} | icp used {}/{}",
+        "  loops {} rejected {} map redraws {} | fallbacks {} | icp used {}/{}",
         st.loop_closures,
         st.loop_rejections,
+        st.map_redraws,
         st.match_fallbacks,
         st.icp_used,
         st.icp_used + st.icp_rejected

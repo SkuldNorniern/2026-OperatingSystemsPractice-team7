@@ -156,6 +156,8 @@ aruco_detector:
     refine_corners: true
     max_border_errors: 0      # border cells read white allowed. 0: field frames 28 -> 6, 8 -> 2 false hits (183647, 185946),
                               # bench sheet lost 0.5 % of real detections (stream_eval "border0")
+    exact_stripe_ids: true    # ids 0, 341, 682, 1023 only without bit correction: a dark panel with a bright strip
+                              # reads as id 0 after one fix (seat underside in 184838); printed id 0 read exactly 624/624
     max_stripe_flips: -1      # barcode filter (rejects ids 0, 341, 682, 1023) OFF: a real id 0 is 16-80 px, chair
                               # labels 8-50 px, so it would hide a real target. marker_mapper wall views stop the labels
     debug_every: 3

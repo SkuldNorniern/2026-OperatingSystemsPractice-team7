@@ -13,7 +13,8 @@ fn variants() -> Vec<(&'static str, DetectorParams)> {
         // "config" = team7.yaml (hamming 0, barcode filter off); keep it in step with the yaml
         ("config_ham0", DetectorParams { max_hamming: 0, max_stripe_flips: None, ..d.clone() }),
         ("config_ham1", DetectorParams { max_hamming: 1, max_stripe_flips: None, ..d.clone() }),
-        ("border0", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_border_errors: 0, ..d.clone() }),
+        ("border0_loose", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_border_errors: 0, exact_stripe_ids: false, ..d.clone() }),
+        ("border0_exact", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_border_errors: 0, exact_stripe_ids: true, ..d.clone() }),
         ("aspect2", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_aspect: 2.0, ..d.clone() }),
         ("aspect1.5", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_aspect: 1.5, ..d.clone() }),
         ("border0_aspect2", DetectorParams { max_hamming: 1, max_stripe_flips: None, max_border_errors: 0, max_aspect: 2.0, ..d.clone() }),

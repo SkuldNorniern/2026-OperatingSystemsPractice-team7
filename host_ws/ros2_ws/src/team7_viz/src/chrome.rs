@@ -55,6 +55,7 @@ pub enum Wid {
     Remove(u8),
     AddLayer,
     CameraTopic,
+    Overflow,
     Camera,
 }
 
@@ -69,21 +70,60 @@ pub struct Requests {
 pub struct Chrome {
     pub ui: UiState<Wid>,
     pub theme: Theme,
+    /// the dock beside the map (wide windows); saved in the profile
     pub dock_open: bool,
     pub dock_w: f32,
+    /// the dock as a drawer over the map (narrow windows)
+    pub drawer_open: bool,
     pub sections: [bool; 4],
     /// the map's rectangle in the last frame, canvas pixels
     pub map_area: Rect,
+    /// what covers part of the map (the drawer), so presses there are not the map's
+    pub overlay: Option<Rect>,
     pub domain: String,
     /// the active profile's name, shown in the toolbar
     pub profile: Option<String>,
     pub layout: DockLayout,
+    /// canvas width of the last frame (the dock key acts on the drawer when narrow)
+    last_w: f32,
     out_dir: Option<PathBuf>,
     fixed_out_dir: bool,
     out_checked: Option<Instant>,
     camera_image: Option<(u64, bool, Image)>,
     /// the last camera frame drawn (its seq)
     camera_shown: u64,
+}
+
+/// under this width the dock becomes a drawer over the map
+pub const NARROW: f32 = 900.0;
+/// under this width the drawer takes the whole width
+pub const SHEET: f32 = 520.0;
+/// the map keeps at least this much beside the dock
+const MAP_MIN: f32 = 360.0;
+const DOCK_MIN: f32 = 240.0;
+const DOCK_MAX: f32 = 560.0;
+
+thread_local! {
+    /// every layout rectangle of the last frame, named, for the size tests
+    static LAYOUT: std::cell::RefCell<Vec<(&'static str, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// full text of what the pointer is over, shown in the status bar
+    static HOVER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// a layout rectangle: never negative, and noted for the size tests
+fn note(name: &'static str, r: Rect) -> Rect {
+    let r = Rect::new(r.x, r.y, r.width.max(0.0), r.height.max(0.0));
+    LAYOUT.with(|l| l.borrow_mut().push((name, r)));
+    r
+}
+
+/// the layout rectangles of the last frame
+pub fn layout_rects() -> Vec<(&'static str, Rect)> {
+    LAYOUT.with(|l| l.borrow().clone())
+}
+
+fn hover(text: impl Into<String>) {
+    HOVER.with(|h| *h.borrow_mut() = Some(text.into()));
 }
 
 fn rgba(c: [u8; 4]) -> Color {
@@ -113,12 +153,15 @@ impl Chrome {
             ui: UiState::new(),
             theme: Theme::dark(),
             dock_open: true,
-            dock_w: 330.0,
+            dock_w: 340.0,
+            drawer_open: false,
             sections: [true, true, true, false],
             map_area: Rect::new(0.0, 0.0, 1.0, 1.0),
+            overlay: None,
             domain,
             profile: None,
             layout: DockLayout::default(),
+            last_w: 1440.0,
             fixed_out_dir: out_dir.is_some(),
             out_dir,
             out_checked: None,
@@ -127,14 +170,34 @@ impl Chrome {
         }
     }
 
+    /// the panel toggle: the dock when wide, the drawer when narrow
+    pub fn toggle_panel(&mut self) {
+        if self.last_w < NARROW {
+            self.drawer_open = !self.drawer_open;
+        } else {
+            self.dock_open = !self.dock_open;
+        }
+    }
+
+    /// whether the panel shows, as the window is now
+    pub fn panel_shown(&self) -> bool {
+        if self.last_w < NARROW { self.drawer_open } else { self.dock_open }
+    }
+
     /// keys for the chrome itself; true when used
     pub fn key(&mut self, key: KeyCode, mods: Modifiers) -> bool {
         match key {
-            KeyCode::D if !mods.ctrl => self.dock_open = !self.dock_open,
+            KeyCode::D if !mods.ctrl => self.toggle_panel(),
             KeyCode::H if !mods.ctrl => self.sections[3] = !self.sections[3],
             _ => return false,
         }
         true
+    }
+
+    /// a canvas point the map takes (inside the map, not under the drawer)
+    pub fn map_hit(&self, x: f32, y: f32) -> bool {
+        let p = aurea::render::Point::new(x, y);
+        self.map_area.contains(p) && self.overlay.is_none_or(|o| !o.contains(p))
     }
 
     /// the run folder: re-checked every few seconds so a newer run is picked up
@@ -146,7 +209,6 @@ impl Chrome {
         self.out_dir.clone()
     }
 
-    /// set the run folder (tests, `--output-dir`)
     /// the seq of the last camera frame drawn
     pub fn camera_shown(&self) -> u64 {
         self.camera_shown
@@ -157,6 +219,7 @@ impl Chrome {
         self.out_dir.as_deref()
     }
 
+    /// set the run folder (tests, `--output-dir`)
     pub fn set_run_dir(&mut self, dir: Option<PathBuf>) {
         self.fixed_out_dir = true;
         self.out_dir = dir;
@@ -166,33 +229,56 @@ impl Chrome {
     /// follows it, so the splitter and the dock must share it.
     pub fn frame(&mut self, ctx: &mut dyn DrawingContext, app: &mut App, model: &Model, now: Instant) -> AureaResult<Requests> {
         let (w, h) = (ctx.width() as f32, ctx.height() as f32);
+        LAYOUT.with(|l| l.borrow_mut().clear());
+        HOVER.with(|v| *v.borrow_mut() = None);
+        self.last_w = w;
         let mut req = Requests::default();
         let run_dir = self.run_dir(now);
         let theme = self.theme.clone();
         ctx.clear(theme.palette.background)?;
-        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, camera_shown, profile, .. } = self;
+        let narrow = w < NARROW;
+        let Self { ui: state, dock_open, dock_w, drawer_open, sections, map_area, overlay, domain, layout, camera_image, camera_shown, profile, .. } = self;
         let mut ui = state.frame(ctx, &theme);
 
-        let body = Rect::new(0.0, TOOLBAR_H + STRIP_H, w, (h - TOOLBAR_H - STRIP_H - STATUS_H).max(10.0));
-        let (dock, map) = if *dock_open {
-            // the preferred width changes only when dragged: a small first frame must not shrink it
-            let mut at = *dock_w;
-            let (a, b, r) = Splitter::new(&mut at).min(240.0, 240.0).show(&mut ui, Wid::Split, body)?;
+        let body = note("body", Rect::new(0.0, TOOLBAR_H + STRIP_H, w, (h - TOOLBAR_H - STRIP_H - STATUS_H).max(0.0)));
+        // wide: the dock beside the map, its width dragged between limits; narrow: the map takes
+        // the whole body and the dock is a drawer over it
+        let (dock, map) = if !narrow && *dock_open {
+            let mut at = dock_w.clamp(DOCK_MIN, DOCK_MAX);
+            let (a, b, r) = Splitter::new(&mut at).min(DOCK_MIN, MAP_MIN).show(&mut ui, Wid::Split, body)?;
             if r.held {
-                *dock_w = at;
+                *dock_w = at.clamp(DOCK_MIN, DOCK_MAX);
             }
-            (Some(a), b)
+            (Some(note("dock", a)), note("map", b))
         } else {
-            (None, body)
+            (None, note("map", body))
         };
         *map_area = map;
+        *overlay = None;
         // the map first, so the chrome draws over its edges
         app.draw_in(&mut *ui.ctx, model, now, map)?;
 
-        toolbar(&mut ui, app, dock_open, &mut req, profile.as_deref(), w)?;
+        let panel_on = if narrow { *drawer_open } else { *dock_open };
+        let mut toggle = false;
+        toolbar(&mut ui, app, panel_on, &mut toggle, &mut req, profile.as_deref(), w)?;
+        if toggle {
+            if narrow {
+                *drawer_open = !*drawer_open;
+            } else {
+                *dock_open = !*dock_open;
+            }
+        }
         let found = app.targets(model);
         strip(&mut ui, model, &found, now, w)?;
-        if let Some(d) = dock {
+        let drawer = (narrow && *drawer_open).then(|| {
+            let dw = if w < SHEET { w } else { dock_w.clamp(DOCK_MIN, DOCK_MAX).min(w * 0.85) };
+            note("drawer", Rect::new(0.0, body.y, dw, body.height))
+        });
+        if let Some(d) = dock.or(drawer) {
+            if drawer.is_some() {
+                *overlay = Some(d);
+                ui.shadow(d, 0.0, 18.0, theme.palette.shadow)?;
+            }
             ui.fill(d, theme.palette.surface)?;
             // the next camera frame: each one is drawn once even when several came at once
             let (cam, more) = model.next_camera(*camera_shown);
@@ -205,7 +291,7 @@ impl Chrome {
             }
             ui.line(aurea::render::Point::new(d.right(), d.y), aurea::render::Point::new(d.right(), d.bottom()), 1.0, theme.palette.border)?;
         }
-        status_bar(&mut ui, app, model, now, domain, Rect::new(0.0, h - STATUS_H, w, STATUS_H))?;
+        status_bar(&mut ui, app, model, now, domain, note("status", Rect::new(0.0, h - STATUS_H, w, STATUS_H)))?;
         Ok(req)
     }
 
@@ -215,130 +301,302 @@ impl Chrome {
     }
 }
 
-fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, dock_open: &mut bool, req: &mut Requests, profile: Option<&str>, w: f32) -> AureaResult<()> {
+/// how a toolbar group shows
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Look {
+    Text,
+    Icon,
+    /// in the overflow menu
+    Menu,
+}
+
+/// what fits in the toolbar at a width: groups collapse to icons, then into the overflow menu,
+/// then the profile label goes, then the badge and the panel button shrink
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ToolbarPlan {
+    tools: Look,
+    view: Look,
+    profile: bool,
+    short_badge: bool,
+    panel_icon: bool,
+}
+
+const BTN_H: f32 = 28.0;
+const ICON_W: f32 = 32.0;
+const GAP: f32 = 4.0;
+const SEP: f32 = 16.0;
+
+fn plan_toolbar(w: f32, profile_w: f32, badge_w: f32) -> ToolbarPlan {
+    let tools = |l: Look| if l == Look::Text { 3.0 * (78.0 + GAP) } else { 3.0 * (ICON_W + GAP) };
+    let view = |l: Look| match l {
+        Look::Text => 30.0 + 30.0 + 44.0 + 62.0 + 72.0 + 92.0 + 6.0 * GAP + SEP,
+        Look::Icon => 6.0 * (ICON_W + GAP) + SEP,
+        Look::Menu => 40.0 + GAP,
+    };
+    let right = |p: &ToolbarPlan| {
+        (if p.panel_icon { ICON_W } else { 64.0 }) + 12.0 + (if p.short_badge { 34.0 } else { badge_w }) + if p.profile { profile_w + 12.0 } else { 0.0 }
+    };
+    let plans = [
+        ToolbarPlan { tools: Look::Text, view: Look::Text, profile: true, short_badge: false, panel_icon: false },
+        ToolbarPlan { tools: Look::Text, view: Look::Icon, profile: true, short_badge: false, panel_icon: false },
+        ToolbarPlan { tools: Look::Icon, view: Look::Icon, profile: true, short_badge: false, panel_icon: false },
+        ToolbarPlan { tools: Look::Icon, view: Look::Icon, profile: false, short_badge: false, panel_icon: false },
+        ToolbarPlan { tools: Look::Icon, view: Look::Menu, profile: false, short_badge: false, panel_icon: false },
+        ToolbarPlan { tools: Look::Icon, view: Look::Menu, profile: false, short_badge: true, panel_icon: true },
+    ];
+    plans.into_iter().find(|p| 8.0 + tools(p.tools) + SEP + view(p.view) + right(p) + 8.0 <= w).unwrap_or(plans[5])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toolbar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, panel_on: bool, toggle: &mut bool, req: &mut Requests, profile: Option<&str>, w: f32) -> AureaResult<()> {
+    use aurea::render::Icon;
     let t = ui.theme.clone();
-    ui.fill(Rect::new(0.0, 0.0, w, TOOLBAR_H), t.palette.surface)?;
-    let (y, bh) = (6.0, 28.0);
+    ui.fill(note("toolbar", Rect::new(0.0, 0.0, w, TOOLBAR_H)), t.palette.surface)?;
+    let (badge, color) = if app.allow_goals { ("GOALS ON", t.palette.warning) } else { ("READ-ONLY", t.palette.dim) };
+    let label = profile.map_or_else(|| "profile: detecting".to_owned(), |p| format!("profile {p}"));
+    let profile_w = ui.text_width(&label, &font(11.0));
+    let badge_w = ui.text_width(badge, &bold(11.0)) + 16.0;
+    let plan = plan_toolbar(w, profile_w, badge_w);
+    let y = (TOOLBAR_H - BTN_H) / 2.0;
     let mut x = 8.0;
-    // tools
-    for (i, (tool, label)) in [(Tool::Interact, "Interact"), (Tool::Measure, "Measure"), (Tool::Goal, "2D Goal")].iter().enumerate() {
-        let bw = 76.0;
-        if Button::new(label).selected(app.tool == *tool).show(ui, Wid::Tool(i as u8), Rect::new(x, y, bw, bh))?.clicked {
+    let sep = |ui: &mut aurea::ui::Ui<'_, Wid>, x: f32| ui.line(aurea::render::Point::new(x, 10.0), aurea::render::Point::new(x, TOOLBAR_H - 10.0), 1.0, t.palette.border);
+
+    // tools: the active one is highlighted
+    for (i, (tool, text, icon, tip)) in [
+        (Tool::Interact, "Interact", Icon::Hand, "Interact: drag pans the map (I)"),
+        (Tool::Measure, "Measure", Icon::Crop, "Measure: drag for distance and angle (M)"),
+        (Tool::Goal, "2D Goal", Icon::Arrow, "2D Goal: drag position, then heading (G)"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (b, bw) = if plan.tools == Look::Text { (Button::new(text), 78.0) } else { (Button::icon_only(*icon), ICON_W) };
+        let r = b.selected(app.tool == *tool).show(ui, Wid::Tool(i as u8), note("tool", Rect::new(x, y, bw, BTN_H)))?;
+        if r.hovered {
+            hover(*tip);
+        }
+        if r.clicked {
             app.set_tool(*tool);
         }
-        x += bw + 4.0;
+        x += bw + GAP;
     }
-    x += 10.0;
-    ui.line(aurea::render::Point::new(x - 7.0, 9.0), aurea::render::Point::new(x - 7.0, TOOLBAR_H - 9.0), 1.0, t.palette.border)?;
-    // view
-    for (id, label, bw) in [(Wid::ZoomOut, "-", 30.0), (Wid::ZoomIn, "+", 30.0), (Wid::Fit, "Fit", 44.0)] {
-        if Button::new(label).show(ui, id, Rect::new(x, y, bw, bh))?.clicked {
-            match id {
-                Wid::ZoomOut => app.zoom(1.0 / 1.2),
-                Wid::ZoomIn => app.zoom(1.2),
-                _ => app.fit(),
+    x += SEP / 2.0;
+    sep(ui, x - GAP / 2.0)?;
+    x += SEP / 2.0 - GAP;
+
+    // view and capture: buttons, icons, or one overflow menu
+    let follow_label = if app.camera.follow { "Follow robot: on" } else { "Follow robot: off" };
+    let actions: [(Wid, &str, Icon, f32, &str, bool); 6] = [
+        (Wid::ZoomOut, "-", Icon::ZoomOut, 30.0, "Zoom out (-)", false),
+        (Wid::ZoomIn, "+", Icon::ZoomIn, 30.0, "Zoom in (+)", false),
+        (Wid::Fit, "Fit", Icon::Zoom, 44.0, "Fit the map, north up (0)", false),
+        (Wid::Follow, "Follow", Icon::Eye, 62.0, follow_label, app.camera.follow),
+        (Wid::North, "North up", Icon::ChevronUp, 72.0, "North up", app.camera.rotation == 0.0),
+        (Wid::Shot, "Screenshot", Icon::File, 92.0, "Screenshot of the map (P)", false),
+    ];
+    let mut picked = None;
+    match plan.view {
+        Look::Menu => {
+            let labels: Vec<&str> = actions.iter().map(|a| if a.0 == Wid::Follow { follow_label } else { a.4 }).collect();
+            let mut sel = labels.len();
+            Dropdown::new(&labels, &mut sel).placeholder("...").show(ui, Wid::Overflow, note("overflow", Rect::new(x, y, 40.0, BTN_H)))?;
+            picked = actions.get(sel).map(|a| a.0);
+        }
+        look => {
+            for (i, (id, text, icon, tw, tip, sel)) in actions.iter().enumerate() {
+                if *id == Wid::Shot {
+                    x += SEP / 2.0;
+                    sep(ui, x - GAP / 2.0)?;
+                    x += SEP / 2.0 - GAP;
+                }
+                let (b, bw) = if look == Look::Text { (Button::new(text), *tw) } else { (Button::icon_only(*icon), ICON_W) };
+                let r = b.selected(*sel).show(ui, *id, note("view", Rect::new(x, y, bw, BTN_H)))?;
+                if r.hovered {
+                    hover(*tip);
+                }
+                if r.clicked {
+                    picked = Some(*id);
+                }
+                x += bw + GAP;
+                let _ = i;
             }
         }
-        x += bw + 4.0;
     }
-    if Button::new("Follow").selected(app.camera.follow).show(ui, Wid::Follow, Rect::new(x, y, 62.0, bh))?.clicked {
-        app.camera.follow = !app.camera.follow;
-    }
-    x += 66.0;
-    if Button::new("North up").selected(app.camera.rotation == 0.0).show(ui, Wid::North, Rect::new(x, y, 72.0, bh))?.clicked {
-        let r = app.camera.rotation;
-        app.rotate(-r);
-    }
-    x += 76.0 + 10.0;
-    ui.line(aurea::render::Point::new(x - 7.0, 9.0), aurea::render::Point::new(x - 7.0, TOOLBAR_H - 9.0), 1.0, t.palette.border)?;
-    // capture
-    if Button::new("Screenshot").show(ui, Wid::Shot, Rect::new(x, y, 92.0, bh))?.clicked {
-        req.screenshot = true;
+    match picked {
+        Some(Wid::ZoomOut) => app.zoom(1.0 / 1.2),
+        Some(Wid::ZoomIn) => app.zoom(1.2),
+        Some(Wid::Fit) => app.fit(),
+        Some(Wid::Follow) => app.camera.follow = !app.camera.follow,
+        Some(Wid::North) => {
+            let r = app.camera.rotation;
+            app.rotate(-r);
+        }
+        Some(Wid::Shot) => req.screenshot = true,
+        _ => {}
     }
 
-    // right side: mode badge, source stack, dock toggle
+    // right side, from the edge: panel toggle, mode badge, profile
     let mut rx = w - 8.0;
-    let dw = 64.0;
-    rx -= dw;
-    if Button::new("Panel").selected(*dock_open).show(ui, Wid::Dock, Rect::new(rx, y, dw, bh))?.clicked {
-        *dock_open = !*dock_open;
+    let pw = if plan.panel_icon { ICON_W } else { 64.0 };
+    rx -= pw;
+    let b = if plan.panel_icon { Button::icon_only(Icon::Layers) } else { Button::new("Panel") };
+    let r = b.selected(panel_on).show(ui, Wid::Dock, note("panel", Rect::new(rx, y, pw, BTN_H)))?;
+    if r.hovered {
+        hover("Panel: layers, camera, targets, health (D)");
     }
-    let (badge, color) = if app.allow_goals { ("GOALS ON", t.palette.warning) } else { ("READ-ONLY", t.palette.dim) };
+    if r.clicked {
+        *toggle = true;
+    }
+    let shown = if plan.short_badge { if app.allow_goals { "GO" } else { "RO" } } else { badge };
     let f = bold(11.0);
-    let bw = ui.text_width(badge, &f) + 16.0;
-    rx -= bw + 10.0;
-    let r = Rect::new(rx, 11.0, bw, 18.0);
-    ui.border(r, 9.0, 1.0, color)?;
-    ui.text(badge, r, &f, color, Align::Center)?;
-    // the active profile: stack and source, e.g. team7-replay
-    let label = profile.map_or_else(|| "profile: detecting".to_owned(), |p| format!("profile {p}"));
-    let sw = ui.text_width(&label, &font(11.0));
-    rx -= sw + 12.0;
-    ui.text(&label, Rect::new(rx, 11.0, sw, 18.0), &font(11.0), t.palette.dim, Align::Start)?;
+    let bw = if plan.short_badge { 34.0 } else { badge_w };
+    rx -= bw + 12.0;
+    let br = note("badge", Rect::new(rx, (TOOLBAR_H - 20.0) / 2.0, bw, 20.0));
+    ui.border(br, 10.0, 1.0, color)?;
+    ui.text(shown, br, &f, color, Align::Center)?;
+    if ui.pointer().is_some_and(|p| br.contains(p)) {
+        hover(if app.allow_goals { "GOALS ON: the 2D Goal tool sends NavigateToPose" } else { "READ-ONLY: the viewer sends nothing (start with --allow-goals)" });
+    }
+    if plan.profile && rx - profile_w - 12.0 > x {
+        rx -= profile_w + 12.0;
+        ui.text(&label, note("profile", Rect::new(rx, (TOOLBAR_H - 16.0) / 2.0, profile_w, 16.0)), &font(11.0), t.palette.dim, Align::Start)?;
+    }
     Ok(())
 }
 
-/// the header strip: mission clock, 3 target slots, one status light (or the stale banner)
+/// how the targets show in the strip at a width
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotLook {
+    Full,
+    Compact,
+    Chip,
+    Hidden,
+}
+
+/// the header strip: mission clock (always), the 3 targets as slots, small chips or one count, and
+/// one status light (or the stale banner), shortened to the room left
 fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], now: Instant, w: f32) -> AureaResult<()> {
     let t = ui.theme.clone();
-    let r = Rect::new(0.0, TOOLBAR_H, w, STRIP_H);
+    let r = note("strip", Rect::new(0.0, TOOLBAR_H, w, STRIP_H));
     let stale = model.stale_for(now);
     ui.fill(r, t.palette.raised)?;
     ui.line(aurea::render::Point::new(0.0, r.bottom() - 0.5), aurea::render::Point::new(w, r.bottom() - 0.5), 1.0, t.palette.border)?;
 
-    // clock
+    // clock: the big time always; its note beside it when there is room
     let (big, small) = mission_clock(model, now);
+    let big_w = ui.text_width(&big, &bold(22.0));
+    let small_w = ui.text_width(&small, &font(11.0));
+    let with_note = w >= 700.0;
+    let clock_w = big_w + if with_note { 8.0 + small_w } else { 0.0 };
     let x = PAD;
-    ui.text("MISSION", Rect::new(x, r.y + 6.0, 140.0, 12.0), &bold(10.0), t.palette.dim, Align::Start)?;
-    ui.text(&big, Rect::new(x, r.y + 18.0, 140.0, 24.0), &bold(22.0), t.palette.text, Align::Start)?;
-    ui.text(&small, Rect::new(x + 74.0, r.y + 26.0, 160.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
+    ui.text("MISSION", note("clock", Rect::new(x, r.y + 8.0, clock_w.max(60.0), 12.0)), &bold(10.0), t.palette.dim, Align::Start)?;
+    ui.text(&big, Rect::new(x, r.y + 20.0, big_w + 4.0, 24.0), &bold(22.0), t.palette.text, Align::Start)?;
+    if with_note {
+        ui.text(&small, Rect::new(x + big_w + 8.0, r.y + 28.0, small_w + 4.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
+    } else if ui.pointer().is_some_and(|p| Rect::new(x, r.y, big_w, STRIP_H).contains(p)) {
+        hover(format!("mission {big} {small}"));
+    }
 
-    // targets: three slots
-    let mut x = 250.0f32.min(w * 0.3);
-    ui.text("TARGETS", Rect::new(x, r.y + 6.0, 140.0, 12.0), &bold(10.0), t.palette.dim, Align::Start)?;
+    // targets: what fits between the clock and a minimal status
     let mut targets: Vec<_> = found.iter().collect();
     targets.sort_by_key(|t| (!t.confirmed, t.id));
-    let slot_w = 150.0;
-    for i in 0..3 {
-        let sr = Rect::new(x, r.y + 20.0, slot_w, 30.0);
-        ui.round(sr, 6.0, t.palette.surface)?;
-        match targets.get(i) {
-            Some(tg) => {
-                let c = rgba(if tg.confirmed { pal::TARGET_CONFIRMED } else { pal::TARGET_TENTATIVE });
-                ui.circle(aurea::render::Point::new(sr.x + 12.0, sr.y + 15.0), 5.0, c)?;
-                let id = if tg.confirmed { format!("ID {}", tg.id) } else { format!("ID {}?", tg.id) };
-                ui.text(&id, Rect::new(sr.x + 22.0, sr.y + 2.0, 120.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
-                let sub = match (tg.confirmed, tg.views) {
-                    (true, _) => format!("({:.2}, {:.2})", tg.x, tg.y),
-                    (false, Some(v)) => format!("({:.2}, {:.2}) {v}v", tg.x, tg.y),
-                    (false, None) => format!("({:.2}, {:.2})", tg.x, tg.y),
-                };
-                ui.text(&sub, Rect::new(sr.x + 22.0, sr.y + 15.0, 126.0, 13.0), &font(11.0), t.palette.dim, Align::Start)?;
+    let status_min = if w >= SHEET { 140.0 } else { 100.0 };
+    let tx = x + clock_w + 24.0;
+    let room = w - tx - status_min - 2.0 * PAD;
+    let look = if room >= 3.0 * 158.0 {
+        SlotLook::Full
+    } else if room >= 3.0 * 72.0 {
+        SlotLook::Compact
+    } else if room >= 92.0 {
+        SlotLook::Chip
+    } else {
+        SlotLook::Hidden
+    };
+    let mut x = tx;
+    if look != SlotLook::Hidden {
+        ui.text("TARGETS", note("targets", Rect::new(x, r.y + 8.0, 80.0, 12.0)), &bold(10.0), t.palette.dim, Align::Start)?;
+    }
+    let full_text = |tg: &Target| {
+        let state = if tg.confirmed { "confirmed".to_owned() } else { tg.views.map_or("tentative".to_owned(), |v| format!("tentative, {v} views")) };
+        format!("ID {} at ({:.2}, {:.2}) {state}", tg.id, tg.x, tg.y)
+    };
+    let dot = |tg: &Target| rgba(if tg.confirmed { pal::TARGET_CONFIRMED } else { pal::TARGET_TENTATIVE });
+    match look {
+        SlotLook::Full | SlotLook::Compact => {
+            let slot_w = if look == SlotLook::Full { 150.0 } else { 64.0 };
+            for i in 0..3 {
+                let sr = note("slot", Rect::new(x, r.y + 22.0, slot_w, 28.0));
+                ui.round(sr, 6.0, t.palette.surface)?;
+                match targets.get(i) {
+                    Some(tg) => {
+                        ui.circle(aurea::render::Point::new(sr.x + 12.0, sr.y + 14.0), 5.0, dot(tg))?;
+                        let id = if tg.confirmed { format!("ID {}", tg.id) } else { format!("ID {}?", tg.id) };
+                        if look == SlotLook::Full {
+                            ui.text_clipped(&id, Rect::new(sr.x + 24.0, sr.y + 1.0, slot_w - 28.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
+                            let sub = match (tg.confirmed, tg.views) {
+                                (false, Some(v)) => format!("({:.2}, {:.2}) {v}v", tg.x, tg.y),
+                                _ => format!("({:.2}, {:.2})", tg.x, tg.y),
+                            };
+                            ui.text_clipped(&sub, Rect::new(sr.x + 24.0, sr.y + 14.0, slot_w - 28.0, 13.0), &font(11.0), t.palette.dim, Align::Start)?;
+                        } else {
+                            ui.text_clipped(&id, Rect::new(sr.x + 22.0, sr.y + 7.0, slot_w - 24.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
+                        }
+                        if ui.pointer().is_some_and(|p| sr.contains(p)) {
+                            hover(full_text(tg));
+                        }
+                    }
+                    None => {
+                        let empty = if look == SlotLook::Full { format!("target {}", i + 1) } else { "-".to_owned() };
+                        ui.text_clipped(&empty, Rect::new(sr.x + 12.0, sr.y + 7.0, slot_w - 16.0, 14.0), &font(12.0), t.palette.faint, Align::Start)?;
+                    }
+                }
+                x += slot_w + 8.0;
             }
-            None => {
-                ui.text(&format!("target {}", i + 1), Rect::new(sr.x + 12.0, sr.y + 8.0, 120.0, 14.0), &font(12.0), t.palette.faint, Align::Start)?;
+            if targets.len() > 3 {
+                ui.text(&format!("+{}", targets.len() - 3), note("more", Rect::new(x, r.y + 29.0, 28.0, 14.0)), &font(11.0), t.palette.dim, Align::Start)?;
+                x += 32.0;
             }
         }
-        x += slot_w + 8.0;
-    }
-    if targets.len() > 3 {
-        ui.text(&format!("+{}", targets.len() - 3), Rect::new(x, r.y + 28.0, 40.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
-        x += 30.0;
+        SlotLook::Chip => {
+            let confirmed = targets.iter().filter(|t| t.confirmed).count();
+            let chip = note("chip", Rect::new(x, r.y + 22.0, 92.0, 28.0));
+            ui.round(chip, 14.0, t.palette.surface)?;
+            let c = if confirmed > 0 { rgba(pal::TARGET_CONFIRMED) } else if targets.is_empty() { t.palette.faint } else { rgba(pal::TARGET_TENTATIVE) };
+            ui.circle(aurea::render::Point::new(chip.x + 14.0, chip.y + 14.0), 5.0, c)?;
+            ui.text(&format!("{confirmed}/3 found"), Rect::new(chip.x + 24.0, chip.y + 7.0, 64.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
+            if ui.pointer().is_some_and(|p| chip.contains(p)) {
+                hover(if targets.is_empty() { "no targets yet".to_owned() } else { targets.iter().map(|t| full_text(t)).collect::<Vec<_>>().join("; ") });
+            }
+            x += 92.0 + 8.0;
+        }
+        SlotLook::Hidden => {}
     }
 
-    // status light, or the banner when nothing comes
-    let x = (x + 16.0).max(w - 360.0).min(w - 200.0).max(x + 8.0);
-    let sr = Rect::new(x, r.y + 14.0, (w - x - PAD).max(80.0), 30.0);
-    let (wall, _) = (wall_secs(), ());
-    let (ros_now, _) = model.ros_now(now, wall);
+    // status light, or the banner when nothing comes; shortened to the room
+    let sx = (x + 8.0).max(w - 360.0).min(w - PAD - status_min).max(x);
+    let sr = note("status_light", Rect::new(sx, r.y + 14.0, (w - sx - PAD).max(0.0), 30.0));
+    let (ros_now, _) = model.ros_now(now, wall_secs());
     let (level, text) = health::summary(model, now, ros_now);
-    if stale.is_some() {
+    let short = match stale {
+        Some(d) => format!("no data {}", human_age(d)),
+        None => text.split(',').next().unwrap_or(&text).to_owned(),
+    };
+    if stale.is_some() && sr.width > 0.0 {
         ui.round(sr, 6.0, t.palette.danger.with_alpha(60))?;
         ui.border(sr, 6.0, 1.0, t.palette.danger)?;
     }
-    let c = level_color(&t, level);
-    ui.circle(aurea::render::Point::new(sr.x + 14.0, sr.y + 15.0), 6.0, c)?;
-    ui.text_clipped(&text, Rect::new(sr.x + 26.0, sr.y + 7.0, sr.width - 32.0, 16.0), &if stale.is_some() { bold(12.0) } else { font(12.0) }, t.palette.text, Align::Start)?;
+    if sr.width >= 20.0 {
+        ui.circle(aurea::render::Point::new(sr.x + 14.0, sr.y + 15.0), 6.0, level_color(&t, level))?;
+    }
+    let f = if stale.is_some() { bold(12.0) } else { font(12.0) };
+    let tr = Rect::new(sr.x + 26.0, sr.y + 7.0, (sr.width - 32.0).max(0.0), 16.0);
+    let shown = if ui.text_width(&text, &f) <= tr.width { &text } else { &short };
+    if tr.width > 8.0 {
+        ui.text_clipped(shown, tr, &f, t.palette.text, Align::Start)?;
+    }
+    if ui.pointer().is_some_and(|p| sr.contains(p)) {
+        hover(text.clone());
+    }
     Ok(())
 }
 
@@ -536,6 +794,15 @@ fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32,
         if input.hovered {
             ui.round(row, 5.0, t.palette.hover)?;
         }
+        // the full name and topic in the status bar, whatever the row had to cut
+        if ui.pointer().is_some_and(|p| row.contains(p)) {
+            let bound = match (&spec.binding, topic.as_deref()) {
+                (Binding::Pinned(p), _) => format!("pinned {p}"),
+                (Binding::Auto, Some(t)) => format!("auto: {t}"),
+                (Binding::Auto, None) => "auto: nothing published".to_owned(),
+            };
+            hover(format!("{}: {bound}", info.name));
+        }
         let mut on = spec.on;
         let check = Checkbox::new(&mut on).show(ui, Wid::Check(i as u8), Rect::new(x + 6.0, y + 3.5, 18.0, 18.0))?;
         if input.clicked && !check.clicked {
@@ -552,7 +819,8 @@ fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32,
         tb4_draw::paint_prims(ui.ctx, &symbol)?;
         let name_c = if on { t.palette.text } else { t.palette.dim };
         let name_x = x + 62.0;
-        let name_w = (w * 0.42 - 62.0).max(40.0);
+        // names get half the row; the topic picker the rest
+        let name_w = (w * 0.5 - 62.0).clamp(40.0, 130.0);
         ui.text_clipped(info.name, Rect::new(name_x, y + 4.0, name_w, 16.0), &font(13.0), name_c, Align::Start)?;
 
         // the topic picker, or the legend for layers without a topic
@@ -760,19 +1028,53 @@ fn health_rows(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, now: Instant, x: 
     Ok(y)
 }
 
+/// the status bar: fields by priority (time, cursor, domain, frame, slow draws), each kept only if
+/// it fits; on the right the full text of what the pointer is over, a message, or the hints
 fn status_bar(ui: &mut aurea::ui::Ui<'_, Wid>, app: &App, model: &Model, now: Instant, domain: &str, r: Rect) -> AureaResult<()> {
     let t = ui.theme.clone();
     ui.fill(r, t.palette.surface)?;
+    let f = font(11.0);
     let (ros, sim) = model.ros_now(now, wall_secs());
-    let time = if sim { format!("sim {ros:.1} s") } else { "wall clock".to_owned() };
-    let cursor = app.cursor.map_or_else(String::new, |(x, y)| format!("   x {x:.2}  y {y:.2}"));
-    let slow = if app.draw_time() > 0.04 { format!("   map draw {:.0} ms", app.draw_time() * 1000.0) } else { String::new() };
-    let left = format!("{time}   ROS_DOMAIN_ID {domain}   frame map{cursor}{slow}");
-    let lw = ui.text_width(&left, &font(11.0));
-    ui.text(&left, Rect::new(PAD, r.y + 5.0, lw, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
-    let msg = app.message(now).map_or_else(|| crate::app::HINTS.to_owned(), str::to_owned);
-    let mx = PAD + lw + 24.0;
-    ui.text_clipped(&msg, Rect::new(mx, r.y + 5.0, (r.width - mx - PAD).max(0.0), 14.0), &font(11.0), if app.message(now).is_some() { t.palette.text } else { t.palette.faint }, Align::End)?;
+    // (priority, text): lower numbers stay longest; shown in this order
+    let mut fields: Vec<(u8, String)> = vec![(0, if sim { format!("sim {ros:.1} s") } else { "wall clock".to_owned() }), (2, format!("ROS_DOMAIN_ID {domain}")), (3, "frame map".into())];
+    if let Some((x, y)) = app.cursor {
+        fields.push((1, format!("x {x:.2}  y {y:.2}")));
+    }
+    if app.draw_time() > 0.04 {
+        fields.push((4, format!("map draw {:.0} ms", app.draw_time() * 1000.0)));
+    }
+    let gap = 16.0;
+    let room = r.width - 2.0 * PAD;
+    let mut keep: Vec<(u8, String, f32)> = Vec::new();
+    let mut used = 0.0;
+    let mut by_priority = fields.clone();
+    by_priority.sort_by_key(|(p, _)| *p);
+    for (p, s) in by_priority {
+        let fw = ui.text_width(&s, &f);
+        if used + fw + gap <= room * 0.6 || keep.is_empty() {
+            used += fw + gap;
+            keep.push((p, s, fw));
+        }
+    }
+    let mut x = PAD;
+    for (_, s) in &fields {
+        if let Some((_, _, fw)) = keep.iter().find(|(_, k, _)| k == s) {
+            let tr = Rect::new(x, r.y + 5.0, fw.min(r.right() - x - PAD).max(0.0), 14.0);
+            ui.text_clipped(s, tr, &f, t.palette.dim, Align::Start)?;
+            x += fw + gap;
+        }
+    }
+    let over = HOVER.with(|h| h.borrow().clone());
+    let (msg, c) = match (over, app.message(now)) {
+        (Some(o), _) => (o, t.palette.text),
+        (None, Some(m)) => (m.to_owned(), t.palette.text),
+        (None, None) => (crate::app::HINTS.to_owned(), t.palette.faint),
+    };
+    let mx = x + 8.0;
+    let mw = (r.right() - PAD - mx).max(0.0);
+    if mw > 60.0 {
+        ui.text_clipped(&msg, Rect::new(mx, r.y + 5.0, mw, 14.0), &f, c, Align::End)?;
+    }
     Ok(())
 }
 
@@ -872,7 +1174,8 @@ mod tests {
         let p = px[(sy + a.y) as usize * w as usize + (sx + a.x) as usize];
         assert!(near(p, pal::FREE, 2), "free {:?}", rgb(p));
         // a confirmed target fills the first header slot (green dot)
-        let dot = px[(TOOLBAR_H + 20.0 + 15.0) as usize * w as usize + 250 + 12];
+        let slot = layout_rects().into_iter().find(|(n, _)| *n == "slot").expect("target slots").1;
+        let dot = px[(slot.y + 14.0) as usize * w as usize + (slot.x + 12.0) as usize];
         assert!(near(dot, pal::TARGET_CONFIRMED, 30), "slot dot {:?}", rgb(dot));
 
         // click the "Global costmap" row: it turns on and the floor gets tinted
@@ -1021,6 +1324,104 @@ mod tests {
         draw(&mut chrome2, &mut app, &m, w, h, now);
         let px = draw(&mut chrome2, &mut app, &m, w, h, now);
         assert!(!bar(&px, chrome2.layout.bodies[2].unwrap()), "no bar when two targets fit");
+    }
+
+    /// the window at the widths the narrow-layout work is checked at (and two short heights)
+    pub(crate) const SIZES: [(u32, u32); 8] = [(1440, 800), (1100, 800), (900, 800), (700, 800), (520, 800), (400, 800), (900, 500), (700, 500)];
+
+    /// a model with everything: targets, camera, running mission, fresh data
+    fn full_model(now: Instant) -> Model {
+        let mut m = team7_model();
+        for i in 0..30 {
+            let t = now - Duration::from_millis(50 * i);
+            m.tick(Topic::Odom, t);
+            m.tick(Topic::Tf, t);
+            m.tick(Topic::Scan, t);
+        }
+        let rgba: Vec<u8> = (0..120 * 90).flat_map(|i| [(i % 120 * 2) as u8, 90, 160, 255]).collect();
+        m.put("/team7/aruco/debug", crate::model::Feed::Image(crate::model::CameraFrame { width: 120, height: 90, rgba, seq: 1, at: now }), now);
+        m.camera_topic = Some("/team7/aruco/debug".into());
+        m
+    }
+
+    /// TEAM7_VIZ_NARROW=dir TEAM7_VIZ_TAG=before cargo test --release narrow_widths -- --ignored:
+    /// writes ux_narrow_<width>[x<height>]_<tag>.png for each size
+    #[test]
+    #[ignore]
+    fn narrow_widths() {
+        let Some(dir) = std::env::var_os("TEAM7_VIZ_NARROW") else { return };
+        let tag = std::env::var("TEAM7_VIZ_TAG").unwrap_or_else(|_| "after".into());
+        let now = Instant::now();
+        let m = full_model(now);
+        let save = |px: &[u32], w: u32, h: u32, name: String| {
+            let rgba = crate::shots::rgba_of(px);
+            let file = std::fs::File::create(std::path::Path::new(&dir).join(name)).unwrap();
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+        };
+        for (w, h) in SIZES {
+            let mut chrome = Chrome::new("79".into(), None);
+            chrome.set_run_dir(None);
+            chrome.profile = Some("team7-replay".into());
+            let mut app = App::new(false);
+            draw(&mut chrome, &mut app, &m, w, h, now);
+            let px = draw(&mut chrome, &mut app, &m, w, h, now);
+            let size = if h == 800 { format!("{w}") } else { format!("{w}x{h}") };
+            save(&px, w, h, format!("ux_narrow_{size}_{tag}.png"));
+            // narrow windows: the drawer (or the sheet) opened over the map
+            if (w as f32) < NARROW && tag == "after" {
+                chrome.drawer_open = true;
+                draw(&mut chrome, &mut app, &m, w, h, now);
+                let px = draw(&mut chrome, &mut app, &m, w, h, now);
+                save(&px, w, h, format!("ux_narrow_{size}_drawer_{tag}.png"));
+            }
+        }
+    }
+
+    #[test]
+    fn every_size_lays_out_inside_the_window() {
+        let now = Instant::now();
+        let m = full_model(now);
+        let sizes = SIZES.iter().copied().chain([(320, 300), (1920, 1080), (260, 200)]);
+        for (w, h) in sizes {
+            for drawer in [false, true] {
+                let mut chrome = Chrome::new("79".into(), None);
+                chrome.set_run_dir(None);
+                chrome.profile = Some("team7-replay".into());
+                chrome.drawer_open = drawer;
+                let mut app = App::new(true);
+                draw(&mut chrome, &mut app, &m, w, h, now);
+                draw(&mut chrome, &mut app, &m, w, h, now);
+                let rects = layout_rects();
+                assert!(rects.len() > 10, "{w}x{h}: only {} rects", rects.len());
+                for (name, r) in rects {
+                    let ok = r.width >= 0.0 && r.height >= 0.0 && r.x >= -0.5 && r.y >= -0.5 && r.right() <= w as f32 + 0.5 && r.bottom() <= h as f32 + 0.5;
+                    assert!(ok, "{w}x{h} drawer {drawer}: {name} {r:?} is negative or outside");
+                }
+                // the map always has room, the clock is always there
+                assert!(chrome.map_area.width >= (w as f32 * 0.4).min(300.0), "{w}x{h}: map {:?}", chrome.map_area);
+                assert!(layout_rects().iter().any(|(n, _)| *n == "clock"));
+                // under the narrow width the dock never takes width from the map
+                if (w as f32) < NARROW {
+                    assert_eq!(chrome.map_area.width, w as f32);
+                    assert_eq!(chrome.overlay.is_some(), drawer);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolbar_collapses_step_by_step() {
+        let wide = plan_toolbar(1440.0, 140.0, 84.0);
+        assert_eq!((wide.tools, wide.view, wide.profile), (Look::Text, Look::Text, true));
+        let mid = plan_toolbar(900.0, 140.0, 84.0);
+        assert_eq!(mid.view, Look::Icon);
+        let narrow = plan_toolbar(400.0, 140.0, 84.0);
+        assert_eq!((narrow.tools, narrow.view, narrow.profile), (Look::Icon, Look::Menu, false));
+        let tiny = plan_toolbar(260.0, 140.0, 84.0);
+        assert!(tiny.short_badge && tiny.panel_icon);
     }
 
     /// cargo test --release frame_cost -- --ignored --nocapture: full window frames, recorded and

@@ -181,7 +181,7 @@ struct Menus {
 
 impl Menus {
     fn sync(&mut self, chrome: &Chrome, app: &App) {
-        let now = (chrome.dock_open, app.camera.follow, app.tool, chrome.profile.clone());
+        let now = (chrome.panel_shown(), app.camera.follow, app.tool, chrome.profile.clone());
         if self.last.as_ref() == Some(&now) {
             return;
         }
@@ -294,7 +294,7 @@ fn main() -> AureaResult<()> {
     let panel = view.add_check_item("Panel (D)", true, move || {
         if !syncing() {
             let mut c = c.borrow_mut();
-            c.dock_open = !c.dock_open;
+            c.toggle_panel();
             redraw();
         }
     })?;
@@ -470,7 +470,12 @@ fn main() -> AureaResult<()> {
         }
         let (Ok(mut c), Ok(mut a)) = (chrome.try_borrow_mut(), app.try_borrow_mut()) else { return };
         let area = c.map_area;
-        let in_map = |x: f64, y: f64| area.contains(aurea::render::Point::new(x as f32, y as f32));
+        // the map takes points inside it that the drawer does not cover
+        let (map_area, overlay) = (c.map_area, c.overlay);
+        let in_map = |x: f64, y: f64| {
+            let p = aurea::render::Point::new(x as f32, y as f32);
+            map_area.contains(p) && overlay.is_none_or(|o| !o.contains(p))
+        };
         let local = |x: f64, y: f64| (x - f64::from(area.x), y - f64::from(area.y));
         let mut changed = match e {
             WindowEvent::KeyInput { key, pressed: true, modifiers } => {

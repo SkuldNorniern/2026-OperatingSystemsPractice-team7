@@ -14,6 +14,9 @@ use tb4_viewer::scene::colors;
 
 const W: u32 = 1280;
 const H: u32 = 820;
+/// the canvas size request is a minimum in GTK: keep it small so a tiling compositor can shrink the window
+const MIN_W: u32 = 320;
+const MIN_H: u32 = 240;
 
 fn main() -> AureaResult<()> {
     let opts = Options::parse(std::env::args().skip(1)).unwrap_or_else(|e| {
@@ -32,12 +35,13 @@ fn main() -> AureaResult<()> {
     let viewer = Rc::new(RefCell::new(Viewer::new(app)));
 
     let mut window = Window::new("tb4 sim viewer", W as i32, H as i32)?;
-    let canvas = Canvas::new(W, H, RendererBackend::Cpu)?;
+    let canvas = Canvas::new(MIN_W, MIN_H, RendererBackend::Cpu)?;
     let [r, g, b, _] = colors::BACKGROUND;
     canvas.set_background_color(Color::rgb(r, g, b));
     let mut layout = Stack::new(Orientation::Vertical)?;
     layout.set_padding(0)?;
-    layout.add(canvas.clone())?;
+    // weight 1: the canvas takes all the room the window gets (weight 0 packs it at its minimum height)
+    layout.add_weighted(canvas.clone(), 1.0)?;
     window.set_content(layout)?;
     let window = Rc::new(window);
     let started = Instant::now();

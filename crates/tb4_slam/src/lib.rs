@@ -4,6 +4,7 @@ mod map;
 mod matcher;
 pub mod se2;
 pub mod sim;
+pub mod smooth;
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -37,6 +38,12 @@ pub struct SlamParams {
     pub log_odds_miss: f32,
     pub log_odds_clamp: f32,
     pub occupied_threshold: f32,
+    /// published map only (`published_map`): a cell turns occupied above `publish_occupied_on` and,
+    /// once published occupied, stays so while above `publish_occupied_keep` (hysteresis against
+    /// flicker at wall edges). Keep it > 0: cells a redraw no longer hits fall to <= 0 and clear.
+    /// The scan matcher keeps using `occupied_threshold`.
+    pub publish_occupied_on: f32,
+    pub publish_occupied_keep: f32,
     pub free_threshold: f32,
     pub map_margin: i32,
     pub keyframe_dist: f64,
@@ -67,6 +74,8 @@ pub struct SlamParams {
     pub icp: bool,
     pub icp_voxel: f64,
     pub icp_normal_radius: f64,
+    /// icp map points need a line-like neighbourhood: minor / major spread ratio at most this
+    pub icp_max_flatness: f64,
     /// icp matches against the scans of at most this many keyframes nearest to the pose,
     /// so its point map does not grow with the run
     pub icp_max_keyframes: usize,
@@ -91,6 +100,8 @@ impl Default for SlamParams {
             log_odds_miss: -0.25,
             log_odds_clamp: 3.5,
             occupied_threshold: 0.6,
+            publish_occupied_on: 0.6,
+            publish_occupied_keep: 0.3,
             free_threshold: -0.2,
             map_margin: 10,
             keyframe_dist: 0.3,
@@ -115,6 +126,7 @@ impl Default for SlamParams {
             icp: true,
             icp_voxel: 0.025,
             icp_normal_radius: 0.12,
+            icp_max_flatness: 0.1,
             icp_max_keyframes: 10,
         }
     }
@@ -183,6 +195,8 @@ pub struct Slam {
     update_ms_sum: f64,
     /// point map for icp, tagged with (keyframe count, loop count) it was built at
     points: Option<((Vec<usize>, u64), PointMap)>,
+    /// last grid handed out by `published_map`, the hysteresis state
+    published: Option<Grid>,
 }
 
 fn ms(t: Instant) -> f64 {
@@ -217,6 +231,7 @@ impl Slam {
             stats: SlamStats::default(),
             update_ms_sum: 0.0,
             points: None,
+            published: None,
         }
     }
 
@@ -242,6 +257,20 @@ impl Slam {
 
     pub fn loop_edges(&self) -> Vec<(usize, usize)> {
         self.edges.iter().filter(|e| e.is_loop).map(|e| (e.i, e.j)).collect()
+    }
+
+    /// Grid for publishing: like `occupancy`, with occupied-cell hysteresis against the previous call.
+    pub fn published_map(&mut self) -> Grid {
+        let p = &self.p;
+        let g = self.map.to_grid_hysteresis(
+            p.publish_occupied_on,
+            p.publish_occupied_keep.min(p.publish_occupied_on),
+            p.free_threshold,
+            p.map_margin,
+            self.published.as_ref(),
+        );
+        self.published = Some(g.clone());
+        g
     }
 
     pub fn occupancy(&self) -> Grid {
@@ -370,7 +399,7 @@ impl Slam {
                     s.points.iter().map(move |&(x, y)| apply(t, (x as f64, y as f64)))
                 })
             });
-            let map = PointMap::new(pts, self.p.icp_voxel, self.p.icp_normal_radius);
+            let map = PointMap::new(pts, self.p.icp_voxel, self.p.icp_normal_radius, self.p.icp_max_flatness);
             self.points = Some((tag, map));
         }
         let map = &self.points.as_ref().unwrap().1;

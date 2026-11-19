@@ -13,8 +13,9 @@ pub struct PointMap {
 }
 
 impl PointMap {
-    /// `voxel`: one point kept per voxel (averaged). normals from neighbours within `normal_r`
-    pub fn new(points: impl Iterator<Item = (f64, f64)>, voxel: f64, normal_r: f64) -> Self {
+    /// `voxel`: one point kept per voxel (averaged). normals from neighbours within `normal_r`,
+    /// only where the neighbourhood is line-like: minor / major eigenvalue <= `max_flatness`
+    pub fn new(points: impl Iterator<Item = (f64, f64)>, voxel: f64, normal_r: f64, max_flatness: f64) -> Self {
         let mut acc: HashMap<(i32, i32), (f64, f64, u32)> = HashMap::new();
         for (x, y) in points {
             let e = acc.entry(((x / voxel).floor() as i32, (y / voxel).floor() as i32)).or_insert((0.0, 0.0, 0));
@@ -57,7 +58,7 @@ impl PointMap {
             let tr = cxx + cyy;
             let disc = ((cxx - cyy).powi(2) / 4.0 + cxy * cxy).sqrt();
             // only line-like neighbourhoods give a usable normal
-            if tr <= 0.0 || (tr / 2.0 - disc) / (tr / 2.0 + disc) > 0.1 {
+            if tr <= 0.0 || (tr / 2.0 - disc) / (tr / 2.0 + disc) > max_flatness {
                 continue;
             }
             let ang = 0.5 * (2.0 * cxy).atan2(cxx - cyy);
@@ -180,7 +181,7 @@ mod tests {
     #[test]
     fn recovers_small_offset() {
         let truth = Pose2::new(2.0, 1.5, 0.3);
-        let map = PointMap::new(room_pts(Pose2::new(3.0, 2.0, 0.0)).into_iter().map(|(x, y)| (x + 3.0, y + 2.0)), 0.025, 0.12);
+        let map = PointMap::new(room_pts(Pose2::new(3.0, 2.0, 0.0)).into_iter().map(|(x, y)| (x + 3.0, y + 2.0)), 0.025, 0.12, 0.1);
         assert!(map.len() > 200);
         let start = Pose2::new(2.04, 1.47, 0.32);
         let p = icp(&map, &room_pts(truth), start, &IcpParams::default()).unwrap();

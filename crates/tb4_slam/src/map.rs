@@ -212,6 +212,33 @@ impl LogOddsMap {
         self.render(b, |v| if v > occ { 100 } else { 0 })
     }
 
+    /// Like `to_grid`, with hysteresis on the occupied state: a cell turns occupied above `occ`,
+    /// and a cell occupied in `prev` stays occupied while above `keep` (<= occ).
+    pub fn to_grid_hysteresis(&self, occ: f32, keep: f32, free: f32, margin: i32, prev: Option<&Grid>) -> Grid {
+        let mut g = self.to_grid(occ, free, margin);
+        let Some(prev) = prev else { return g };
+        let res = self.res;
+        let cell0 = |m: &GridMeta| ((m.origin_x / res).round() as i32, (m.origin_y / res).round() as i32);
+        let (gx, gy) = cell0(&g.meta);
+        let (px, py) = cell0(&prev.meta);
+        let (pw, ph) = (prev.meta.width as i32, prev.meta.height as i32);
+        let gw = g.meta.width as i32;
+        for (i, out) in g.data.iter_mut().enumerate() {
+            if *out == 100 {
+                continue;
+            }
+            let (cx, cy) = (gx + i as i32 % gw, gy + i as i32 / gw);
+            let (x, y) = (cx - px, cy - py);
+            if x < 0 || y < 0 || x >= pw || y >= ph || prev.data[(y * pw + x) as usize] != 100 {
+                continue;
+            }
+            if self.get(cx, cy) > keep {
+                *out = 100;
+            }
+        }
+        g
+    }
+
     pub fn to_grid(&self, occ: f32, free: f32, margin: i32) -> Grid {
         // the exported grid always covers EXPORT_ANCHOR_M around the map origin (start pose),
         // so its origin does not move each time the observed area grows inside that square
@@ -253,6 +280,28 @@ mod tests {
         assert_eq!(g.get(c), 100);
         let c = g.world_to_cell(0.5, 0.01).unwrap();
         assert_eq!(g.get(c), 0);
+    }
+
+    #[test]
+    fn hysteresis_keeps_published_walls_until_clearly_missed() {
+        let mut m = LogOddsMap::new(0.05, 0.85, 0.25, 3.5);
+        let wall = (1.0, 0.0);
+        let at = |g: &Grid| g.get(g.world_to_cell(1.01, 0.01).unwrap());
+        m.insert_scan(Pose2::new(0.0, 0.0, 0.0), &[wall], 0.1, 5.0);
+        let g1 = m.to_grid_hysteresis(0.6, 0.3, -0.2, 2, None);
+        assert_eq!(at(&g1), 100);
+        // one ray through the wall cell: 0.6, no longer above the on threshold
+        m.insert_scan(Pose2::new(0.0, 0.0, 0.0), &[(2.0, 0.0)], 0.1, 5.0);
+        assert_eq!(at(&m.to_grid(0.6, -0.2, 2)), UNKNOWN);
+        let g2 = m.to_grid_hysteresis(0.6, 0.3, -0.2, 2, Some(&g1));
+        assert_eq!(at(&g2), 100);
+        // without a published history the same value is not occupied
+        assert_eq!(at(&m.to_grid_hysteresis(0.6, 0.3, -0.2, 2, None)), UNKNOWN);
+        // missed again until below keep: released, then free once below the free threshold
+        for _ in 0..2 {
+            m.insert_scan(Pose2::new(0.0, 0.0, 0.0), &[(2.0, 0.0)], 0.1, 5.0);
+        }
+        assert_ne!(at(&m.to_grid_hysteresis(0.6, 0.3, -0.2, 2, Some(&g2))), 100);
     }
 
     #[test]

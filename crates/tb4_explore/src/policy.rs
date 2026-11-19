@@ -60,6 +60,7 @@ impl Default for ExplorerParams {
                 frontier_segment_length: 1.2,
                 min_unknown_area: 1.0,
                 goal_max_unknown: 0.15,
+                min_free_fraction: 0.5,
             },
             coverage: Some({
                 let mut c = CoverageParams::default();

@@ -31,6 +31,10 @@ pub struct ExploreParams {
     /// placement walked every goal back onto the robot and the explorer waited until someone pushed
     /// it (field run 184838, 75 s; recorded costmap at 30 s: 0 goals strict, 11 with 15 %)
     pub goal_max_unknown: f64,
+    /// skip a frontier whose free side is a thin spike: share of known-free cells within 0.3 m of
+    /// its centroid below this (lidar beams through chair legs and gaps leave 1-2 cell free lines
+    /// into unknown that score like big frontiers). 0 = off
+    pub min_free_fraction: f64,
 }
 
 impl Default for ExploreParams {
@@ -47,6 +51,7 @@ impl Default for ExploreParams {
             frontier_segment_length: 0.0,
             min_unknown_area: 0.0,
             goal_max_unknown: 0.0,
+            min_free_fraction: 0.0,
         }
     }
 }
@@ -74,6 +79,25 @@ fn is_frontier(g: &Grid, c: Cell, thr: i8) -> bool {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .iter()
         .any(|(dx, dy)| g.cell_checked(x + dx, y + dy).is_some_and(|n| g.get(n) == UNKNOWN))
+}
+
+/// share of known-free cells within `radius` (m) of the centroid of `members`
+fn free_fraction(g: &Grid, members: &[usize], radius: f64, free_thr: i8) -> f64 {
+    let w = g.meta.width as usize;
+    let n = members.len() as f64;
+    let (sx, sy) = members.iter().fold((0.0, 0.0), |a, &i| (a.0 + (i % w) as f64, a.1 + (i / w) as f64));
+    let (cx, cy) = ((sx / n).round() as i64, (sy / n).round() as i64);
+    let r = (radius / g.meta.resolution).ceil() as i64;
+    let (mut all, mut free) = (0usize, 0usize);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                all += 1;
+                free += g.cell_checked(cx + dx, cy + dy).is_some_and(|c| is_free(g.get(c), free_thr)) as usize;
+            }
+        }
+    }
+    free as f64 / all.max(1) as f64
 }
 
 /// true if the unknown cells next to `members` form a closed region smaller than `area` (m^2):
@@ -189,6 +213,9 @@ pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Fro
         if p.min_unknown_area > 0.0 && unknown_pocket(g, &members, p.min_unknown_area) {
             continue;
         }
+        if p.min_free_fraction > 0.0 && free_fraction(g, &members, 0.3, p.free_threshold) < p.min_free_fraction {
+            continue;
+        }
         let to_world = |i: usize| g.cell_to_world(Cell { x: (i % w) as u32, y: (i / w) as u32 });
         let (sx, sy) = members.iter().map(|&i| to_world(i)).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
         let n = members.len() as f64;
@@ -289,6 +316,31 @@ mod tests {
             g.set(Cell { x: i, y: 0 }, 100);
         }
         g
+    }
+
+    #[test]
+    fn thin_free_spikes_are_not_frontiers() {
+        // 3 x 3 m known room around the robot, open (unknown) to the east through a 1.5 m doorway,
+        // plus a 1-cell free line (a lidar beam through a gap) running 2 m north into unknown
+        let meta = GridMeta { width: 120, height: 120, resolution: 0.05, origin_x: -1.0, origin_y: -1.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 0..60u32 {
+            for x in 0..60u32 {
+                let wall = x == 0 || y == 0 || y == 59 || (x == 59 && !(15..45).contains(&y));
+                g.set(Cell { x, y }, if wall { 100 } else { 0 });
+            }
+        }
+        for y in 59..100u32 {
+            g.set(Cell { x: 30, y }, 0);
+        }
+        let p = ExploreParams { min_frontier_cells: 3, frontier_segment_length: 1.2, ..Default::default() };
+        let spike = |f: &Frontier| f.centroid.1 > 2.2;
+        let door = |f: &Frontier| f.centroid.0 > 1.8;
+        let all = find_frontiers(&g, (0.5, 0.5), &p);
+        assert!(all.iter().any(spike) && all.iter().any(door), "both are frontiers without the filter");
+        let kept = find_frontiers(&g, (0.5, 0.5), &ExploreParams { min_free_fraction: 0.5, ..p });
+        assert!(!kept.iter().any(spike), "the 1-cell spike is filtered");
+        assert!(kept.iter().any(door), "the doorway stays");
     }
 
     #[test]

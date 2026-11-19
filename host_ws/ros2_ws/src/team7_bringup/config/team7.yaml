@@ -28,7 +28,7 @@ marker_mapper:
     edge_ratio_gate: 1.5      # ray hit near end of a surface (box face) needs ray/pnp within this factor until scale is learned
     ignore_ids: [-1]
     slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
-    slow_percent: 40.0
+    slow_percent: 60.0
     slow_hold: 2.5
     image_time_offset: 0.0    # s, add to image stamp if camera stamps are late/early
 
@@ -133,4 +133,5 @@ aruco_detector:
     max_hamming: 1            # bit errors corrected, capped per dictionary
     min_side_px: 8.0
     refine_corners: true
+    max_stripe_flips: 1       # reject 1D-barcode-like codes (chair labels read as ids 0, 341, 682, 1023); -1 = off
     debug_every: 3

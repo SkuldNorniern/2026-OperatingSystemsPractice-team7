@@ -15,13 +15,24 @@ use tb4_explore::{Coverage, CoverageParams, ExploreParams, Frontier, View, find_
 
 type Nav = NavigateToPose::Action;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Frontier,
+    View,
+    Turn,
+}
+
 struct Active {
     goal: (f64, f64),
+    kind: Kind,
+    /// ticks in a row without a frontier at this goal (frontier goals)
+    frontier_missing: u32,
     /// camera view goal: wall point it looks at
     view_target: Option<(f64, f64)>,
     handle: Option<ActionClientGoal<Nav>>,
     started: Instant,
-    progress_pose: (f64, f64),
+    /// x, y, yaw where progress was last seen
+    progress_pose: (f64, f64, f64),
     last_progress: Instant,
     cancelling: bool,
 }
@@ -38,6 +49,8 @@ struct State {
     costmap_stale: bool,
     done: bool,
     finished_exploring: bool,
+    /// look-around turns left before waiting for the map (reset when a real goal is found)
+    spins_left: u32,
     result: Option<((f64, f64), GoalStatus)>,
 }
 
@@ -54,6 +67,10 @@ struct Cfg {
     coverage: Option<CoverageParams>,
     /// take a camera view during frontier exploration if it is this close (m), 0 = only after frontiers
     view_detour: f64,
+    /// in-place turns (120 deg each) when nothing is left to explore, so SLAM gets new keyframes
+    look_around_turns: u32,
+    /// a frontier goal this close is replaced by the next one, so the robot does not stop at it
+    preempt_distance: f64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..CoverageParams::default()
         }),
         view_detour: p.f64("view_detour", 0.0),
+        look_around_turns: p.i64("look_around_turns", 3).max(0) as u32,
+        preempt_distance: p.f64("preempt_distance", 0.5),
     });
     let map_topic = p.string("coverage_map_topic", "/map");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
@@ -116,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         costmap_stale: false,
         done: false,
         finished_exploring: false,
+        spins_left: cfg.look_around_turns,
         result: None,
     }));
 
@@ -226,7 +246,9 @@ fn tick(
             if let Some(t) = s.active.take().and_then(|a| a.view_target) {
                 s.visited_views.push(t);
             }
-            s.next_goal_after = Instant::now() + cfg.retry_delay;
+            // field runs lost about 5 s at every goal: chain straight on after a success,
+            // wait only after a failure so the map / blacklist can change first
+            s.next_goal_after = if status == GoalStatus::Succeeded { Instant::now() } else { Instant::now() + cfg.retry_delay };
             log_info!(log, "goal ({:.2}, {:.2}) finished: {status:?}", goal.0, goal.1);
             if !matches!(status, GoalStatus::Succeeded | GoalStatus::Canceled) {
                 s.blacklist.push((goal, Instant::now()));
@@ -289,8 +311,10 @@ fn tick(
     if let Some(a) = s.active.as_mut() {
         // Moving around a wall can increase distance to the goal. Measure real
         // displacement instead of treating a valid detour as lack of progress.
-        if robot.distance_to(a.progress_pose.0, a.progress_pose.1) > cfg.progress_epsilon {
-            a.progress_pose = (robot.x, robot.y);
+        // turning counts as progress too: a look-around turn, or the turn toward a goal behind
+        let turned = (robot.yaw - a.progress_pose.2).sin().atan2((robot.yaw - a.progress_pose.2).cos()).abs() > 0.3;
+        if robot.distance_to(a.progress_pose.0, a.progress_pose.1) > cfg.progress_epsilon || turned {
+            a.progress_pose = (robot.x, robot.y, robot.yaw);
             a.last_progress = now;
         }
         if !a.cancelling && a.handle.is_some() {
@@ -316,40 +340,88 @@ fn tick(
             }
         }
     }
-    if s.active.is_some() || now < s.next_goal_after {
-        return;
-    }
-
-    let detour = views.first().filter(|v| v.distance <= cfg.view_detour);
-    let (goal, yaw, view_target) = if let Some(v) = detour {
-        log_info!(log, "new goal ({:.2}, {:.2}) camera view detour, {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
-        ((v.x, v.y), v.yaw, Some(v.target))
-    } else if let Some(f) = pick() {
-        let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
-        log_info!(log, "new goal ({:.2}, {:.2}) yaw={yaw:.2}, frontier {:.1} m, free-space path {:.1} m, score {:.2}", f.goal.0, f.goal.1, f.size_m, f.distance, f.score);
-        (f.goal, yaw, None)
-    } else if let Some(v) = views.first() {
-        log_info!(log, "new goal ({:.2}, {:.2}) camera view of {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
-        ((v.x, v.y), v.yaw, Some(v.target))
-    } else {
-        if !s.finished_exploring {
-            log_info!(log, "no reachable frontiers or unseen walls ({} wall cells seen); waiting for map updates / blacklist expiry", s.coverage.seen_count());
-            s.finished_exploring = true;
+    // Keep moving: a frontier goal whose frontier was already seen on the way, or one that is almost
+    // reached, is replaced by the next goal at once. The navigator takes the new goal without
+    // stopping (it keeps the MPPI warm start), so the robot does not halt at every frontier.
+    let mut preempt = None;
+    if abandon.is_none()
+        && let Some(a) = s.active.as_mut().filter(|a| a.kind == Kind::Frontier && !a.cancelling && a.handle.is_some())
+    {
+        if frontiers.iter().any(|f| dist(f.goal, a.goal) < cfg.explore.blacklist_radius) {
+            a.frontier_missing = 0;
+        } else {
+            a.frontier_missing += 1;
         }
-        return;
+        if a.frontier_missing >= 2 {
+            preempt = Some((a.goal, "its frontier is explored"));
+        } else if robot.distance_to(a.goal.0, a.goal.1) < cfg.preempt_distance {
+            preempt = Some((a.goal, "almost there"));
+        }
+    }
+    let choice = if let Some((current, why)) = preempt {
+        let mut exclude = blacklist.clone();
+        exclude.push(current);
+        let Some(f) = select_goal_with_heading(&frontiers, &exclude, &cfg.explore, (robot.x, robot.y), robot.yaw, cfg.turn_weight) else {
+            return; // nothing else to go to: finish this one
+        };
+        let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
+        log_info!(log, "switching goal ({:.2}, {:.2}) -> ({:.2}, {:.2}): {why}; frontier {:.1} m, free-space path {:.1} m, score {:.2}",
+            current.0, current.1, f.goal.0, f.goal.1, f.size_m, f.distance, f.score);
+        (f.goal, yaw, None, Kind::Frontier)
+    } else {
+        if s.active.is_some() || now < s.next_goal_after {
+            return;
+        }
+        let detour = views.first().filter(|v| v.distance <= cfg.view_detour);
+        if let Some(v) = detour {
+            log_info!(log, "new goal ({:.2}, {:.2}) camera view detour, {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
+            ((v.x, v.y), v.yaw, Some(v.target), Kind::View)
+        } else if let Some(f) = pick() {
+            let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
+            log_info!(log, "new goal ({:.2}, {:.2}) yaw={yaw:.2}, frontier {:.1} m, free-space path {:.1} m, score {:.2}", f.goal.0, f.goal.1, f.size_m, f.distance, f.score);
+            (f.goal, yaw, None, Kind::Frontier)
+        } else if let Some(v) = views.first() {
+            log_info!(log, "new goal ({:.2}, {:.2}) camera view of {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
+            ((v.x, v.y), v.yaw, Some(v.target), Kind::View)
+        } else if s.spins_left > 0 {
+            // Standing still, SLAM adds no keyframes and the map never grows, so the explorer would wait
+            // forever (field run 20261118_184838 sat 75 s at the start). Turn in place to see more.
+            s.spins_left -= 1;
+            let yaw = robot.yaw + 2.0 * std::f64::consts::FRAC_PI_3;
+            log_info!(log, "nothing to explore yet: turning in place to look around ({} turns left)", s.spins_left);
+            ((robot.x, robot.y), yaw, None, Kind::Turn)
+        } else {
+            if !s.finished_exploring {
+                log_info!(log, "no reachable frontiers or unseen walls ({} wall cells seen); waiting for map updates / blacklist expiry", s.coverage.seen_count());
+                s.finished_exploring = true;
+            }
+            return;
+        }
     };
+    let (goal, yaw, view_target, kind) = choice;
     s.finished_exploring = false;
+    if kind != Kind::Turn {
+        s.spins_left = cfg.look_around_turns;
+    }
 
     let mut msg = NavigateToPose::Goal::default();
     msg.pose.header.frame_id = cfg.map_frame.clone();
     msg.pose.pose = pose_msg(goal.0, goal.1, yaw);
+    if kind == Kind::Frontier {
+        // the lidar sees all round: no stop to turn to a heading at a frontier
+        msg.behavior_tree = "xy_only".to_owned();
+    }
     let _ = pubs.goal.publish(&msg.pose);
+    // a preempted goal is simply replaced: the navigator aborts it when it takes the new one,
+    // and its result no longer matches the active goal, so it is not blacklisted
     s.active = Some(Active {
         goal,
+        kind,
+        frontier_missing: 0,
         view_target,
         handle: None,
         started: now,
-        progress_pose: (robot.x, robot.y),
+        progress_pose: (robot.x, robot.y, robot.yaw),
         last_progress: now,
         cancelling: false,
     });

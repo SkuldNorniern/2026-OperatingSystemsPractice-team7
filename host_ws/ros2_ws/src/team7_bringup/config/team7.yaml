@@ -39,9 +39,8 @@ explorer:
     base_frame: base_link
     period: 1.0
     goal_timeout: 120.0
-    progress_timeout: 30.0
+    progress_timeout: 15.0    # s without 0.1 m of movement: give the goal up (field runs lost 30 s per stuck goal)
     progress_epsilon: 0.1
-    retry_delay: 5.0
     blacklist_duration: 45.0
     turn_weight: 0.5
     goal_standoff: 0.3
@@ -60,6 +59,9 @@ explorer:
     view_standoff: 1.6
     view_max_cells: 32        # wall piece per view (cells)
     view_detour: 0.0          # m, take a close camera view during frontier phase, 0 = off
+    preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one (no stop)
+    look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
+    retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
 
 velocity_guard:
   ros__parameters:

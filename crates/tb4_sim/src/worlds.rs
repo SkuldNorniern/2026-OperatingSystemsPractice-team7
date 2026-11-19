@@ -15,9 +15,10 @@ pub fn by_name(name: &str) -> Option<World> {
     }
 }
 
-/// ~10 x 7 m studio after page 5 of OSP_final_project.pdf: four boxes in two rows, three ARUCO_ORIGINAL
-/// targets (two on walls, one low on a box face), a cluster of four chairs (legs only), a desk (legs only).
-/// Robot starts in the south-west corner facing east, like after undocking.
+/// 10 x 7 m studio laid out like the sketch on page 5 of OSP_final_project.pdf (sketch 774 x 322 pt scaled
+/// to 10 x 7 m): two rows of two tall boxes in the middle, targets in the upper-left and upper-right corners
+/// and one low on the east face of the lower-right box, robot in the lower left. Added (not in the sketch):
+/// a cluster of four chairs (legs only) and a desk (legs only).
 pub fn studio() -> World {
     let mut w = studio_base("studio");
     w.wall((0.0, 0.0), (10.0, 0.0));
@@ -28,29 +29,29 @@ pub fn studio() -> World {
 pub fn studio_glass() -> World {
     let mut w = studio_base("studio_glass");
     w.bounds = [-0.5, -2.5, 10.5, 7.5];
-    w.wall((0.0, 0.0), (4.0, 0.0)).glass((4.0, 0.0), (7.0, 0.0)).wall((7.0, 0.0), (10.0, 0.0));
-    w.wall((3.0, -2.0), (8.0, -2.0)).wall((3.0, -2.0), (3.0, 0.0)).wall((8.0, -2.0), (8.0, 0.0));
+    w.wall((0.0, 0.0), (6.5, 0.0)).glass((6.5, 0.0), (9.5, 0.0)).wall((9.5, 0.0), (10.0, 0.0));
+    w.wall((6.0, -2.0), (10.0, -2.0)).wall((6.0, -2.0), (6.0, 0.0)).wall((10.0, -2.0), (10.0, 0.0));
     w
 }
 
 /// room walls except the south one, boxes, furniture, markers
 fn studio_base(name: &str) -> World {
-    let mut w = World::new(name, [-0.5, -0.5, 10.5, 7.5], Pose2::new(1.0, 1.0, 0.0));
+    let mut w = World::new(name, [-0.5, -0.5, 10.5, 7.5], Pose2::new(2.0, 2.0, 0.0));
     w.wall((10.0, 0.0), (10.0, 7.0)).wall((10.0, 7.0), (0.0, 7.0)).wall((0.0, 7.0), (0.0, 0.0));
-    // two rows of two boxes, 1.2 x 0.6 m, faces reach the floor
-    for (x, y) in [(2.4, 2.0), (5.4, 2.0), (2.4, 4.4), (5.4, 4.4)] {
-        w.rect(x, y, x + 1.2, y + 0.6);
+    // boxes 0.55 x 1.8 m, faces reach the floor; upper row 0.5 m from the north wall
+    for (x, y) in [(3.5, 4.7), (4.9, 4.7), (3.8, 0.8), (5.35, 0.8)] {
+        w.rect(x, y, x + 0.55, y + 1.8);
     }
     // four chairs side by side, 0.42 m between leg centres, 3 cm legs
-    for (x, y) in [(8.0, 1.0), (8.7, 1.0), (8.0, 1.7), (8.7, 1.7)] {
+    for (x, y) in [(7.8, 2.4), (8.5, 2.4), (7.8, 3.1), (8.5, 3.1)] {
         w.legs(x, y, 0.42, 0.42, 0.015);
     }
     // desk, 1.4 x 0.7 m top, 5 cm legs; the robot fits underneath
-    w.legs(1.2, 5.9, 1.3, 0.6, 0.025);
-    // targets: north wall, east wall, low on the east face of the north-east box
-    w.marker(7, (4.5, 7.0), 0.35, (0.0, -1.0), 0.15);
-    w.marker(23, (10.0, 4.0), 0.35, (-1.0, 0.0), 0.12);
-    w.marker(42, (6.6, 4.7), 0.10, (1.0, 0.0), 0.10);
+    w.legs(1.6, 4.0, 1.3, 0.6, 0.025);
+    // targets: west wall upper left, east wall upper right, low on the east face of the lower-right box
+    w.marker(7, (0.0, 5.6), 0.35, (1.0, 0.0), 0.15);
+    w.marker(23, (10.0, 5.7), 0.35, (-1.0, 0.0), 0.12);
+    w.marker(42, (5.9, 1.2), 0.10, (1.0, 0.0), 0.10);
     w
 }
 

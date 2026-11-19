@@ -45,7 +45,8 @@ pub enum Wid {
     Shot,
     Dock,
     Split,
-    Scroll,
+    SectionScroll(u8),
+    SectionSplit(u8),
     Section(u8),
     Check(u8),
     Row(u8),
@@ -68,8 +69,7 @@ pub struct Chrome {
     /// the map's rectangle in the last frame, canvas pixels
     pub map_area: Rect,
     pub domain: String,
-    scroll: f32,
-    content_h: f32,
+    pub layout: DockLayout,
     out_dir: Option<PathBuf>,
     fixed_out_dir: bool,
     out_checked: Option<Instant>,
@@ -107,8 +107,7 @@ impl Chrome {
             sections: [true, true, true, false],
             map_area: Rect::new(0.0, 0.0, 1.0, 1.0),
             domain,
-            scroll: 0.0,
-            content_h: 0.0,
+            layout: DockLayout::default(),
             fixed_out_dir: out_dir.is_some(),
             out_dir,
             out_checked: None,
@@ -149,7 +148,7 @@ impl Chrome {
         let run_dir = self.run_dir(now);
         let theme = self.theme.clone();
         ctx.clear(theme.palette.background)?;
-        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, scroll, content_h, camera_image, .. } = self;
+        let Self { ui: state, dock_open, dock_w, sections, map_area, domain, layout, camera_image, .. } = self;
         let mut ui = state.frame(ctx, &theme);
 
         let body = Rect::new(0.0, TOOLBAR_H + STRIP_H, w, (h - TOOLBAR_H - STRIP_H - STATUS_H).max(10.0));
@@ -172,10 +171,7 @@ impl Chrome {
         strip(&mut ui, model, now, w)?;
         if let Some(d) = dock {
             ui.fill(d, theme.palette.surface)?;
-            let (_, used) = ScrollArea::new(scroll, *content_h).show(&mut ui, Wid::Scroll, d, |ui, content, _view| {
-                dock_body(ui, content, sections, camera_image, app, model, now, run_dir.as_deref())
-            })?;
-            *content_h = used;
+            dock_sections(&mut ui, d, layout, sections, camera_image, app, model, now, run_dir.as_deref())?;
             ui.line(aurea::render::Point::new(d.right(), d.y), aurea::render::Point::new(d.right(), d.bottom()), 1.0, theme.palette.border)?;
         }
         status_bar(&mut ui, app, model, now, domain, Rect::new(0.0, h - STATUS_H, w, STATUS_H))?;
@@ -316,37 +312,130 @@ fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, now: Instant, w: f32) -
     Ok(())
 }
 
+/// height of the drag handle between two open sections
+pub const SPLIT_H: f32 = 7.0;
+/// a section's body is never smaller than about two rows
+pub const MIN_BODY: f32 = 2.0 * ROW_H + 8.0;
+
+/// sizes of the dock sections: what the user dragged them to, how far each is scrolled, and where
+/// the last frame put them (for hit tests)
+#[derive(Debug, Clone)]
+pub struct DockLayout {
+    /// preferred body heights (without the header), pixels
+    pub heights: [f32; 4],
+    pub scrolls: [f32; 4],
+    content: [f32; 4],
+    /// a handle being dragged: (section above, section below, pointer y at the press, their heights then)
+    drag: Option<(usize, usize, f32, f32, f32)>,
+    /// last frame: body rectangles of the open sections, and the handles (above, below, rect)
+    pub bodies: [Option<Rect>; 4],
+    pub handles: Vec<(usize, usize, Rect)>,
+}
+
+impl Default for DockLayout {
+    fn default() -> Self {
+        Self { heights: [380.0, 250.0, 170.0, 170.0], scrolls: [0.0; 4], content: [0.0; 4], drag: None, bodies: [None; 4], handles: Vec::new() }
+    }
+}
+
+/// open sections' preferred heights scaled to fill `avail`, each at least `MIN_BODY`
+fn fit(heights: &[f32; 4], open: &[usize], avail: f32) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    let sum: f32 = open.iter().map(|&i| heights[i].max(1.0)).sum();
+    if open.is_empty() || sum <= 0.0 {
+        return out;
+    }
+    let k = avail / sum;
+    for &i in open {
+        out[i] = (heights[i].max(1.0) * k).max(MIN_BODY);
+    }
+    // what scaling and the minimum left over goes to the largest section
+    let used: f32 = open.iter().map(|&i| out[i]).sum();
+    if let Some(&big) = open.iter().max_by(|&&a, &&b| out[a].total_cmp(&out[b])) {
+        out[big] = (out[big] + avail - used).max(MIN_BODY);
+    }
+    out
+}
+
+/// the dock: a header per section; open sections share the height, each scrolls on its own, and a
+/// handle between two open sections moves their boundary
 #[allow(clippy::too_many_arguments)]
-fn dock_body(
+fn dock_sections(
     ui: &mut aurea::ui::Ui<'_, Wid>,
-    content: Rect,
+    d: Rect,
+    layout: &mut DockLayout,
     sections: &mut [bool; 4],
     camera_image: &mut Option<(u64, bool, Image)>,
     app: &mut App,
     model: &Model,
     now: Instant,
     run_dir: Option<&std::path::Path>,
-) -> AureaResult<f32> {
+) -> AureaResult<()> {
     let t = ui.theme.clone();
-    let (x, w) = (content.x + 8.0, content.width - 16.0);
-    let mut y = content.y + 6.0;
-    for (si, title) in SECTIONS.iter().enumerate() {
-        Disclosure::new(title, &mut sections[si]).show(ui, Wid::Section(si as u8), Rect::new(x, y, w, HEADER_H))?;
-        y += HEADER_H + 2.0;
-        if !sections[si] {
-            y += 4.0;
-            continue;
+    let open: Vec<usize> = (0..4).filter(|&i| sections[i]).collect();
+    let headers = 4.0 * (HEADER_H + 2.0) + 8.0;
+    let avail = (d.height - headers - SPLIT_H * open.len().saturating_sub(1) as f32).max(0.0);
+    let shown = fit(&layout.heights, &open, avail);
+    layout.bodies = [None; 4];
+    layout.handles.clear();
+    let (x, w) = (d.x + 8.0, d.width - 16.0);
+    let mut y = d.y + 4.0;
+    ui.clipped(d, |ui| -> AureaResult<()> {
+        for (i, title) in SECTIONS.iter().enumerate() {
+            Disclosure::new(title, &mut sections[i]).show(ui, Wid::Section(i as u8), Rect::new(x, y, w, HEADER_H))?;
+            y += HEADER_H + 2.0;
+            if !open.contains(&i) {
+                continue;
+            }
+            let body = Rect::new(d.x, y, d.width, shown[i]);
+            layout.bodies[i] = Some(body);
+            // the thin bar shows whenever the section has more than fits
+            let (_, used) = ScrollArea::new(&mut layout.scrolls[i], layout.content[i]).always_show_bar(true).show(ui, Wid::SectionScroll(i as u8), body, |ui, c, _view| {
+                let (cx, cw) = (c.x + 8.0, c.width - 16.0);
+                let end = match i {
+                    0 => layers(ui, app, model, cx, c.y, cw)?,
+                    // image, 4 px gap, 16 px info line, 6 px bottom margin: fits without a bar
+                    1 => camera(ui, camera_image, app, model, now, cx, c.y, cw, body.height - 28.0)?,
+                    2 => targets(ui, model, cx, c.y, cw, run_dir)?,
+                    _ => health_rows(ui, model, now, cx, c.y, cw)?,
+                };
+                Ok(end - c.y + 6.0)
+            })?;
+            layout.content[i] = used;
+            y += shown[i];
+            // a handle to the next open section, if any
+            if let Some(&below) = open.iter().find(|&&j| j > i) {
+                let r = Rect::new(d.x, y, d.width, SPLIT_H);
+                layout.handles.push((i, below, r));
+                let input = ui.interact(Wid::SectionSplit(i as u8), 0, r, Sense::Adjust, true);
+                if input.hovered || input.held {
+                    ui.set_cursor(aurea::CursorIcon::ResizeVertical);
+                }
+                if let Some(p) = ui.press(Wid::SectionSplit(i as u8), 0) {
+                    layout.drag = Some((i, below, p.at.y, shown[i], shown[below]));
+                }
+                match layout.drag {
+                    Some((a, b, y0, ha, hb)) if a == i && input.held => {
+                        if let Some(p) = ui.pointer() {
+                            let dy = (p.y - y0).clamp(MIN_BODY - ha, hb - MIN_BODY);
+                            // the others keep what they show, so the scaling does not undo the drag
+                            for &k in &open {
+                                layout.heights[k] = shown[k];
+                            }
+                            layout.heights[a] = ha + dy;
+                            layout.heights[b] = hb - dy;
+                        }
+                    }
+                    Some((a, ..)) if a == i => layout.drag = None,
+                    _ => {}
+                }
+                let c = if input.hovered || input.held { t.palette.accent } else { t.palette.border };
+                ui.line(aurea::render::Point::new(d.x + 8.0, r.y + SPLIT_H / 2.0), aurea::render::Point::new(d.right() - 8.0, r.y + SPLIT_H / 2.0), 1.0, c)?;
+                y += SPLIT_H;
+            }
         }
-        y = match si {
-            0 => layers(ui, app, model, x, y, w)?,
-            1 => camera(ui, camera_image, app, model, now, x, y, w)?,
-            2 => targets(ui, model, x, y, w, run_dir)?,
-            _ => health_rows(ui, model, now, x, y, w)?,
-        };
-        y += 10.0;
-        let _ = &t;
-    }
-    Ok(y - content.y + 8.0)
+        Ok(())
+    })
 }
 
 fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32, mut y: f32, w: f32) -> AureaResult<f32> {
@@ -461,7 +550,7 @@ fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, x: f32, mut y: f32, w
 }
 
 #[allow(clippy::too_many_arguments)]
-fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)>, app: &mut App, model: &Model, now: Instant, x: f32, mut y: f32, w: f32) -> AureaResult<f32> {
+fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)>, app: &mut App, model: &Model, now: Instant, x: f32, mut y: f32, w: f32, max_h: f32) -> AureaResult<f32> {
     let t = ui.theme.clone();
     let topic = model.bound(Slot::Camera);
     let Some(f) = &model.camera else {
@@ -487,7 +576,8 @@ fn camera(ui: &mut aurea::ui::Ui<'_, Wid>, cache: &mut Option<(u64, bool, Image)
         *cache = Some((f.seq, stale, Image::new(f.width, f.height, rgba).with_opaque(true)));
     }
     let img = cache.as_ref().map(|(.., i)| i.clone()).expect("just set");
-    let s = (w / f.width as f32).min(220.0 / f.height as f32);
+    // fits the section both ways, aspect ratio kept
+    let s = (w / f.width as f32).min(max_h.max(40.0) / f.height as f32);
     let (iw, ih) = (f.width as f32 * s, f.height as f32 * s);
     let r = Rect::new(x + (w - iw) / 2.0, y, iw, ih);
     let input = ui.interact(Wid::Camera, 0, r, Sense::Click, true);
@@ -632,7 +722,7 @@ mod tests {
 
     /// y of a layer row's centre in the dock, found from the layout the same way the dock does
     fn row_center(chrome: &Chrome, _app: &mut App, m: &Model, _now: Instant, idx: usize) -> f32 {
-        let mut y = TOOLBAR_H + STRIP_H + 6.0 + HEADER_H + 2.0;
+        let mut y = chrome.layout.bodies[0].expect("layers open").y;
         for (i, l) in LAYERS.iter().enumerate() {
             if l.slot.is_some_and(|s| m.bound(s).is_none()) {
                 continue;
@@ -646,6 +736,114 @@ mod tests {
             }
         }
         panic!("layer not shown")
+    }
+
+    fn pointer(chrome: &mut Chrome, x: f64, y: f64) {
+        chrome.handle(&WindowEvent::MouseMove { x, y, buttons: MouseButtons::default(), modifiers: Modifiers::default(), pointer: PointerKind::Mouse, time: Duration::ZERO });
+    }
+
+    fn button(chrome: &mut Chrome, pressed: bool, x: f64, y: f64) {
+        chrome.handle(&WindowEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+            modifiers: Modifiers::default(),
+            x,
+            y,
+            click_count: 1,
+            pointer: PointerKind::Mouse,
+            time: Duration::ZERO,
+        });
+    }
+
+    #[test]
+    fn dragging_a_handle_moves_the_boundary_between_two_sections() {
+        let now = Instant::now();
+        let m = team7_model();
+        let mut chrome = Chrome::new("91".into(), None);
+        chrome.set_run_dir(None);
+        chrome.sections = [true; 4];
+        let mut app = App::new(false);
+        let (w, h) = (1280u32, 900u32);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        let (a, b, r) = chrome.layout.handles[0];
+        assert_eq!((a, b), (0, 1));
+        let (ha, hb) = (chrome.layout.bodies[0].unwrap().height, chrome.layout.bodies[1].unwrap().height);
+        let total: f32 = chrome.layout.bodies.iter().flatten().map(|b| b.height).sum();
+        let (x, y) = (f64::from(r.x + 100.0), f64::from(r.y + SPLIT_H / 2.0));
+        pointer(&mut chrome, x, y);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        button(&mut chrome, true, x, y);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        pointer(&mut chrome, x, y - 60.0);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        button(&mut chrome, false, x, y - 60.0);
+        let px = draw(&mut chrome, &mut app, &m, w, h, now);
+        snapshot(&px, w, h, "dock_dragged.png");
+        let (na, nb) = (chrome.layout.bodies[0].unwrap().height, chrome.layout.bodies[1].unwrap().height);
+        assert!((na - (ha - 60.0)).abs() < 1.5 && (nb - (hb + 60.0)).abs() < 1.5, "{ha} {hb} -> {na} {nb}");
+        let total2: f32 = chrome.layout.bodies.iter().flatten().map(|b| b.height).sum();
+        assert!((total - total2).abs() < 1.0);
+        // dragged far: stops at the minimum
+        let (_, _, r) = chrome.layout.handles[0];
+        let (x, y) = (f64::from(r.x + 100.0), f64::from(r.y + SPLIT_H / 2.0));
+        pointer(&mut chrome, x, y);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        button(&mut chrome, true, x, y);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        pointer(&mut chrome, x, y - 900.0);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        button(&mut chrome, false, x, y - 900.0);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        assert!((chrome.layout.bodies[0].unwrap().height - MIN_BODY).abs() < 1.0);
+        // a folded section has no body and no handle
+        chrome.sections[1] = false;
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        assert!(chrome.layout.bodies[1].is_none());
+        assert!(chrome.layout.handles.iter().all(|&(a, b, _)| a != 1 && b != 1));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_only_the_section_under_the_pointer() {
+        let now = Instant::now();
+        let mut m = team7_model();
+        m.targets = (0..40).map(|i| crate::model::Target { id: i, x: f64::from(i), y: 1.0, confirmed: i % 2 == 0, views: None }).collect();
+        let mut chrome = Chrome::new("91".into(), None);
+        chrome.set_run_dir(None);
+        let mut app = App::new(false);
+        let (w, h) = (1280u32, 800u32);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        let body = chrome.layout.bodies[2].expect("targets open");
+        let (x, y) = (f64::from(body.x + body.width / 2.0), f64::from(body.y + body.height / 2.0));
+        pointer(&mut chrome, x, y);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        let mut ev = aurea::ScrollEvent::wheel(0.0, -3.0, 40.0, Modifiers::default());
+        (ev.x, ev.y) = (x, y);
+        for _ in 0..4 {
+            chrome.handle(&WindowEvent::Scroll(ev));
+            draw(&mut chrome, &mut app, &m, w, h, now);
+        }
+        let px = draw(&mut chrome, &mut app, &m, w, h, now);
+        snapshot(&px, w, h, "dock_scrolled.png");
+        assert!(chrome.layout.scrolls[2] > 20.0, "targets scrolled {:?}", chrome.layout.scrolls);
+        assert_eq!(chrome.layout.scrolls[0], 0.0);
+        assert_eq!(chrome.layout.scrolls[1], 0.0);
+        // the sections below the long list keep their place
+        assert!(chrome.layout.bodies[2].unwrap().bottom() <= h as f32 - STATUS_H + 1.0);
+
+        // a scroll bar along the right edge of an overflowing section, none on one that fits
+        let bar = |px: &[u32], b: Rect| {
+            let (x0, x1) = ((b.right() - 10.0) as usize, (b.right() - 1.0) as usize);
+            let mid = (b.y + b.height / 2.0) as usize;
+            (mid.saturating_sub(10)..mid + 10).any(|y| (x0..x1).any(|x| rgb(px[y * w as usize + x]).iter().all(|&c| c > 60)))
+        };
+        assert!(bar(&px, chrome.layout.bodies[2].unwrap()), "bar on the long target list");
+        m.targets.truncate(2);
+        let mut chrome2 = Chrome::new("91".into(), None);
+        chrome2.set_run_dir(None);
+        // the first frame measures the content, the second draws with it
+        draw(&mut chrome2, &mut app, &m, w, h, now);
+        let px = draw(&mut chrome2, &mut app, &m, w, h, now);
+        assert!(!bar(&px, chrome2.layout.bodies[2].unwrap()), "no bar when two targets fit");
     }
 
     /// cargo test --release frame_cost -- --ignored --nocapture: full window frames, recorded and

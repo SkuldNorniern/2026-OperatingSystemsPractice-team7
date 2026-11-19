@@ -218,10 +218,10 @@ impl Metrics {
             let _ = writeln!(w, "  {c:<28} {n:>3} x {t:6.1} s");
         }
         let e = &self.explorer;
-        let _ = writeln!(w, "goals sent {} (frontier {}, view {}, turn {})  succeeded {}  switched {}  cancelled {} (timeout {}, no progress {}, wall seen {})  aborted {}",
-            e.sent, e.sent_frontier, e.sent_view, e.sent_turn, e.succeeded, e.switched,
-            e.cancel_timeout + e.cancel_no_progress + e.cancel_wall_seen + e.cancel_other,
-            e.cancel_timeout, e.cancel_no_progress, e.cancel_wall_seen, e.aborted);
+        let _ = writeln!(w, "goals sent {} (frontier {}, view {}, turn {}, approach {})  succeeded {}  switched {}  cancelled {} (timeout {}, no progress {}, wall seen {}, marker confirmed {})  aborted {}  markers given up {}",
+            e.sent, e.sent_frontier, e.sent_view, e.sent_turn, e.sent_approach, e.succeeded, e.switched,
+            e.cancel_timeout + e.cancel_no_progress + e.cancel_wall_seen + e.cancel_other + e.approach_confirmed,
+            e.cancel_timeout, e.cancel_no_progress, e.cancel_wall_seen, e.approach_confirmed, e.aborted, e.approach_given_up);
         let results: Vec<String> = self.nav_results.iter().map(|(k, v)| format!("{k} {v}")).collect();
         let _ = writeln!(w, "navigator plans {} (failed {}, route kept {})  results: {}",
             self.nav_plans, self.nav_plan_failures, self.nav_route_kept, results.join(", "));
@@ -277,9 +277,9 @@ impl Metrics {
         let _ = writeln!(w, "  \"stall_time_s\": {:.3},", self.stall_time());
         let _ = writeln!(w, "  \"stalls\": [{}],", stalls.join(", "));
         let e = &self.explorer;
-        let _ = writeln!(w, "  \"goals\": {{\"sent\": {}, \"frontier\": {}, \"view\": {}, \"turn\": {}, \"succeeded\": {}, \"switched\": {}, \"canceled\": {}, \"aborted\": {}, \"cancel_timeout\": {}, \"cancel_no_progress\": {}, \"cancel_wall_seen\": {}, \"cancel_other\": {}}},",
-            e.sent, e.sent_frontier, e.sent_view, e.sent_turn, e.succeeded, e.switched, e.canceled, e.aborted,
-            e.cancel_timeout, e.cancel_no_progress, e.cancel_wall_seen, e.cancel_other);
+        let _ = writeln!(w, "  \"goals\": {{\"sent\": {}, \"frontier\": {}, \"view\": {}, \"turn\": {}, \"approach\": {}, \"succeeded\": {}, \"switched\": {}, \"canceled\": {}, \"aborted\": {}, \"cancel_timeout\": {}, \"cancel_no_progress\": {}, \"cancel_wall_seen\": {}, \"cancel_marker_confirmed\": {}, \"cancel_other\": {}, \"markers_given_up\": {}}},",
+            e.sent, e.sent_frontier, e.sent_view, e.sent_turn, e.sent_approach, e.succeeded, e.switched, e.canceled, e.aborted,
+            e.cancel_timeout, e.cancel_no_progress, e.cancel_wall_seen, e.approach_confirmed, e.cancel_other, e.approach_given_up);
         let results: Vec<String> = self.nav_results.iter().map(|(k, v)| format!("{}: {v}", json_str(k))).collect();
         let _ = writeln!(w, "  \"navigator\": {{\"plans\": {}, \"plan_failures\": {}, \"route_kept\": {}, \"results\": {{{}}}}},",
             self.nav_plans, self.nav_plan_failures, self.nav_route_kept, results.join(", "));

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use tb4_control::Rng;
 use tb4_core::{Grid, Pose2};
-use tb4_explore::{Action, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, TickInput};
+use tb4_explore::{Action, ApproachParams, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, MarkerHint, TickInput};
 use tb4_markers::{LocateParams, Tracker};
 use tb4_slam::{Slam, SlamParams};
 
@@ -157,11 +157,12 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 28] = [
+pub const SET_NAMES: [&str; 32] = [
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
     "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
+    "approach_markers", "approach_standoff", "approach_spread_deg", "approach_timeout",
 ];
 
 impl SimConfig {
@@ -201,6 +202,13 @@ impl SimConfig {
             "vision" => self.vision.enabled = x != 0.0,
             "pnp_sigma" => self.vision.pnp_sigma = x,
             "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
+            "approach_markers" if x == 0.0 => e.approach = None,
+            "approach_markers" => {
+                e.approach.get_or_insert_with(ApproachParams::default);
+            }
+            "approach_standoff" => e.approach.iter_mut().for_each(|a| a.standoff = x),
+            "approach_spread_deg" => e.approach.iter_mut().for_each(|a| a.spread = x.to_radians()),
+            "approach_timeout" => e.approach.iter_mut().for_each(|a| a.timeout = x),
             _ => return Err(format!("--set: unknown name {k}")),
         }
         Ok(())
@@ -574,7 +582,14 @@ impl Sim {
                 rec.first_confirmed = Some(t);
                 rec.err_confirmed = Some(err);
                 let kind = if i < n { "target" } else { "DECOY" };
-                notes.push(format!("tracker: CONFIRMED {kind} id={} from {} views, error {:.0} cm", mk.id, tg.views, 100.0 * err));
+                let [ray, pnp, scaled] = self.tracker.sources(tg.id);
+                notes.push(format!(
+                    "tracker: CONFIRMED {kind} id={} from {} views (ray {ray} pnp {pnp} scaled {scaled}, scale {:.2}), error {:.0} cm",
+                    mk.id,
+                    tg.views,
+                    self.tracker.scale(tg.id).unwrap_or(f64::NAN),
+                    100.0 * err
+                ));
                 if i >= n {
                     self.m.decoys_confirmed += 1;
                 }
@@ -588,8 +603,26 @@ impl Sim {
         detected.iter().any(|id| targets.iter().any(|tg| tg.id == *id && !tg.confirmed))
     }
 
+    /// what marker_mapper publishes on /team7/marker_approach: tentative targets with 2+ views, at
+    /// their fused position, facing the side they were seen from
+    pub fn marker_hints(&self) -> Vec<MarkerHint> {
+        if !self.cfg.vision.enabled {
+            return Vec::new();
+        }
+        self.tracker
+            .targets()
+            .into_iter()
+            .filter(|t| !t.confirmed && t.views >= 2)
+            .filter_map(|t| {
+                let facing = self.tracker.facing(t.id, self.map.as_ref(), self.cfg.locate.occupied_threshold)?;
+                Some(MarkerHint { id: Some(t.id), x: t.x, y: t.y, facing })
+            })
+            .collect()
+    }
+
     fn do_explore(&mut self) {
         let t = self.t;
+        let hints = self.marker_hints();
         let input = TickInput {
             costmap: self.map.as_ref(),
             costmap_stamp: self.map_stamp,
@@ -597,7 +630,7 @@ impl Sim {
             robot: Ok(self.estimate()),
             result: self.nav_result.take(),
             done: false,
-            markers: &[],
+            markers: &hints,
         };
         let actions = self.explorer.tick(t, input);
         for a in actions {

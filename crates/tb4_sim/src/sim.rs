@@ -144,6 +144,52 @@ impl SimConfig {
     }
 }
 
+/// names `SimConfig::set` accepts
+pub const SET_NAMES: [&str; 24] = [
+    "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
+    "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
+    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
+    "path_switch_ratio", "slow_on_tentative",
+];
+
+impl SimConfig {
+    /// one `name=value` override, as `--set` takes it on the command line
+    pub fn set(&mut self, kv: &str) -> Result<(), String> {
+        let (k, v) = kv.split_once('=').ok_or(format!("--set {kv}: want name=value"))?;
+        let x: f64 = v.parse().map_err(|_| format!("--set {kv}: not a number"))?;
+        let e = &mut self.explorer;
+        match k {
+            "goal_timeout" => e.goal_timeout = x,
+            "progress_timeout" => e.progress_timeout = x,
+            "retry_delay" => e.retry_delay = x,
+            "blacklist_duration" => e.blacklist_duration = x,
+            "turn_weight" => e.turn_weight = x,
+            "distance_weight" => e.explore.distance_weight = x,
+            "size_weight" => e.explore.size_weight = x,
+            "min_goal_distance" => e.explore.min_goal_distance = x,
+            "goal_standoff" => e.explore.goal_standoff = x,
+            "blacklist_radius" => e.explore.blacklist_radius = x,
+            "camera_range" => e.coverage.iter_mut().for_each(|c| c.range = x),
+            "view_standoff" => e.coverage.iter_mut().for_each(|c| c.standoff = x),
+            "view_detour" => e.view_detour = x,
+            "preempt_distance" => e.preempt_distance = x,
+            "switch_cooldown" => e.switch_cooldown = x,
+            "min_unknown_area" => e.explore.min_unknown_area = x,
+            "min_frontier_cells" => e.explore.min_frontier_cells = x as usize,
+            "look_around_turns" => e.look_around_turns = x as u32,
+            "camera_coverage" if x == 0.0 => e.coverage = None,
+            "camera_coverage" => {}
+            "vx_max" => self.nav.mppi.vx_max = x,
+            "wz_max" => self.nav.mppi.wz_max = x,
+            "path_switch_ratio" => self.nav.path_switch_ratio = x,
+            "plan_with_scan" => self.nav.plan_with_scan = x != 0.0,
+            "slow_on_tentative" => self.slow.enabled = x != 0.0,
+            _ => return Err(format!("--set: unknown name {k}")),
+        }
+        Ok(())
+    }
+}
+
 /// everything a viewer needs for one frame; map-frame items come with `map_origin` (world pose of the map frame)
 pub struct SimState<'a> {
     pub t: f64,

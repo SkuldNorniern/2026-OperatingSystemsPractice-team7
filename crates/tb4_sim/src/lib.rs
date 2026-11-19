@@ -15,7 +15,7 @@ pub mod world;
 pub mod worlds;
 
 pub use metrics::Metrics;
-pub use sim::{Sim, SimConfig, SimState};
+pub use sim::{SET_NAMES, Sim, SimConfig, SimState};
 pub use world::World;
 
 #[cfg(test)]

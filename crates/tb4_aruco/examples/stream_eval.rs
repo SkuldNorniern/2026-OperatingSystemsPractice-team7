@@ -10,6 +10,9 @@ use tb4_aruco::{Detector, DetectorParams, Dictionary, GrayImage};
 fn variants() -> Vec<(&'static str, DetectorParams)> {
     let d = DetectorParams::default();
     vec![
+        // "config" = team7.yaml (hamming 0, barcode filter off); keep it in step with the yaml
+        ("config", DetectorParams { max_hamming: 0, max_stripe_flips: None, ..d.clone() }),
+        ("config_ham1", DetectorParams { max_hamming: 1, max_stripe_flips: None, ..d.clone() }),
         ("no_stripe", DetectorParams { max_stripe_flips: None, ..d.clone() }),
         ("default", d.clone()),
         ("ham0", DetectorParams { max_hamming: 0, ..d.clone() }),

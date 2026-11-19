@@ -82,6 +82,7 @@ class Mission:
             from gazebo_transport import GazeboTransport
             transport=GazeboTransport()
         self.transport=transport
+        self.nav2=getattr(args,'nav2',False)
         self.state='WAIT_SENSORS';self.bounds=None;self.route=[];self.goal=None;self.path=[]
         self.last_pose=None;self.distance=0.;self.spin_total=0.;self.last_yaw=None;self.after_spin='PATROL'
         self.last_plan=-100;self.last_map=-100;self.last_save=-100;self.last_image=-100;self.status='running'
@@ -194,7 +195,8 @@ class Mission:
         if p is None or scan is None or now-fresh>2:
             self.command()
             if now-self.wait_print>5:self.event('waiting_for_sensors',odom=p is not None,lidar=scan is not None);self.wait_print=now
-            if now-self.start_wall>30 and (p is None or scan is None):raise RuntimeError('Sensor timeout: ensure Gazebo server is running with -r and same GZ_PARTITION')
+            if now-self.start_wall>getattr(self.args,'timeout',30) and (p is None or scan is None):
+                raise RuntimeError('Timed out waiting for mission inputs; check the sensor and navigation logs')
             return
         if self.first_sim_time is None:self.first_sim_time=t
         self.detect(pair)
@@ -209,22 +211,25 @@ class Mission:
         self.last_pose=p
         if self.state=='SCAN_360':
             step=wrap(p[2]-self.last_yaw);self.spin_total+=step;self.last_yaw=p[2]
-            if self.spin_total>=TAU-.04:
+            spin_finished = self.transport.turn(TAU, 'scan') if self.nav2 else self.spin_total>=TAU-.04
+            if spin_finished:
                 self.command();self.state=self.after_spin;self.path=[];self.event('scan_finished',radians=self.spin_total)
                 if self.state=='SELECT_MARKER':self.next_marker()
-            else:self.command(0,.55)
+            elif not self.nav2:self.command(0,.55)
             return
         if self.state=='DONE':self.command();return
         if self.state=='FACE_MARKER':
             err=wrap(math.atan2(-self.target['normal_y'],-self.target['normal_x'])-p[2])
-            if abs(err)<.06:
+            aligned = self.transport.turn(err, 'face_marker') if self.nav2 and abs(err)>=.06 else abs(err)<.06
+            if aligned:
                 self.command();self.visited.add(str(self.target['id']));self.event('marker_visited',id=self.target['id']);self.next_marker()
-            else:self.command(0,float(np.clip(1.5*err,-.5,.5)))
+            elif not self.nav2:self.command(0,float(np.clip(1.5*err,-.5,.5)))
             return
         if self.state=='PATROL' and self.distance>=self.cfg['scan_every_m']:
             self.begin_spin('PATROL');self.command();return
         distance=math.hypot(self.goal[0]-p[0],self.goal[1]-p[1])
-        if distance<.18:
+        reached = self.transport.navigate(self.goal, p) if self.nav2 else distance<.18
+        if reached:
             self.command();self.path=[]
             if self.state=='APPROACH_WALL':self.state='PATROL';self.goal=self.route.pop(0);self.event('wall_reached')
             elif self.state=='PATROL':
@@ -233,6 +238,7 @@ class Mission:
                 else:self.begin_spin('SELECT_MARKER')
             elif self.state=='VISIT_MARKER':self.state='FACE_MARKER'
             return
+        if self.nav2:return
         if t-self.last_plan>1 or not self.path:
             self.path=self.grid.plan(p[:2],self.goal,self.bounds);self.last_plan=t
         if not self.path:

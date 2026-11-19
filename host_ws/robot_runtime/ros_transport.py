@@ -8,7 +8,7 @@ class ROSAdapter:
     def __init__(self,args):
         self.args=args;self.mission=None;self.gate=CommandGate();self.gate.execute=args.execute
         self.info=None;self.latest_scan=None;self.latest_pose=None;self.errors={};self.closed=False
-        self.lock=threading.Lock();self.last_graph_check=0.;self.conflict=False
+        self.lock=threading.Lock();self.last_graph_check=0.;self.conflict=False;self.motion=None;self.nav2_ready=False
     def start(self,mission):
         import rclpy
         from rclpy.node import Node
@@ -20,8 +20,11 @@ class ROSAdapter:
         from tf2_ros import Buffer,TransformListener
         self.rclpy=rclpy;self.mission=mission;self.node=Node('team7_robot_mission')
         self.tf=Buffer();self.listener=TransformListener(self.tf,self.node)
+        if getattr(self.args,'nav2',False):
+            from nav2_motion import Nav2Motion
+            self.motion=Nav2Motion(self.node,self.args.map_frame)
         self.Twist=Twist;self.TwistStamped=TwistStamped
-        self.pub=self.node.create_publisher(TwistStamped if self.args.cmd_type=='stamped' else Twist,self.args.cmd_topic,10) if self.args.execute else None
+        self.pub=self.node.create_publisher(TwistStamped if self.args.cmd_type=='stamped' else Twist,self.args.cmd_topic,10) if self.args.execute and self.motion is None else None
         self.node.create_subscription(LaserScan,self.args.scan_topic,self.scan_cb,qos_profile_sensor_data)
         self.node.create_subscription(Odometry,self.args.odom_topic,self.odom_cb,qos_profile_sensor_data)
         self.node.create_subscription(CameraInfo,self.args.camera_info_topic,self.info_cb,qos_profile_sensor_data)
@@ -118,7 +121,7 @@ class ROSAdapter:
         except Exception as e:self.error('camera',e)
     def ready(self):
         now=time.monotonic()
-        return not self.conflict and all(now-self.gate.fresh.get(key,-math.inf)<limit for key,limit in [('scan',.6),('odom',.6),('tf',.6),('map',15),('camera',2)])
+        return not self.conflict and (self.motion is None or self.nav2_ready) and all(now-self.gate.fresh.get(key,-math.inf)<limit for key,limit in [('scan',.6),('odom',.6),('tf',.6),('map',15),('camera',2)])
     def timer(self):
         try:
             T=self.lookup(self.args.map_frame,self.args.base_frame)
@@ -131,13 +134,24 @@ class ROSAdapter:
                 self.mission.scan_cb(self.latest_scan)
             if time.monotonic()-self.last_graph_check>1:
                 self.last_graph_check=time.monotonic()
-                names=self.node.get_publishers_info_by_topic(self.args.cmd_topic)
-                self.conflict=any(n.node_name!=self.node.get_name() for n in names)
-                if self.conflict:self.error('cmd','Another publisher owns command topic')
-                types=dict(self.node.get_topic_names_and_types()).get(self.args.cmd_topic,[])
-                expected='geometry_msgs/msg/TwistStamped' if self.args.cmd_type=='stamped' else 'geometry_msgs/msg/Twist'
-                if any(t!=expected for t in types):self.conflict=True;self.error('cmd','Command message type mismatch')
+                if self.motion is not None:
+                    guards=self.node.get_publishers_info_by_topic('/cmd_vel')
+                    self.nav2_ready=self.motion.ready() and any(p.node_name=='velocity_guard' for p in guards)
+                    self.conflict=any(p.node_name!='velocity_guard' for p in guards)
+                    if not self.nav2_ready or self.conflict:
+                        self.error('nav2','Waiting for Nav2 actions and the sole velocity_guard publisher')
+                    else:
+                        self.errors.pop('nav2',None)
+                else:
+                    names=self.node.get_publishers_info_by_topic(self.args.cmd_topic)
+                    self.conflict=any(n.node_name!=self.node.get_name() for n in names)
+                    if self.conflict:self.error('cmd','Another publisher owns command topic')
+                    types=dict(self.node.get_topic_names_and_types()).get(self.args.cmd_topic,[])
+                    expected='geometry_msgs/msg/TwistStamped' if self.args.cmd_type=='stamped' else 'geometry_msgs/msg/Twist'
+                    if any(t!=expected for t in types):self.conflict=True;self.error('cmd','Command message type mismatch')
         except Exception as e:self.gate.fresh.pop('tf',None);self.error('tf',e)
+        if self.motion is not None and not self.ready():
+            self.motion.cancel()
         if self.pub:
             v,w=self.gate.output() if not self.conflict else (0.,0.)
             self.emit(v,w)
@@ -146,10 +160,19 @@ class ROSAdapter:
             msg=self.TwistStamped();msg.header.stamp=self.node.get_clock().now().to_msg();msg.header.frame_id=self.args.base_frame;twist=msg.twist
         else:msg=self.Twist();twist=msg
         twist.linear.x=v;twist.angular.z=w;self.pub.publish(msg)
-    def publish(self,v,w):self.gate.propose(v,w)
+    def publish(self,v,w):
+        if self.motion is None:
+            self.gate.propose(v,w)
+        else:
+            self.motion.cancel()
+    def navigate(self,goal,pose):
+        return self.ready() and self.motion.navigate(goal,pose)
+    def turn(self,angle,purpose):
+        return self.ready() and self.motion.turn(angle,purpose)
     def close(self):
         if self.closed:return
         self.closed=True;self.gate.execute=False
+        if self.motion is not None:self.motion.close()
         if getattr(self,'pub',None):
             for _ in range(3):self.emit(0.,0.);time.sleep(.05)
         if hasattr(self,'executor'):

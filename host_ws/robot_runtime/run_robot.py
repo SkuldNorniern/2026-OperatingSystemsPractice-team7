@@ -18,14 +18,15 @@ def parser():
     ap.add_argument('--camera-info-topic',default='/oakd/rgb/preview/camera_info')
     ap.add_argument('--optical-frame',default='')
     ap.add_argument('--map-frame',default='map');ap.add_argument('--base-frame',default='base_link')
+    ap.add_argument('--nav2',action='store_true',help='Use the existing Nav2 actions for navigation and rotation')
     ap.add_argument('--cmd-topic',default='/cmd_vel')
     ap.add_argument('--cmd-type',choices=['stamped','unstamped'],default='stamped' if os.environ.get('ROS_DISTRO','jazzy')=='jazzy' else 'unstamped')
     ap.add_argument('--timeout',type=float,default=30);ap.add_argument('--time-limit',type=float,default=600)
     ap.add_argument('--output-dir',type=Path,default=Path.home()/'team7_robot_runs')
     return ap
 
-def main():
-    ap=parser();args=ap.parse_args();cfg=json.loads(args.config.read_text())
+def load_config(ap, args):
+    cfg=json.loads(args.config.read_text())
     if args.marker_size is not None:cfg['default_marker_size']=args.marker_size
     if args.dictionary:cfg['dictionary']=args.dictionary
     for name in ['room_width','room_height']:
@@ -34,6 +35,10 @@ def main():
         if not cfg.get('default_marker_size') and not cfg.get('marker_sizes'):ap.error('Set actual --marker-size or per-ID marker_sizes before execution')
         if not all(cfg.get(k,0)>0 for k in ['room_width','room_height']):ap.error('V1 requires actual --room-width and --room-height, measured between inner walls')
     if any(not(0<float(s)<2) for s in [*cfg.get('marker_sizes',{}).values(),*([cfg['default_marker_size']] if cfg.get('default_marker_size') else [])]):ap.error('Invalid physical marker size')
+    return cfg
+
+def main():
+    ap=parser();args=ap.parse_args();cfg=load_config(ap,args)
     try:
         import rclpy
         from rclpy.signals import SignalHandlerOptions

@@ -25,4 +25,6 @@ cd sim/gazebo
 
 ## 실제 TurtleBot4 실행
 
+Ubuntu ROS 2 Jazzy 호스트에서 `host_ws/scripts/run_rust_base_v1.sh`를 사용하면 기존 `rust_base` 데모의 SLAM·Nav2·기록 구성을 사용해 V1을 실행합니다. 별도로 빌드한 `rust_base` 작업공간이 필요합니다. [실물 실행 안내](host_ws/robot_runtime/README.md)
+
 ROS 2가 설치된 Ubuntu/로봇에서 `host_ws/scripts/run_robot.sh`로 라이다·카메라·SLAM 입력을 받아 V1를 실행할 수 있도록 어댑터를 추가했습니다. 먼저 `--check`로 입력을 확인하고 실제 주행 시 `--execute`를 지정합니다. Linux 호스트 빌드와 실행 명령은 [실물 실행 안내](host_ws/robot_runtime/README.md)에 있습니다. 실제 하드웨어 주행은 아직 미검증입니다.

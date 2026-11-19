@@ -249,7 +249,9 @@ The window, top to bottom:
   before), the first three targets (green confirmed, amber tentative, with position and views), and
   one status light. When no scan, odom or tf has come for 3 s it turns into one red banner:
   "no data for N - replay ended or robot off".
-- dock (drag its edge to resize, `D` or Panel to hide it), sections open and close by their title:
+- dock (drag its edge to resize, `D` or Panel to hide it). Sections open and close by their title;
+  drag the line between two open sections to share the height differently (each keeps at least two
+  rows), and a section whose content is taller scrolls on its own (wheel over it, thin bar on the right):
   - Layers: a row per layer with its symbol and the topic it is bound to; click the row or the box.
     Layers whose topics nobody publishes are listed as "Not published". Costmaps get an opacity
     slider when on.

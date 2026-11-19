@@ -1,123 +1,26 @@
-//! Pure part of the viewer: world -> screen transform and the list of things to draw for one frame.
-//! Nothing here touches a window, so it is unit tested.
+//! Pure part of the viewer: the list of things to draw for one frame. The transform, colours, map
+//! image and primitives come from `tb4_draw`, shared with the ROS viewer. Nothing here touches a
+//! window, so it is unit tested.
 
 use tb4_core::{Grid, Pose2};
+use tb4_draw::prim;
 use tb4_explore::{Frontier, View as CameraView};
 use tb4_sim::SimState;
 use tb4_sim::metrics::MarkerRecord;
 use tb4_sim::sim::compose;
 use tb4_sim::world::SegmentKind;
 
-pub type Rgba = [u8; 4];
-
-pub mod colors {
-    use super::Rgba;
-    pub const BACKGROUND: Rgba = [28, 28, 32, 255];
-    pub const UNKNOWN: Rgba = [64, 66, 74, 255];
-    pub const FREE: Rgba = [206, 206, 200, 255];
-    pub const OCCUPIED: Rgba = [20, 20, 20, 255];
-    pub const WALL: Rgba = [170, 110, 255, 255];
-    pub const GLASS: Rgba = [0, 220, 255, 255];
-    pub const ROBOT: Rgba = [255, 255, 255, 200];
-    pub const ROBOT_EDGE: Rgba = [20, 20, 20, 255];
-    pub const ESTIMATE: Rgba = [255, 120, 200, 255];
-    pub const TRAIL: Rgba = [40, 170, 160, 255];
-    pub const PATH: Rgba = [40, 200, 60, 255];
-    pub const TRAJECTORY: Rgba = [255, 0, 200, 255];
-    pub const FRONTIER: Rgba = [50, 110, 255, 255];
-    pub const VIEW: Rgba = [255, 150, 0, 255];
-    pub const GOAL: Rgba = [255, 230, 0, 255];
-    pub const BUMP: Rgba = [255, 40, 40, 255];
-    pub const MARKER_UNSEEN: Rgba = [150, 150, 150, 255];
-    pub const MARKER_NEAR: Rgba = [255, 200, 0, 255];
-    pub const MARKER_READABLE: Rgba = [0, 210, 90, 255];
-    pub const TEXT: Rgba = [235, 235, 235, 255];
-}
-
-/// metres -> pixels, north up: world `bounds` fitted and centred in a screen rectangle
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Viewport {
-    pub x0: f64,
-    pub y1: f64,
-    /// pixels per metre
-    pub scale: f64,
-    pub left: f64,
-    pub top: f64,
-}
-
-impl Viewport {
-    /// fit `bounds` [x0, y0, x1, y1] into the screen rect (x, y, w, h) with `margin` pixels around
-    pub fn fit(bounds: [f64; 4], rect: (f64, f64, f64, f64), margin: f64) -> Self {
-        let [x0, y0, x1, y1] = bounds;
-        let (bw, bh) = ((x1 - x0).max(1e-6), (y1 - y0).max(1e-6));
-        let (aw, ah) = ((rect.2 - 2.0 * margin).max(1.0), (rect.3 - 2.0 * margin).max(1.0));
-        let scale = (aw / bw).min(ah / bh);
-        Self { x0, y1, scale, left: rect.0 + (rect.2 - bw * scale) / 2.0, top: rect.1 + (rect.3 - bh * scale) / 2.0 }
-    }
-
-    pub fn to_screen(&self, x: f64, y: f64) -> (f32, f32) {
-        ((self.left + (x - self.x0) * self.scale) as f32, (self.top + (self.y1 - y) * self.scale) as f32)
-    }
-
-    pub fn len(&self, metres: f64) -> f32 {
-        (metres * self.scale) as f32
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Prim {
-    Line { a: (f32, f32), b: (f32, f32), color: Rgba, width: f32, dashed: bool },
-    Polyline { pts: Vec<(f32, f32)>, color: Rgba, width: f32 },
-    Circle { c: (f32, f32), r: f32, fill: Option<Rgba>, stroke: Option<(Rgba, f32)> },
-    Text { at: (f32, f32), text: String, color: Rgba, size: f32 },
-}
-
-/// the SLAM map as an RGBA image (row 0 = north edge) and the affine map from image pixels to the
-/// screen: sx = a*u + c*v + e, sy = b*u + d*v + f
-#[derive(Debug, Clone, PartialEq)]
-pub struct MapLayer {
-    pub width: u32,
-    pub height: u32,
-    pub affine: [f32; 6],
-}
-
-pub fn cell_color(v: i8) -> Rgba {
-    use colors::*;
-    if v < 0 {
-        UNKNOWN
-    } else if v >= 65 {
-        OCCUPIED
-    } else {
-        let t = f32::from(v) / 65.0;
-        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t * 0.5).round() as u8;
-        [mix(FREE[0], OCCUPIED[0]), mix(FREE[1], OCCUPIED[1]), mix(FREE[2], OCCUPIED[2]), 255]
-    }
-}
+pub use tb4_draw::palette as colors;
+pub use tb4_draw::{MapLayer, Prim, Rgba, Viewport, cell_color};
 
 /// RGBA8 pixels of the grid, north row first
 pub fn map_rgba(g: &Grid) -> Vec<u8> {
-    let (w, h) = (g.meta.width as usize, g.meta.height as usize);
-    let mut out = Vec::with_capacity(w * h * 4);
-    for v in 0..h {
-        let row = &g.data[(h - 1 - v) * w..(h - v) * w];
-        for &c in row {
-            out.extend_from_slice(&cell_color(c));
-        }
-    }
-    out
+    tb4_draw::map_rgba(&g.meta, &g.data)
 }
 
+/// where the SLAM map lands on screen; `map_origin` is the map frame in the world
 pub fn map_layer(g: &Grid, map_origin: Pose2, vp: &Viewport) -> MapLayer {
-    let m = &g.meta;
-    let screen = |u: f64, v: f64| {
-        let p = Pose2::new(m.origin_x + u * m.resolution, m.origin_y + (f64::from(m.height) - v) * m.resolution, 0.0);
-        let w = compose(map_origin, p);
-        vp.to_screen(w.x, w.y)
-    };
-    let o = screen(0.0, 0.0);
-    let pu = screen(1.0, 0.0);
-    let pv = screen(0.0, 1.0);
-    MapLayer { width: m.width, height: m.height, affine: [pu.0 - o.0, pu.1 - o.1, pv.0 - o.0, pv.1 - o.1, o.0, o.1] }
+    tb4_draw::map_layer(&g.meta, (map_origin.x, map_origin.y, map_origin.yaw), vp)
 }
 
 /// everything drawn over the map for one frame
@@ -180,20 +83,13 @@ pub fn build(input: &SceneInput, vp: &Viewport) -> Vec<Prim> {
     }
 
     for f in input.frontiers {
-        out.push(Prim::Circle { c: world_of(f.goal), r: 4.0, fill: Some(colors::FRONTIER), stroke: None });
+        out.push(prim::dot(world_of(f.goal), 4.0, colors::FRONTIER));
     }
     for v in input.views {
-        let c = world_of((v.x, v.y));
-        out.push(Prim::Circle { c, r: 4.0, fill: Some(colors::VIEW), stroke: None });
-        let yaw = o.yaw + v.yaw;
-        let tip = (c.0 + 10.0 * yaw.cos() as f32, c.1 - 10.0 * yaw.sin() as f32);
-        out.push(Prim::Line { a: c, b: tip, color: colors::VIEW, width: 1.5, dashed: false });
+        out.extend(prim::view(world_of((v.x, v.y)), o.yaw + v.yaw, colors::VIEW));
     }
     if let Some(g) = s.goal {
-        let c = world_of(g);
-        out.push(Prim::Circle { c, r: 7.0, fill: None, stroke: Some((colors::GOAL, 2.0)) });
-        out.push(Prim::Line { a: (c.0 - 10.0, c.1), b: (c.0 + 10.0, c.1), color: colors::GOAL, width: 1.5, dashed: false });
-        out.push(Prim::Line { a: (c.0, c.1 - 10.0), b: (c.0, c.1 + 10.0), color: colors::GOAL, width: 1.5, dashed: false });
+        out.extend(prim::goal(world_of(g)));
     }
 
     for (mk, rec) in s.world.markers.iter().zip(s.markers) {
@@ -208,10 +104,7 @@ pub fn build(input: &SceneInput, vp: &Viewport) -> Vec<Prim> {
     }
 
     for &(x, y) in s.bumps {
-        let (cx, cy) = vp.to_screen(x, y);
-        let d = 5.0;
-        out.push(Prim::Line { a: (cx - d, cy - d), b: (cx + d, cy + d), color: colors::BUMP, width: 2.5, dashed: false });
-        out.push(Prim::Line { a: (cx - d, cy + d), b: (cx + d, cy - d), color: colors::BUMP, width: 2.5, dashed: false });
+        out.extend(prim::cross(vp.to_screen(x, y), 5.0, colors::BUMP, 2.5));
     }
 
     // estimate (where SLAM thinks the robot is), then the true robot
@@ -223,11 +116,7 @@ pub fn build(input: &SceneInput, vp: &Viewport) -> Vec<Prim> {
         stroke: Some((colors::ESTIMATE, 1.5)),
     });
     let t = s.truth;
-    let c = vp.to_screen(t.x, t.y);
-    let r = px(input.robot_radius);
-    out.push(Prim::Circle { c, r, fill: Some(colors::ROBOT), stroke: Some((colors::ROBOT_EDGE, 1.5)) });
-    let tip = (c.0 + r * t.yaw.cos() as f32, c.1 - r * t.yaw.sin() as f32);
-    out.push(Prim::Line { a: c, b: tip, color: colors::ROBOT_EDGE, width: 2.0, dashed: false });
+    out.extend(prim::robot(vp.to_screen(t.x, t.y), px(input.robot_radius), t.yaw));
     out
 }
 

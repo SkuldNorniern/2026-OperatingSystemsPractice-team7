@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 aurea = "0.1"
 tb4_core = { path = "../tb4_core" }
+tb4_draw = { path = "../tb4_draw" }
 tb4_explore = { path = "../tb4_explore" }
 tb4_sim = { path = "../tb4_sim" }
 

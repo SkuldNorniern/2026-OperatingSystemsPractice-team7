@@ -5,13 +5,16 @@ use std::time::Instant;
 
 use aurea::AureaResult;
 use aurea::prelude::KeyCode;
-use aurea::render::{Color, DrawingContext, Font, Image, Paint, PaintStyle, Path, PathCommand, Point, Rect, Sampling, Transform};
+use aurea::render::{DrawingContext, Font, Image, Point, Rect};
 use aurea::ui::{Button, Segmented, Theme, UiState};
 use tb4_core::GridMeta;
+use tb4_draw::prim::{color, fill};
 use tb4_sim::worlds;
 
 use crate::app::{App, SPEEDS, STEP_BUDGET, status_lines};
-use crate::scene::{self, Prim, Rgba, SceneInput, Viewport, colors};
+use crate::scene::{self, SceneInput, Viewport, colors};
+
+pub use tb4_draw::paint_prims;
 
 pub const PANEL_WIDTH: f32 = 340.0;
 
@@ -30,55 +33,6 @@ pub struct Viewer {
     pub ui: UiState<Wid>,
     pub theme: Theme,
     map: Option<(GridMeta, Vec<i8>, Image)>,
-}
-
-fn color(c: Rgba) -> Color {
-    Color::rgba(c[0], c[1], c[2], c[3])
-}
-
-fn stroke(c: Rgba, width: f32) -> Paint {
-    Paint::new().color(color(c)).style(PaintStyle::Stroke).stroke_width(width)
-}
-
-fn fill(c: Rgba) -> Paint {
-    Paint::new().color(color(c)).style(PaintStyle::Fill)
-}
-
-fn polyline(pts: &[(f32, f32)]) -> Path {
-    let mut p = Path::new();
-    for (i, &(x, y)) in pts.iter().enumerate() {
-        let pt = Point::new(x, y);
-        p.commands.push(if i == 0 { PathCommand::MoveTo(pt) } else { PathCommand::LineTo(pt) });
-    }
-    p
-}
-
-pub fn paint_prims(ctx: &mut dyn DrawingContext, prims: &[Prim]) -> AureaResult<()> {
-    for p in prims {
-        match p {
-            Prim::Line { a, b, color, width, dashed } => {
-                let mut paint = stroke(*color, *width);
-                if *dashed {
-                    paint = paint.dash(&[6.0, 4.0], 0.0);
-                }
-                ctx.draw_path(&polyline(&[*a, *b]), &paint)?;
-            }
-            Prim::Polyline { pts, color, width } => ctx.draw_path(&polyline(pts), &stroke(*color, *width))?,
-            Prim::Circle { c, r, fill: f, stroke: s } => {
-                let at = Point::new(c.0, c.1);
-                if let Some(f) = f {
-                    ctx.draw_circle(at, *r, &fill(*f))?;
-                }
-                if let Some((sc, w)) = s {
-                    ctx.draw_circle(at, *r, &stroke(*sc, *w))?;
-                }
-            }
-            Prim::Text { at, text, color: c, size } => {
-                ctx.draw_text_with_font(text, Point::new(at.0, at.1), &Font::new("", *size), &fill(*c))?;
-            }
-        }
-    }
-    Ok(())
 }
 
 impl Viewer {
@@ -134,14 +88,7 @@ impl Viewer {
         let vp = Viewport::fit(state.world.bounds, (0.0, 0.0, f64::from(map_w), f64::from(h)), 12.0);
 
         if let (Some(g), Some(img)) = (state.map, image.as_ref()) {
-            let layer = scene::map_layer(g, state.map_origin, &vp);
-            let [a, b, c, d, e, f] = layer.affine;
-            ctx.save()?;
-            ctx.transform(Transform { m11: a, m12: b, m13: 0.0, m21: c, m22: d, m23: 0.0, m31: e, m32: f, m33: 1.0 })?;
-            ctx.set_sampling(Sampling::Nearest)?;
-            ctx.draw_image_rect(img, Rect::new(0.0, 0.0, layer.width as f32, layer.height as f32))?;
-            ctx.set_sampling(Sampling::Linear)?;
-            ctx.restore()?;
+            tb4_draw::draw_map(ctx, img, &scene::map_layer(g, state.map_origin, &vp))?;
         }
 
         let trajectory = sim.navigator().trajectory();
@@ -158,7 +105,7 @@ impl Viewer {
 
         // status panel
         let px = map_w;
-        ctx.draw_rect(Rect::new(px, 0.0, w - px, h), &fill([38, 38, 44, 255]))?;
+        ctx.draw_rect(Rect::new(px, 0.0, w - px, h), &fill(colors::PANEL))?;
         let lines = status_lines(&sim.metrics(), &self.app.opts, self.app.rate);
         let font = Font::monospace(13.0);
         let text = fill(colors::TEXT);
@@ -194,13 +141,13 @@ impl Viewer {
             "keys: space pause  1-4 speed  r reset",
             Point::new(px + 14.0, h - 30.0),
             &font,
-            &fill([160, 160, 160, 255]),
+            &fill(colors::TEXT_DIM),
         )?;
         ctx.draw_text_with_font(
             "w world  [ ] seed  s step  q quit",
             Point::new(px + 14.0, h - 12.0),
             &font,
-            &fill([160, 160, 160, 255]),
+            &fill(colors::TEXT_DIM),
         )?;
         self.controls(ctx, px)
     }
@@ -242,6 +189,7 @@ impl Viewer {
 mod tests {
     use super::*;
     use crate::app::Options;
+    use crate::scene::Rgba;
     use aurea::render::{CpuRasterizer, Renderer};
 
     /// draws a frame offscreen and returns 0xAARRGGBB pixels

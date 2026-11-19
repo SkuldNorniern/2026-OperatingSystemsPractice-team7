@@ -649,6 +649,7 @@ dependencies = [
  "aurea",
  "png",
  "tb4_core",
+ "tb4_draw",
  "tb4_explore",
  "tb4_sim",
 ]

@@ -75,7 +75,34 @@ struct State {
     stopped: bool,
     /// from /speed_limit: (percentage?, value), value 0 = no limit
     speed_limit: (bool, f64),
+    /// stage timings (obstacle field, cspace, planner, mppi), logged every TIMING_LOG_PERIOD
+    timing: [StageTime; 4],
+    timing_logged: Instant,
 }
+
+/// mean / max of one navigator stage since the last timing log line
+#[derive(Default, Clone, Copy)]
+struct StageTime {
+    n: u32,
+    sum_ms: f64,
+    max_ms: f64,
+}
+
+impl StageTime {
+    fn add(&mut self, since: Instant) {
+        self.add_dur(since.elapsed());
+    }
+
+    fn add_dur(&mut self, d: Duration) {
+        let ms = d.as_secs_f64() * 1e3;
+        self.n += 1;
+        self.sum_ms += ms;
+        self.max_ms = self.max_ms.max(ms);
+    }
+}
+
+const TIMING_LOG_PERIOD: Duration = Duration::from_secs(10);
+const STAGES: [&str; 4] = ["obstacle field", "cspace", "planner", "mppi"];
 
 struct Io {
     cmd: r2r::Publisher<TwistStamped>,
@@ -250,6 +277,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         done: false,
         stopped: true,
         speed_limit: (true, 0.0),
+        timing: [StageTime::default(); 4],
+        timing_logged: Instant::now(),
     }));
 
     let st = state.clone();
@@ -407,10 +436,26 @@ fn tick(
 ) {
     let mut s = state.borrow_mut();
 
+    if s.timing_logged.elapsed() >= TIMING_LOG_PERIOD {
+        let parts: Vec<String> = STAGES
+            .iter()
+            .zip(s.timing)
+            .filter(|(_, t)| t.n > 0)
+            .map(|(name, t)| format!("{name} {}x mean {:.1} max {:.1} ms", t.n, t.sum_ms / t.n as f64, t.max_ms))
+            .collect();
+        if !parts.is_empty() {
+            log_info!(log, "timing: {}", parts.join(", "));
+        }
+        s.timing = [StageTime::default(); 4];
+        s.timing_logged = Instant::now();
+    }
+
     if s.map_dirty
         && let Some(m) = s.map.as_ref()
     {
+        let t = Instant::now();
         let cs = CSpace::new(m, &cfg.cs);
+        s.timing[1].add(t);
         s.cspace = Some(cs);
         s.map_dirty = false;
     }
@@ -419,14 +464,17 @@ fn tick(
         s.last_obstacles = Instant::now();
         let global_due = s.last_global.elapsed() >= Duration::from_secs(1);
         let mut global_sent = false;
+        let mut obs_time = None;
         if let Some(m) = s.map.as_ref() {
+            let t_obs = Instant::now();
             let mut g = m.clone();
             for &(x, y) in &s.scan_points {
                 if let Some(c) = g.world_to_cell(x, y) {
                     g.set(c, 100);
                 }
             }
-            let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
+            let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);
+            obs_time = Some(t_obs.elapsed());            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
             // the costmap is big and only changes with the map: publish about once a second
             if global_due {
                 global_sent = true;
@@ -441,6 +489,9 @@ fn tick(
         }
         if global_sent {
             s.last_global = Instant::now();
+        }
+        if let Some(d) = obs_time {
+            s.timing[0].add_dur(d);
         }
     }
 
@@ -500,7 +551,9 @@ fn tick(
             stop(&mut s, io, cfg, &now);
             return;
         };
+        let t = Instant::now();
         let res = s.planner.lazy_theta_star(&cs, (robot.x, robot.y), (gx, gy), &cfg.pp);
+        s.timing[2].add(t);
         s.last_plan = Instant::now();
         match res {
             Ok(p) => {
@@ -549,7 +602,9 @@ fn tick(
         Mode::Mppi => {
             let st = RobotState { pose: robot, v: s.v, w: s.w };
             let obstacles = s.obstacles.take();
+            let t = Instant::now();
             let cmd = s.mppi.compute(&st, obstacles.as_ref());
+            s.timing[3].add(t);
             s.obstacles = obstacles;
             let traj: Vec<(f64, f64)> = s.mppi.optimal_trajectory().iter().map(|p| (p.x, p.y)).collect();
             let _ = io.traj.publish(&path_msg(&cfg.map_frame, &traj, &now));

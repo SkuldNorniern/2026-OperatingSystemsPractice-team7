@@ -190,8 +190,8 @@ impl std::fmt::Display for Acc {
 fn main() {
     let mut params = SlamParams::default();
     let (mut map_out, mut time_offset) = (None, 0.0);
-    // slam node map->odom publisher: smoothing time constant (s) and jump limits (m, rad)
-    let (mut tau, mut jump_lin, mut jump_ang) = (0.0, 0.2, 0.05);
+    // slam node map->odom publisher: smoothing time constant (s) and jump limits (m, rad), node defaults
+    let (mut tau, mut jump_lin, mut jump_ang) = (0.3, 0.1, 0.03);
     let mut sp = ScanParams::default();
     for a in std::env::args().skip(1) {
         let (k, v) = a.split_once('=').expect("key=value");

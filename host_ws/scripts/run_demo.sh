@@ -13,9 +13,9 @@
 #   --start-offset SEC: with --replay, start the bag SEC seconds in. Default: just after the odometry
 #            reset that the live run recorded during its preparation (0 = from the very start).
 #   --graph: also open rqt_graph on the run's ROS domain (save the node graph from its window)
-#   --viz: also open team7_viz (read-only map viewer) on the run's ROS domain, stopped with the run.
-#            Built from the main workspace (colcon build --packages-select team7_viz), also for --stock.
-#            Add rviz:=false to use it instead of RViz.
+#   --viz: open team7_viz (read-only map viewer) instead of RViz, on the run's ROS domain, stopped with
+#            the run. Built from the main workspace (colcon build --packages-select team7_viz), also for
+#            --stock. Add rviz:=true to get both.
 #   --no-prepare: live only; skip undock and odometry reset (stationary diagnostics).
 #   --no-record / record:=: live only. A replay never records (a bag of a bag only fills the disk).
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2, explorer:=none, output_dir:=DIR
@@ -73,6 +73,10 @@ if [ "$STOCK" = true ]; then
   LAUNCH_ARGS=(use_sim_time:=false)
 fi
 LAUNCH_ARGS+=(${EXTRA[@]+"${EXTRA[@]}"})
+# --viz replaces RViz unless rviz:= was given
+if [ "$VIZ" = true ] && ! printf '%s\n' ${EXTRA[@]+"${EXTRA[@]}"} | grep -q '^rviz:='; then
+  LAUNCH_ARGS+=(rviz:=false)
+fi
 
 # one run at a time: replay, live and stock share this lock
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/team7_demo_${UID}.lock"

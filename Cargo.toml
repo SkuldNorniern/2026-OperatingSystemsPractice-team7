@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# plain `cargo build` / `cargo test` skip the GTK viewer; build it with `-p tb4_viewer` or `--workspace`
+# plain `cargo build` / `cargo test` skip the aurea crates (Rust >= 1.90; tb4_viewer also needs GTK);
+# build them with `-p tb4_draw`, `-p tb4_viewer` or `--workspace`
 default-members = [
     "crates/tb4_aruco", "crates/tb4_control", "crates/tb4_core", "crates/tb4_explore", "crates/tb4_markers",
     "crates/tb4_planning", "crates/tb4_scan", "crates/tb4_sim", "crates/tb4_slam",

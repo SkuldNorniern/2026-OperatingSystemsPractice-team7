@@ -589,6 +589,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tb4_draw"
+version = "0.1.0"
+dependencies = [
+ "aurea-foundation",
+ "aurea-render",
+ "tb4_core",
+]
+
+[[package]]
 name = "tb4_explore"
 version = "0.1.0"
 dependencies = [

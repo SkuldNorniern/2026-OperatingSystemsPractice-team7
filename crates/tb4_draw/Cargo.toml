@@ -1,0 +1,14 @@
+[package]
+name = "tb4_draw"
+version = "0.1.0"
+description = "Top-down drawing shared by the sim viewer and the ROS viewer: palette, viewport, map image, primitives, painted with aurea"
+edition.workspace = true
+# aurea needs 1.90
+rust-version = "1.90"
+license.workspace = true
+
+[dependencies]
+# only the renderer part of aurea: no window toolkit, so this crate builds and tests without GTK
+aurea-render = "0.1"
+aurea-foundation = "0.1"
+tb4_core = { path = "../tb4_core" }

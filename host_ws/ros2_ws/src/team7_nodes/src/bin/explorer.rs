@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             goal_standoff: p.f64("goal_standoff", 0.25),
             traversable_threshold: p.i64("traversable_threshold", 99) as i8,
             frontier_segment_length: p.f64("frontier_segment_length", 1.2),
+            min_unknown_area: p.f64("min_unknown_area", 1.0),
         },
         // after frontiers: go look at walls the camera has not seen, markers can be on any of them
         coverage: p.bool("camera_coverage", true).then(|| CoverageParams {
@@ -73,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view_detour: p.f64("view_detour", 0.0),
         look_around_turns: p.i64("look_around_turns", 3).max(0) as u32,
         preempt_distance: p.f64("preempt_distance", 0.5),
+        switch_cooldown: p.f64("switch_cooldown", 20.0),
     };
     let map_frame = Rc::new(p.string("map_frame", "map"));
     let base_frame = Rc::new(p.string("base_frame", "base_link"));

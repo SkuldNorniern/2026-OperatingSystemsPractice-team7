@@ -52,7 +52,7 @@ explorer:
     free_threshold: 50
     traversable_threshold: 99
     frontier_segment_length: 1.2
-    min_frontier_cells: 8
+    min_frontier_cells: 12    # 0.6 m; 0.4 m leftovers near box corners cost 80 s in the sim studio
     size_weight: 1.0
     distance_weight: 1.5
     blacklist_radius: 0.7
@@ -66,7 +66,9 @@ explorer:
     view_standoff: 1.0        # m from the wall when looking at it (also inside the 2 m scoring radius)
     view_max_cells: 32        # wall piece per view (cells)
     view_detour: 1.0          # m, take a camera view of an unseen wall this close during the frontier phase, 0 = off
-    preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one (no stop)
+    preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one once its frontier starts to go
+    switch_cooldown: 20.0     # s, a goal switched away from is not picked again (sim studio: 2 goals swapped for 8 min)
+    min_unknown_area: 1.0     # m^2, skip frontiers onto enclosed unknown pockets smaller than this (box insides)
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
     retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
 

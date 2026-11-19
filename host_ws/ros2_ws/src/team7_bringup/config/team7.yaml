@@ -69,6 +69,8 @@ explorer:
     preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one once its frontier starts to go
     switch_cooldown: 20.0     # s, a goal switched away from is not picked again (sim studio: 2 goals swapped for 8 min)
     min_unknown_area: 1.0     # m^2, skip frontiers onto enclosed unknown pockets smaller than this (box insides)
+    goal_max_unknown: 0.15    # share of unknown cells allowed around a frontier goal; 0 deadlocked a parked
+                              # robot in clutter (field 184838 waited 75 s until pushed: speckled one-scan map)
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
     retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
 

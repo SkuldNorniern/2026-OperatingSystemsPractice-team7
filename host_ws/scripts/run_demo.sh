@@ -170,6 +170,10 @@ prepare_live() {
   for topic in /odom /oakd/rgb/preview/image_raw/compressed /oakd/rgb/preview/camera_info; do
     grep -qx "$topic" <<<"$topics" || echo "warning: $topic not visible; check the robot camera / create3 bridge" >&2
   done
+  # bump and IR data for the later wall filling; none of the 2026-11-18 bags had them
+  for topic in /hazard_detection /ir_intensity; do
+    grep -qx "$topic" <<<"$topics" || echo "warning: $topic not visible, so it is not recorded; add it to the create3 republisher topics on the Pi" >&2
+  done
 
   # Create 3 clock: /odom stamps must be close to this laptop's time (case 25). Warning only,
   # because the laptop CLI can miss messages; the Pi check (tb4_rpi_timesync.sh check) is the reference.

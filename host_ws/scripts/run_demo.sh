@@ -8,10 +8,12 @@
 #   --stock: the committed HEAD of this repo (rust_base), built into a cache, with the stock
 #            launch defaults (Nav2 navigation, slam_toolbox). set TEAM7_REV to pin another commit.
 #            Same live preparation as the default.
-#   --replay BAG_DIR: play a recorded run instead of the robot (bag clock, TF relayed). No preparation.
-#   --start-offset SEC: with --replay, start the bag SEC seconds in (e.g. where /odom starts)
+#   --replay BAG_DIR: play a recorded run instead of the robot (bag clock, TF relayed). No preparation,
+#            never records a bag; map/targets go to the replay log folder, not ~/team7_run.
+#   --start-offset SEC: with --replay, start the bag SEC seconds in. Default: just after the odometry
+#            reset that the live run recorded during its preparation (0 = from the very start).
 #   --no-prepare: live only; skip undock and odometry reset (stationary diagnostics).
-#   --no-record: live only; do not record the run.
+#   --no-record / record:=: live only. A replay never records (a bag of a bag only fills the disk).
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2, explorer:=none, output_dir:=DIR
 set -euo pipefail
 
@@ -23,6 +25,7 @@ OFFSET=""
 STOCK=false
 PREPARE=true
 RECORD=true
+RECORD_SET=false
 RUN_DIR=""
 EXTRA=()
 LAUNCH_ARGS=(use_sim_time:=false nav:=team7 slam_backend:=team7 aruco:=team7)
@@ -33,10 +36,10 @@ while [ $# -gt 0 ]; do
     --replay) BAG="${2:?--replay needs a bag directory}"; shift ;;
     --start-offset) OFFSET="${2:?--start-offset needs seconds}"; shift ;;
     --no-prepare) PREPARE=false ;;
-    --no-record) RECORD=false ;;
+    --no-record) RECORD=false; RECORD_SET=true ;;
     --help|-h) sed -n 2,17p "$0"; exit 0 ;;
     output_dir:=*) RUN_DIR="${1#output_dir:=}" ;;
-    record:=*) RECORD="${1#record:=}" ;;
+    record:=*) RECORD="${1#record:=}"; RECORD_SET=true ;;
     *) EXTRA+=("$1") ;;
   esac
   shift
@@ -195,8 +198,39 @@ prepare_live() {
 # ---------------------------------------------------------------- replay
 replay_relays() {
   export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-79}"
+  RECORD=false
+  [ "$RECORD_SET" = true ] && echo '[*] replay: recording option ignored, a replay never records' >&2
+  # record:=false last, so it wins over anything passed through
   LAUNCH_ARGS=("${LAUNCH_ARGS[@]/use_sim_time:=false/use_sim_time:=true}" record:=false)
   TMP="$(mktemp -d)"
+  # A live bag starts before the robot preparation, so it holds the /reset_pose jump (in run
+  # 20261118_185946 from (4.69, 2.18) to (0, 0)). Start after it unless an offset was given.
+  if [ -z "$OFFSET" ]; then
+    OFFSET=$(python3 - "$BAG" <<'PY' 2>/dev/null || true
+import math, sys, rosbag2_py
+from rclpy.serialization import deserialize_message
+from nav_msgs.msg import Odometry
+r = rosbag2_py.SequentialReader()
+r.open(rosbag2_py.StorageOptions(uri=sys.argv[1], storage_id='mcap'), rosbag2_py.ConverterOptions('', ''))
+r.set_filter(rosbag2_py.StorageFilter(topics=['/odom']))
+t0 = prev = reset = None
+while r.has_next():
+    _, data, ts = r.read_next()
+    t = ts / 1e9
+    p = deserialize_message(data, Odometry).pose.pose.position
+    t0 = t0 or t
+    if t - t0 > 60:
+        break
+    # a jump onto the origin: the reset to the identity pose
+    if prev and math.hypot(p.x - prev[0], p.y - prev[1]) > 0.02 and math.hypot(p.x, p.y) < 0.01:
+        reset = t - t0
+    prev = (p.x, p.y)
+if reset is not None:
+    print(f'{reset + 0.5:.1f}')
+PY
+)
+    [ -n "$OFFSET" ] && echo "[*] replay: starting at ${OFFSET}s, after the recorded odometry reset (--start-offset 0 replays from the start)"
+  fi
   # the recorded TF has map->odom from an old SLAM; relay it without the map frame
   # and forward the static TF, so the live SLAM owns map->odom.
   cat > "$TMP/tf_relay.py" <<'PY'
@@ -271,12 +305,18 @@ fi
 # console.log is the launch output; ros_logs/ holds each node's own log. tee ignores Ctrl-C, so the
 # file still gets the last lines when the run is stopped.
 LOG_DIR="${RUN_DIR:-}"
-if [ -z "$LOG_DIR" ]; then
-  LOG_DIR="$HOME/team7_runs/replay_$(basename "${BAG%/}")_$(date +%Y%m%d_%H%M%S_%N)"
+if [ -n "$BAG" ]; then
+  [ -n "$LOG_DIR" ] || LOG_DIR="$HOME/team7_runs/replay_$(basename "${BAG%/}")_$(date +%Y%m%d_%H%M%S_%N)"
   mkdir -p "$LOG_DIR"
+  LOG_DIR=$(cd "$LOG_DIR" && pwd)
   export ROS_LOG_DIR="$LOG_DIR/ros_logs"
+  # map, targets and autosaves of the replay stay with its logs instead of overwriting ~/team7_run
+  LAUNCH_ARGS+=("output_dir:=$LOG_DIR")
 fi
 echo "[*] run logs: $LOG_DIR"
 
 echo "launch: team7.launch.py ${LAUNCH_ARGS[*]}"
-ros2 launch team7_bringup team7.launch.py "${LAUNCH_ARGS[@]}" 2>&1 | (trap '' INT; exec tee -a "$LOG_DIR/console.log")
+# Started from a script or in the background, bash hands SIGINT down as ignored, and the documented
+# stop (kill -INT on the launch) would do nothing. Reset it to the default for the launch and its nodes.
+python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+  ros2 launch team7_bringup team7.launch.py "${LAUNCH_ARGS[@]}" 2>&1 | (trap '' INT; exec tee -a "$LOG_DIR/console.log")

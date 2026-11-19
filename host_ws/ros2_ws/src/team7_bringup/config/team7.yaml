@@ -114,7 +114,9 @@ slam:
     max_range: 8.0
     map_publish_period: 1.0
     map_odom_scan_stamp: 0.0  # 1.0 = stamp map->odom with the scan time (test on replay first); 0.0 = current live behaviour
-    scan_time_offset: 0.0  # s added to the scan stamp for the odom lookup; -0.15 halved per-scan pose corrections and tf failures on the 2026-11-18 bags (offline replay), test live first
+    scan_time_offset: -0.15  # s added to the scan stamp for the odom lookup. Replay 184838 through the full launch:
+                             # map->odom jump per update 6.0 -> 3.5 cm mean, 1.0 -> 0.5 deg; about one A1 rotation,
+                             # so likely the driver stamping the end of the sweep (see stamp_at_end)
     transform_publish_period: 0.05
 
 navigator:

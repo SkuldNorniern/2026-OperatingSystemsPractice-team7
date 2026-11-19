@@ -106,6 +106,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
             frontier_segment_length: 1.2,
             min_unknown_area: 1.0,
             goal_max_unknown: 0.15,
+                min_free_fraction: 0.5,
         },
         coverage: Some(cov),
         view_detour: 1.0,
@@ -157,7 +158,8 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 33] = [
+pub const SET_NAMES: [&str; 34] = [
+    "min_free_fraction",
     "require_scale_all",
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
@@ -204,6 +206,7 @@ impl SimConfig {
             "pnp_sigma" => self.vision.pnp_sigma = x,
             "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
             "require_scale_all" => self.track.require_scale_all = x != 0.0,
+            "min_free_fraction" => e.explore.min_free_fraction = x,
             "approach_markers" if x == 0.0 => e.approach = None,
             "approach_markers" => {
                 e.approach.get_or_insert_with(ApproachParams::default);

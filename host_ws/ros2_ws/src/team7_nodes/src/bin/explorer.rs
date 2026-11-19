@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frontier_segment_length: p.f64("frontier_segment_length", 1.2),
             min_unknown_area: p.f64("min_unknown_area", 1.0),
             goal_max_unknown: p.f64("goal_max_unknown", 0.15),
+            min_free_fraction: p.f64("min_free_fraction", 0.5),
         },
         // after frontiers: go look at walls the camera has not seen, markers can be on any of them
         coverage: p.bool("camera_coverage", true).then(|| CoverageParams {

@@ -78,6 +78,8 @@ explorer:
     min_unknown_area: 1.0     # m^2, skip frontiers onto enclosed unknown pockets smaller than this (box insides)
     goal_max_unknown: 0.15    # share of unknown cells allowed around a frontier goal; 0 deadlocked a parked
                               # robot in clutter (field 184838 waited 75 s until pushed: speckled one-scan map)
+    min_free_fraction: 0.5    # skip frontiers whose free side is a thin spike (lidar beams through chair legs);
+                              # sim 3 seeds x 2 worlds: all 3 targets confirmed 6/6 vs 4/6 without
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
     retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
     # approach on sight: a marker marker_mapper holds but has not confirmed (/team7/marker_approach) is looked at

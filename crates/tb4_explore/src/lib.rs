@@ -20,6 +20,10 @@ pub struct ExploreParams {
     pub goal_standoff: f64,
     pub traversable_threshold: i8,
     pub frontier_segment_length: f64,
+    /// skip a frontier whose unknown side is an enclosed pocket smaller than this (m^2): the inside
+    /// of a box or the space under a desk is never mapped, and its edge stays a frontier for the
+    /// whole run (sim studio: two such goals swapped for 8 min). 0 = off
+    pub min_unknown_area: f64,
 }
 
 impl Default for ExploreParams {
@@ -34,6 +38,7 @@ impl Default for ExploreParams {
             goal_standoff: 0.25,
             traversable_threshold: 99,
             frontier_segment_length: 0.0,
+            min_unknown_area: 0.0,
         }
     }
 }
@@ -61,6 +66,41 @@ fn is_frontier(g: &Grid, c: Cell, thr: i8) -> bool {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .iter()
         .any(|(dx, dy)| g.cell_checked(x + dx, y + dy).is_some_and(|n| g.get(n) == UNKNOWN))
+}
+
+/// true if the unknown cells next to `members` form a closed region smaller than `area` (m^2):
+/// a flood fill through unknown cells, stopped as soon as it reaches that size
+fn unknown_pocket(g: &Grid, members: &[usize], area: f64) -> bool {
+    let w = g.meta.width as usize;
+    let limit = (area / (g.meta.resolution * g.meta.resolution)).ceil() as usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = VecDeque::new();
+    for &i in members {
+        let (x, y) = ((i % w) as i64, (i / w) as i64);
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if let Some(c) = g.cell_checked(x + dx, y + dy)
+                && g.get(c) == UNKNOWN
+                && seen.insert(g.index(c))
+            {
+                queue.push_back(c);
+            }
+        }
+    }
+    while let Some(c) = queue.pop_front() {
+        if seen.len() >= limit {
+            return false;
+        }
+        let (x, y) = (c.x as i64, c.y as i64);
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            match g.cell_checked(x + dx, y + dy) {
+                // unknown reaching the map edge is open space, never a pocket
+                None => return false,
+                Some(n) if g.get(n) == UNKNOWN && seen.insert(g.index(n)) => queue.push_back(n),
+                _ => {}
+            }
+        }
+    }
+    seen.len() < limit
 }
 
 pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Frontier> {
@@ -136,6 +176,9 @@ pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Fro
         } else { vec![members.clone()] };
         for members in groups {
         if members.len() < p.min_frontier_cells {
+            continue;
+        }
+        if p.min_unknown_area > 0.0 && unknown_pocket(g, &members, p.min_unknown_area) {
             continue;
         }
         let to_world = |i: usize| g.cell_to_world(Cell { x: (i % w) as u32, y: (i / w) as u32 });
@@ -232,6 +275,32 @@ mod tests {
             g.set(Cell { x: i, y: 0 }, 100);
         }
         g
+    }
+
+    #[test]
+    fn frontiers_onto_small_enclosed_pockets_are_skipped() {
+        // 4 x 4 m mapped room, open to unknown on the east side, with a 0.5 x 0.5 m box whose
+        // inside is unknown (never seen) in the middle
+        let meta = GridMeta { width: 120, height: 80, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 0..80 {
+            for x in 0..80 {
+                g.set(Cell { x, y }, 0);
+            }
+        }
+        for y in 30..40 {
+            for x in 30..40 {
+                g.set(Cell { x, y }, UNKNOWN);
+            }
+        }
+        let p = ExploreParams { min_frontier_cells: 3, ..Default::default() };
+        let near_box = |f: &Frontier| (f.centroid.0 - 1.75).abs() < 0.6 && (f.centroid.1 - 1.75).abs() < 0.6;
+        let all = find_frontiers(&g, (0.5, 0.5), &p);
+        assert!(all.iter().any(near_box), "without the filter the box edge is a frontier");
+        assert!(all.iter().any(|f| f.centroid.0 > 3.5), "and so is the open east side");
+        let filtered = find_frontiers(&g, (0.5, 0.5), &ExploreParams { min_unknown_area: 1.0, ..p });
+        assert!(!filtered.iter().any(near_box), "0.25 m^2 pocket skipped");
+        assert!(filtered.iter().any(|f| f.centroid.0 > 3.5), "open side kept");
     }
 
     #[test]

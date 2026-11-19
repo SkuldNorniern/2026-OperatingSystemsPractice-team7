@@ -108,3 +108,15 @@ fn cell_dist(cs: &CSpace, x: i64, y: i64) -> f64 {
     }
     cs.dist.dist[y as usize * cs.width() + x as usize] as f64
 }
+
+/// rest of `path` from the point nearest `robot`, starting at the robot, if every segment past that
+/// point is still free (the first one may start inside inflation, as the planner snaps its start)
+pub fn remaining_free(cs: &CSpace, path: &[(f64, f64)], robot: (f64, f64)) -> Option<Vec<(f64, f64)>> {
+    let d = |p: &(f64, f64)| (p.0 - robot.0).hypot(p.1 - robot.1);
+    let i = (0..path.len()).min_by(|&a, &b| d(&path[a]).total_cmp(&d(&path[b])))?;
+    let ahead = &path[(i + 1).min(path.len() - 1)..];
+    if ahead.windows(2).any(|w| !segment_free(cs, w[0], w[1])) {
+        return None;
+    }
+    Some(std::iter::once(robot).chain(ahead.iter().copied()).collect())
+}

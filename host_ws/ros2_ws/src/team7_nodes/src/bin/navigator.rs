@@ -12,7 +12,7 @@ use r2r::sensor_msgs::msg::LaserScan;
 use r2r::{ActionClient, ActionClientGoal, ActionServerGoal, GoalStatus, QosProfile, log_info, log_warn};
 use tb4_control::{Mppi, MppiParams, RobotState};
 use tb4_core::{DistanceField, Grid, Pose2, Stamp, TfBuffer};
-use tb4_planning::{CSpace, CSpaceParams, Planner, PlannerParams};
+use tb4_planning::{CSpace, CSpaceParams, Planner, PlannerParams, remaining_free};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener};
 
 type Nav = NavigateToPose::Action;
@@ -641,17 +641,6 @@ fn tick(
     }
 }
 
-/// rest of `path` from the point nearest `robot`, starting at the robot, if every segment past that
-/// point is still free (the first one may start inside inflation, as the planner snaps its start)
-fn remaining_free(cs: &CSpace, path: &[(f64, f64)], robot: (f64, f64)) -> Option<Vec<(f64, f64)>> {
-    let d = |p: &(f64, f64)| (p.0 - robot.0).hypot(p.1 - robot.1);
-    let i = (0..path.len()).min_by(|&a, &b| d(&path[a]).total_cmp(&d(&path[b])))?;
-    let ahead = &path[(i + 1).min(path.len() - 1)..];
-    if ahead.windows(2).any(|w| !tb4_planning::segment_free(cs, w[0], w[1])) {
-        return None;
-    }
-    Some(std::iter::once(robot).chain(ahead.iter().copied()).collect())
-}
 
 fn send_follow(s: &mut State, state: &Rc<RefCell<State>>, io: &Rc<Io>, cfg: &Cfg, spawner: &LocalSpawner, path: PathMsg) {
     let goal = FollowPath::Goal { path, controller_id: cfg.controller_id.clone(), ..Default::default() };

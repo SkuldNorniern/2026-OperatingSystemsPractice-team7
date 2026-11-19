@@ -237,8 +237,20 @@ Or without colcon: `cd src/team7_viz && cargo run --release -- [options]` (ROS s
 `--output-dir DIR` (run folder the Targets panel checks, default the most recently active folder in
 `~/team7_runs`, re-checked every 5 s), `--screens-dir DIR` (default `~/team7_runs/screens`),
 `--verbose` (message counts every 2 s), `--exit-after SEC`, `--dump-frame out.png` (saves the canvas,
-and `out.ref.png` drawn offscreen, on exit). On exit it prints paint time p50/p95 and camera frames
-received vs shown.
+and `out.ref.png` drawn offscreen, on exit), `--profile NAME` (use that profile instead of the
+detected one). On exit it prints paints vs redraw requests, paint time p50/p95/max and camera frames
+received vs shown (with how many were never drawn). Camera frames that arrive together wait in a
+short queue and each one is drawn once.
+
+Profiles: the viewer keeps one settings file per mode, `~/.config/team7_viz/<profile>.toml`
+(`$XDG_CONFIG_HOME` if set). The mode is the stack plus the source: `team7-live`, `team7-replay`,
+`stock-live`, `stock-replay` (replay = `ROS_DOMAIN_ID` 79, or a `replay_*` run folder written in the
+last 2 min). A profile holds each layer's on/off, opacity and topic, added layers, the camera topic,
+the dock width, open sections and their heights, zoom, rotation, follow and the active tool. Changes
+are saved 0.8 s after the last one; when the mode changes the other profile is loaded at once. A
+missing or broken file gives the defaults and one warning line. The Profile menu shows the active
+profile and has "Reset to defaults" and "Save as default for this mode" (`<profile>.default.toml`,
+used when the mode has no saved file, and by Reset).
 
 The window, top to bottom:
 - menu bar: File (screenshot, screenshot as, quit), View (panel, follow, fit, health), Tools.
@@ -252,15 +264,27 @@ The window, top to bottom:
 - dock (drag its edge to resize, `D` or Panel to hide it). Sections open and close by their title;
   drag the line between two open sections to share the height differently (each keeps at least two
   rows), and a section whose content is taller scrolls on its own (wheel over it, thin bar on the right):
-  - Layers: a row per layer with its symbol and the topic it is bound to; click the row or the box.
-    Layers whose topics nobody publishes are listed as "Not published". Costmaps get an opacity
-    slider when on.
-  - Camera: `/team7/aruco/debug` or `/aruco_tracker/debug`, scaled to the dock; grey and marked
-    "stale" when older than 3 s; click it (or `C`) for the big view over the map.
+  - Layers: a row per layer with its symbol and a topic picker; click the row or the box to toggle.
+    The picker lists the topics of the layer's message type, publishers first, with publisher count
+    and rate (rate only for topics already subscribed). "Auto" (default) follows the team7 or stock
+    topic, whichever is published; picking a topic pins it and resubscribes at once. An amber dot
+    marks a pinned topic with no publisher. "+ add layer" adds a second Scan, Plan, Local plan, Map
+    or Local cost layer in its own colour (x removes it). Layers whose topics nobody publishes are
+    listed as "Not published". Costmaps get an opacity slider when on.
+  - Camera: `/team7/aruco/debug` or `/aruco_tracker/debug` (or the topic picked in its own picker),
+    scaled to the dock; grey and marked "stale" when older than 3 s; click it (or `C`) for the big
+    view over the map.
   - Targets: all targets (id, x, y, state with view count), the last 2D goal result, the run folder
     and whether `targets.csv` and `map.pgm` are written.
   - Health (folded): rates against what the robot normally gives, TF age, scan delay.
-- map, and a status bar (sim or wall time, ROS_DOMAIN_ID, cursor position, mouse and key hints).
+- map, and a status bar (sim or wall time, cursor position, ROS_DOMAIN_ID, frame; the right side
+  shows the full text of what the pointer is over, a message, or the mouse and key hints).
+
+Narrow windows: the dock width stays between 240 and 560 px. Under 900 px wide the dock becomes a
+drawer over the map, and under 520 px a full-width sheet (`D` or Panel opens and closes it). The
+toolbar groups turn into icons, then go into a "..." menu; the stack badge shortens; target slots
+shrink and then become one "n/3 found" chip; the clock stays. Cut text ends in "..." and its full
+text shows in the status bar on hover; the status bar drops its low-priority fields first.
 
 | layer [key] | team7 topic | stock topic | look | at start |
 |---|---|---|---|---|

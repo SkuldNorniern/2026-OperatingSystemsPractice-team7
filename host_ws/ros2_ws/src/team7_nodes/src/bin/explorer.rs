@@ -11,66 +11,29 @@ use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{ActionClient, ActionClientGoal, GoalStatus, QosProfile, log_info, log_warn};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener, viz};
 use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
-use tb4_explore::{Coverage, CoverageParams, ExploreParams, Frontier, View, find_frontiers, select_goal_with_heading};
+use tb4_explore::{Action, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, Frontier, NavStatus, TickInput, View};
 
 type Nav = NavigateToPose::Action;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Kind {
-    Frontier,
-    View,
-    Turn,
-}
-
-struct Active {
-    goal: (f64, f64),
-    kind: Kind,
-    /// ticks in a row without a frontier at this goal (frontier goals)
-    frontier_missing: u32,
-    /// camera view goal: wall point it looks at
-    view_target: Option<(f64, f64)>,
-    handle: Option<ActionClientGoal<Nav>>,
-    started: Instant,
-    /// x, y, yaw where progress was last seen
-    progress_pose: (f64, f64, f64),
-    last_progress: Instant,
-    cancelling: bool,
-}
-
 struct State {
+    /// all decisions; this node only feeds it and carries out its actions
+    policy: ExplorerPolicy,
+    /// policy time base: seconds since start on the monotonic clock
+    t0: Instant,
     grid: Option<Grid>,
     map: Option<Grid>,
-    coverage: Coverage,
-    visited_views: Vec<(f64, f64)>,
-    active: Option<Active>,
-    blacklist: Vec<((f64, f64), Instant)>,
-    next_goal_after: Instant,
-    grid_received: Instant,
-    costmap_stale: bool,
+    grid_received: f64,
     done: bool,
-    finished_exploring: bool,
-    /// look-around turns left before waiting for the map (reset when a real goal is found)
-    spins_left: u32,
-    result: Option<((f64, f64), GoalStatus)>,
+    /// accepted goal and its handle, for cancelling
+    handle: Option<((f64, f64), ActionClientGoal<Nav>)>,
+    result: Option<((f64, f64), NavStatus)>,
+    viz_seq: u64,
 }
 
-struct Cfg {
-    map_frame: String,
-    base_frame: String,
-    goal_timeout: Duration,
-    progress_timeout: Duration,
-    progress_epsilon: f64,
-    retry_delay: Duration,
-    blacklist_duration: Duration,
-    turn_weight: f64,
-    explore: ExploreParams,
-    coverage: Option<CoverageParams>,
-    /// take a camera view during frontier exploration if it is this close (m), 0 = only after frontiers
-    view_detour: f64,
-    /// in-place turns (120 deg each) when nothing is left to explore, so SLAM gets new keyframes
-    look_around_turns: u32,
-    /// a frontier goal this close is replaced by the next one, so the robot does not stop at it
-    preempt_distance: f64,
+impl State {
+    fn now(&self) -> f64 {
+        self.t0.elapsed().as_secs_f64()
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,15 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log = node.logger().to_owned();
 
     let p = Params(&node);
-    let cfg = Rc::new(Cfg {
-        map_frame: p.string("map_frame", "map"),
-        base_frame: p.string("base_frame", "base_link"),
-        goal_timeout: Duration::from_secs_f64(p.f64("goal_timeout", 60.0)),
-        progress_timeout: Duration::from_secs_f64(p.f64("progress_timeout", 15.0)),
+    let params = ExplorerParams {
+        goal_timeout: p.f64("goal_timeout", 60.0),
+        progress_timeout: p.f64("progress_timeout", 15.0),
         progress_epsilon: p.f64("progress_epsilon", 0.1),
-        retry_delay: Duration::from_secs_f64(p.f64("retry_delay", 5.0)),
-        blacklist_duration: Duration::from_secs_f64(p.f64("blacklist_duration", 45.0)),
+        retry_delay: p.f64("retry_delay", 5.0),
+        blacklist_duration: p.f64("blacklist_duration", 45.0),
         turn_weight: p.f64("turn_weight", 0.5),
+        costmap_timeout: 5.0,
         explore: ExploreParams {
             free_threshold: p.i64("free_threshold", 50) as i8,
             min_frontier_cells: p.i64("min_frontier_cells", 8) as usize,
@@ -111,7 +73,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view_detour: p.f64("view_detour", 0.0),
         look_around_turns: p.i64("look_around_turns", 3).max(0) as u32,
         preempt_distance: p.f64("preempt_distance", 0.5),
-    });
+    };
+    let map_frame = Rc::new(p.string("map_frame", "map"));
+    let base_frame = Rc::new(p.string("base_frame", "base_link"));
     let map_topic = p.string("coverage_map_topic", "/map");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
     let costmap_topic = p.string("costmap_topic", "/global_costmap/costmap");
@@ -125,19 +89,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_tf_listener(&mut node, &spawner, tf.clone(), &tf_topic, &tf_static_topic)?;
 
     let state = Rc::new(RefCell::new(State {
+        policy: ExplorerPolicy::new(params, 0.0),
+        t0: Instant::now(),
         grid: None,
         map: None,
-        coverage: Coverage::new(),
-        visited_views: Vec::new(),
-        active: None,
-        blacklist: Vec::new(),
-        next_goal_after: Instant::now(),
-        grid_received: Instant::now(),
-        costmap_stale: false,
+        grid_received: 0.0,
         done: false,
-        finished_exploring: false,
-        spins_left: cfg.look_around_turns,
+        handle: None,
         result: None,
+        viz_seq: 0,
     }));
 
     let costmap = node.subscribe::<OccupancyGrid>(&costmap_topic, QosProfile::default().reliable().transient_local())?;
@@ -146,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut s = st.borrow_mut();
         if let Some(grid) = grid_from_msg(&m) {
             s.grid = Some(grid);
-            s.grid_received = Instant::now();
+            s.grid_received = s.now();
         }
         futures::future::ready(())
     }))?;
@@ -180,16 +140,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // what the camera saw, 5 Hz
     let mut cov_timer = node.create_wall_timer(Duration::from_millis(200))?;
-    let (st, tfc, c) = (state.clone(), tf.clone(), cfg.clone());
+    let (st, tfc, mf, bf) = (state.clone(), tf.clone(), map_frame.clone(), base_frame.clone());
     spawner.spawn_local(async move {
         while cov_timer.tick().await.is_ok() {
-            let Some(cp) = c.coverage.as_ref() else { return };
-            let Ok(t) = tfc.borrow().lookup(&c.map_frame, &c.base_frame, Stamp::LATEST) else { continue };
+            if st.borrow().policy.params().coverage.is_none() {
+                return;
+            }
+            let Ok(t) = tfc.borrow().lookup(&mf, &bf, Stamp::LATEST) else { continue };
             let r = Pose2::from_isometry(&t);
             let mut s = st.borrow_mut();
             let s = &mut *s;
             if let Some(m) = s.map.as_ref() {
-                s.coverage.update(m, (r.x, r.y, r.yaw), cp);
+                s.policy.update_coverage(m, (r.x, r.y, r.yaw));
             }
         }
     })?;
@@ -202,11 +164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
         log_info!(&log, "Nav2 is up, exploring");
+        let io = Io { log: &log, map_frame: &map_frame, base_frame: &base_frame, client: &client, spawner: &sp, pubs: &pubs };
         loop {
             if timer.tick().await.is_err() {
                 return;
             }
-            tick(&log, &cfg, &state, &tf.borrow(), &client, &sp, &pubs);
+            tick(&io, &state, &tf.borrow());
         }
     })?;
 
@@ -219,251 +182,101 @@ struct Pubs {
     goal: r2r::Publisher<r2r::geometry_msgs::msg::PoseStamped>,
 }
 
-fn tick(
-    log: &str,
-    cfg: &Cfg,
-    state: &Rc<RefCell<State>>,
-    tf: &TfBuffer,
-    client: &ActionClient<Nav>,
-    spawner: &futures::executor::LocalSpawner,
-    pubs: &Pubs,
-) {
+struct Io<'a> {
+    log: &'a str,
+    map_frame: &'a str,
+    base_frame: &'a str,
+    client: &'a ActionClient<Nav>,
+    spawner: &'a futures::executor::LocalSpawner,
+    pubs: &'a Pubs,
+}
+
+/// one ExplorerPolicy tick: inputs from the subscriptions and tf in, actions out to the action client
+fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
+    let log = io.log;
     let mut s = state.borrow_mut();
-
-    if s.done {
-        if let Some(a) = s.active.as_mut().filter(|a| !a.cancelling) {
-            log_info!(log, "mission done, cancelling navigation");
-            if let Some(h) = &a.handle {
-                let _ = h.cancel();
-                a.cancelling = true;
-            }
-        }
-        return;
-    }
-
-    if let Some((goal, status)) = s.result.take() {
-        if s.active.as_ref().is_some_and(|a| a.goal == goal) {
-            // a reached view whose wall still counts as unseen must not be picked again
-            if let Some(t) = s.active.take().and_then(|a| a.view_target) {
-                s.visited_views.push(t);
-            }
-            // field runs lost about 5 s at every goal: chain straight on after a success,
-            // wait only after a failure so the map / blacklist can change first
-            s.next_goal_after = if status == GoalStatus::Succeeded { Instant::now() } else { Instant::now() + cfg.retry_delay };
-            log_info!(log, "goal ({:.2}, {:.2}) finished: {status:?}", goal.0, goal.1);
-            if !matches!(status, GoalStatus::Succeeded | GoalStatus::Canceled) {
-                s.blacklist.push((goal, Instant::now()));
-            }
-        }
-    }
-
-    let now = Instant::now();
-    s.blacklist.retain(|(_, at)| now.duration_since(*at) < cfg.blacklist_duration);
-    // Do not navigate using a costmap that stopped updating.
-    if s.grid_received.elapsed() > Duration::from_secs(5) {
-        if !s.costmap_stale {
-            s.costmap_stale = true;
-            log_warn!(log, "no costmap for 5 s, exploration paused");
-        }
-        if let Some(a) = s.active.as_mut().filter(|a| !a.cancelling) {
-            if let Some(h) = &a.handle {
-                let _ = h.cancel();
-                a.cancelling = true;
-                log_warn!(log, "costmap stale: cancelling goal and waiting for fresh data");
-            }
-        }
-        return;
-    }
-    if s.costmap_stale {
-        s.costmap_stale = false;
-        log_info!(log, "costmap back, exploration resumed");
-    }
-
-    let Some(grid) = s.grid.as_ref() else {
-        log_warn!(log, "waiting for costmap");
-        return;
+    let s = &mut *s;
+    let now = s.now();
+    let robot = tf
+        .lookup(io.map_frame, io.base_frame, Stamp::LATEST)
+        .map(|t| Pose2::from_isometry(&t))
+        .map_err(|e| e.to_string());
+    let input = TickInput {
+        costmap: s.grid.as_ref(),
+        costmap_stamp: s.grid_received,
+        map: s.map.as_ref(),
+        robot,
+        result: s.result.take(),
+        done: s.done,
     };
-    let robot = match tf.lookup(&cfg.map_frame, &cfg.base_frame, Stamp::LATEST) {
-        Ok(t) => Pose2::from_isometry(&t),
-        Err(e) => {
-            log_warn!(log, "no robot pose yet: {e}");
-            return;
-        }
-    };
-    let frontiers = find_frontiers(grid, (robot.x, robot.y), &cfg.explore);
-    let blacklist: Vec<_> = s.blacklist.iter().map(|(goal, _)| *goal).collect();
-    let pick = || select_goal_with_heading(&frontiers, &blacklist, &cfg.explore, (robot.x, robot.y), robot.yaw, cfg.turn_weight);
-    let need_views = cfg.view_detour > 0.0
-        || s.active.as_ref().is_some_and(|a| a.view_target.is_some())
-        || pick().is_none();
-    let views: Vec<View> = match (cfg.coverage.as_ref(), s.map.as_ref()) {
-        (Some(cp), Some(m)) if need_views => s
-            .coverage
-            .views(m, (robot.x, robot.y), cp)
-            .into_iter()
-            .filter(|v| s.visited_views.iter().all(|t| dist(*t, v.target) > 0.6))
-            .filter(|v| blacklist.iter().all(|b| dist(*b, (v.x, v.y)) > cfg.explore.blacklist_radius))
-            .collect(),
-        _ => Vec::new(),
-    };
-    let _ = pubs.frontiers.publish(&frontier_markers(&cfg.map_frame, &frontiers, &views));
-
-    let mut abandon = None;
-    if let Some(a) = s.active.as_mut() {
-        // Moving around a wall can increase distance to the goal. Measure real
-        // displacement instead of treating a valid detour as lack of progress.
-        // turning counts as progress too: a look-around turn, or the turn toward a goal behind
-        let turned = (robot.yaw - a.progress_pose.2).sin().atan2((robot.yaw - a.progress_pose.2).cos()).abs() > 0.3;
-        if robot.distance_to(a.progress_pose.0, a.progress_pose.1) > cfg.progress_epsilon || turned {
-            a.progress_pose = (robot.x, robot.y, robot.yaw);
-            a.last_progress = now;
-        }
-        if !a.cancelling && a.handle.is_some() {
-            if now - a.started > cfg.goal_timeout {
-                abandon = Some((a.goal, "timeout", true));
-            } else if now - a.last_progress > cfg.progress_timeout {
-                abandon = Some((a.goal, "no progress", true));
-            } else if a.view_target.is_some_and(|t| !views.iter().any(|v| dist(v.target, t) < 0.6)) {
-                abandon = Some((a.goal, "wall seen", false));
-            }
-        }
+    let actions = s.policy.tick(now, input);
+    let (frontiers, views, seq) = s.policy.viz();
+    if seq != s.viz_seq {
+        s.viz_seq = seq;
+        let _ = io.pubs.frontiers.publish(&frontier_markers(io.map_frame, frontiers, views));
     }
-    if let Some((goal, why, bad)) = abandon {
-        log_info!(log, "cancelling goal ({:.2}, {:.2}): {why}; waiting for terminal result", goal.0, goal.1);
-        if bad {
-            s.blacklist.push((goal, now));
-        }
-        if let Some(a) = s.active.as_mut() {
-            if let Some(h) = &a.handle {
-                if h.cancel().is_ok() {
-                    a.cancelling = true;
+    let mut send = None;
+    for a in actions {
+        match a {
+            Action::Info(m) => log_info!(log, "{m}"),
+            Action::Warn(m) => log_warn!(log, "{m}"),
+            Action::Cancel(_) => {
+                let active = s.policy.active().map(|a| a.goal);
+                if let Some((_, h)) = s.handle.as_ref().filter(|(g, _)| Some(*g) == active) {
+                    let _ = h.cancel();
                 }
             }
+            Action::SendGoal(r) => send = Some(r),
         }
     }
-    // Keep moving: a frontier goal whose frontier was already seen on the way, or one that is almost
-    // reached, is replaced by the next goal at once. The navigator takes the new goal without
-    // stopping (it keeps the MPPI warm start), so the robot does not halt at every frontier.
-    let mut preempt = None;
-    if abandon.is_none()
-        && let Some(a) = s.active.as_mut().filter(|a| a.kind == Kind::Frontier && !a.cancelling && a.handle.is_some())
-    {
-        if frontiers.iter().any(|f| dist(f.goal, a.goal) < cfg.explore.blacklist_radius) {
-            a.frontier_missing = 0;
-        } else {
-            a.frontier_missing += 1;
-        }
-        if a.frontier_missing >= 2 {
-            preempt = Some((a.goal, "its frontier is explored"));
-        } else if robot.distance_to(a.goal.0, a.goal.1) < cfg.preempt_distance {
-            preempt = Some((a.goal, "almost there"));
-        }
-    }
-    let choice = if let Some((current, why)) = preempt {
-        let mut exclude = blacklist.clone();
-        exclude.push(current);
-        let Some(f) = select_goal_with_heading(&frontiers, &exclude, &cfg.explore, (robot.x, robot.y), robot.yaw, cfg.turn_weight) else {
-            return; // nothing else to go to: finish this one
-        };
-        let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
-        log_info!(log, "switching goal ({:.2}, {:.2}) -> ({:.2}, {:.2}): {why}; frontier {:.1} m, free-space path {:.1} m, score {:.2}",
-            current.0, current.1, f.goal.0, f.goal.1, f.size_m, f.distance, f.score);
-        (f.goal, yaw, None, Kind::Frontier)
-    } else {
-        if s.active.is_some() || now < s.next_goal_after {
-            return;
-        }
-        let detour = views.first().filter(|v| v.distance <= cfg.view_detour);
-        if let Some(v) = detour {
-            log_info!(log, "new goal ({:.2}, {:.2}) camera view detour, {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
-            ((v.x, v.y), v.yaw, Some(v.target), Kind::View)
-        } else if let Some(f) = pick() {
-            let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
-            log_info!(log, "new goal ({:.2}, {:.2}) yaw={yaw:.2}, frontier {:.1} m, free-space path {:.1} m, score {:.2}", f.goal.0, f.goal.1, f.size_m, f.distance, f.score);
-            (f.goal, yaw, None, Kind::Frontier)
-        } else if let Some(v) = views.first() {
-            log_info!(log, "new goal ({:.2}, {:.2}) camera view of {} unseen wall cells, {:.1} m away", v.x, v.y, v.cells, v.distance);
-            ((v.x, v.y), v.yaw, Some(v.target), Kind::View)
-        } else if s.spins_left > 0 {
-            // Standing still, SLAM adds no keyframes and the map never grows, so the explorer would wait
-            // forever (field run 20261118_184838 sat 75 s at the start). Turn in place to see more.
-            s.spins_left -= 1;
-            let yaw = robot.yaw + 2.0 * std::f64::consts::FRAC_PI_3;
-            log_info!(log, "nothing to explore yet: turning in place to look around ({} turns left)", s.spins_left);
-            ((robot.x, robot.y), yaw, None, Kind::Turn)
-        } else {
-            if !s.finished_exploring {
-                log_info!(log, "no reachable frontiers or unseen walls ({} wall cells seen); waiting for map updates / blacklist expiry", s.coverage.seen_count());
-                s.finished_exploring = true;
-            }
-            return;
-        }
-    };
-    let (goal, yaw, view_target, kind) = choice;
-    s.finished_exploring = false;
-    if kind != Kind::Turn {
-        s.spins_left = cfg.look_around_turns;
-    }
+    let Some(r) = send else { return };
 
+    let goal = (r.x, r.y);
     let mut msg = NavigateToPose::Goal::default();
-    msg.pose.header.frame_id = cfg.map_frame.clone();
-    msg.pose.pose = pose_msg(goal.0, goal.1, yaw);
-    if kind == Kind::Frontier {
+    msg.pose.header.frame_id = io.map_frame.to_owned();
+    msg.pose.pose = pose_msg(r.x, r.y, r.yaw);
+    if r.xy_only {
         // the lidar sees all round: no stop to turn to a heading at a frontier
         msg.behavior_tree = "xy_only".to_owned();
     }
-    let _ = pubs.goal.publish(&msg.pose);
-    // a preempted goal is simply replaced: the navigator aborts it when it takes the new one,
-    // and its result no longer matches the active goal, so it is not blacklisted
-    s.active = Some(Active {
-        goal,
-        kind,
-        frontier_missing: 0,
-        view_target,
-        handle: None,
-        started: now,
-        progress_pose: (robot.x, robot.y, robot.yaw),
-        last_progress: now,
-        cancelling: false,
-    });
-    let request = match client.send_goal_request(msg) {
+    let _ = io.pubs.goal.publish(&msg.pose);
+    let request = match io.client.send_goal_request(msg) {
         Ok(r) => r,
         Err(e) => {
             log_warn!(log, "send_goal failed: {e}");
-            s.active = None;
-            s.next_goal_after = now + cfg.retry_delay;
+            s.policy.goal_send_failed(now);
             return;
         }
     };
-    drop(s);
 
     let st = state.clone();
     let log = log.to_owned();
-    let _ = spawner.spawn_local(async move {
+    let _ = io.spawner.spawn_local(async move {
         match request.await {
             Ok((handle, result, _feedback)) => {
                 if st.borrow().done {
                     let _ = handle.cancel();
                 }
-                if let Some(a) = st.borrow_mut().active.as_mut().filter(|a| a.goal == goal) {
-                    a.handle = Some(handle);
+                {
+                    let mut s = st.borrow_mut();
+                    if s.policy.active().is_some_and(|a| a.goal == goal) {
+                        s.policy.goal_accepted(goal);
+                        s.handle = Some((goal, handle));
+                    }
                 }
                 let status = match result.await {
-                    Ok((status, _)) => status,
-                    Err(_) => GoalStatus::Aborted,
+                    Ok((GoalStatus::Succeeded, _)) => NavStatus::Succeeded,
+                    Ok((GoalStatus::Canceled, _)) => NavStatus::Canceled,
+                    _ => NavStatus::Aborted,
                 };
                 st.borrow_mut().result = Some((goal, status));
             }
             Err(e) => {
                 log_warn!(&log, "goal rejected: {e}");
-                st.borrow_mut().result = Some((goal, GoalStatus::Aborted));
+                st.borrow_mut().result = Some((goal, NavStatus::Aborted));
             }
         }
     });
-}
-
-fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
-    (a.0 - b.0).hypot(a.1 - b.1)
 }
 
 fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> MarkerArray {

@@ -1,5 +1,9 @@
 mod coverage;
+mod policy;
 pub use coverage::{Coverage, CoverageParams, View};
+pub use policy::{
+    Action, ActiveGoal, CancelReason, ExplorerParams, ExplorerPolicy, ExplorerStats, GoalKind, GoalRequest, NavStatus, TickInput,
+};
 
 use std::collections::{BTreeMap, VecDeque};
 

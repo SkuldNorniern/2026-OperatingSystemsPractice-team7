@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_wall_fraction: p.f64("min_wall_fraction", 0.25),
             min_triangulation_spread: p.f64("min_triangulation_spread", 0.2),
             max_triangulation_gap: p.f64("max_triangulation_gap", 0.3),
+            strict_ids: p.i64_list("strict_ids"),
             max_spread: p.f64("max_spread", 0.08),
             max_consistency: p.f64("max_consistency", 3.0),
             max_history: p.i64("max_history", 200) as usize,

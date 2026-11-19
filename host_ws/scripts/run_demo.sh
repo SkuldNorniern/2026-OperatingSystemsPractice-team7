@@ -13,6 +13,9 @@
 #   --start-offset SEC: with --replay, start the bag SEC seconds in. Default: just after the odometry
 #            reset that the live run recorded during its preparation (0 = from the very start).
 #   --graph: also open rqt_graph on the run's ROS domain (save the node graph from its window)
+#   --viz: also open team7_viz (read-only map viewer) on the run's ROS domain, stopped with the run.
+#            Built from the main workspace (colcon build --packages-select team7_viz), also for --stock.
+#            Add rviz:=false to use it instead of RViz.
 #   --no-prepare: live only; skip undock and odometry reset (stationary diagnostics).
 #   --no-record / record:=: live only. A replay never records (a bag of a bag only fills the disk).
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2, explorer:=none, output_dir:=DIR
@@ -26,6 +29,7 @@ OFFSET=""
 STOCK=false
 PREPARE=true
 GRAPH=false
+VIZ=false
 RECORD=true
 RECORD_SET=false
 RUN_DIR=""
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
     --start-offset) OFFSET="${2:?--start-offset needs seconds}"; shift ;;
     --no-prepare) PREPARE=false ;;
     --graph) GRAPH=true ;;
+    --viz) VIZ=true ;;
     --no-record) RECORD=false; RECORD_SET=true ;;
     --help|-h) sed -n "2,/^set -euo/{/^#/p}" "$0"; exit 0 ;;
     output_dir:=*) RUN_DIR="${1#output_dir:=}" ;;
@@ -324,6 +329,16 @@ if [ "$GRAPH" = true ]; then
   (sleep 15; LD_LIBRARY_PATH="$(tr ':' '\n' <<<"${LD_LIBRARY_PATH:-}" | grep -v '^/nix/' | paste -sd: -)" \
     exec ros2 run rqt_graph rqt_graph) > "$LOG_DIR/rqt_graph.log" 2>&1 &
   PIDS+=($!)
+fi
+if [ "$VIZ" = true ]; then
+  # always the main workspace: the --stock cache builds only team7_nodes and team7_bringup
+  VIZ_BIN="$HERE/../ros2_ws/install/team7_viz/lib/team7_viz/team7_viz"
+  if [ -x "$VIZ_BIN" ]; then
+    (set +u; source "$HERE/../ros2_ws/install/setup.bash"; exec "$VIZ_BIN") > "$LOG_DIR/team7_viz.log" 2>&1 &
+    PIDS+=($!)
+  else
+    echo "warning: --viz: $VIZ_BIN not built (cd host_ws/ros2_ws && colcon build --packages-select team7_viz)" >&2
+  fi
 fi
 echo "launch: team7.launch.py ${LAUNCH_ARGS[*]}"
 # Started from a script or in the background, bash hands SIGINT down as ignored, and the documented

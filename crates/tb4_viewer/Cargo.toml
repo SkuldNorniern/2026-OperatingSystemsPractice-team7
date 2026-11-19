@@ -1,0 +1,17 @@
+[package]
+name = "tb4_viewer"
+version = "0.1.0"
+description = "Live window for the tb4_sim closed loop, drawn with aurea"
+edition.workspace = true
+# aurea needs 1.90
+rust-version = "1.90"
+license.workspace = true
+
+[dependencies]
+aurea = "0.1"
+tb4_core = { path = "../tb4_core" }
+tb4_explore = { path = "../tb4_explore" }
+tb4_sim = { path = "../tb4_sim" }
+
+[dev-dependencies]
+png = "0.18"

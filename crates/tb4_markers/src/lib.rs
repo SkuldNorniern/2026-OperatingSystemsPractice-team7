@@ -238,6 +238,9 @@ pub struct TrackParams {
     /// faces that reach the floor, so a real marker always has one; a chair label or a pattern in
     /// mid-air only gets pnp views (field run 20261118_184838 confirmed a chair label from 1 ray, 4 pnp)
     pub min_wall_views: usize,
+    /// and at least this share of all views must be lidar-backed. A real marker has its wall behind
+    /// it in most views; a chair label only now and then (field 184838: 3 of 39 views, 8 %)
+    pub min_wall_fraction: f64,
     /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
     /// median mahalanobis distance of views must be below this, else views disagree
@@ -264,6 +267,7 @@ impl Default for TrackParams {
         Self {
             min_views: 5,
             min_wall_views: 3,
+            min_wall_fraction: 0.25,
             max_spread: 0.08,
             max_consistency: 3.0,
             max_history: 200,
@@ -437,6 +441,7 @@ impl Tracker {
         // once confirmed, keep it unless views clearly fall apart (mission already counted it)
         let loose = if self.sticky.contains(&id) { 2.0 } else { 1.0 };
         let p = &self.params;
+        let wall = v.iter().filter(|e| e.source == Source::Raycast).count();
         Some(Target {
             id,
             x: f.x,
@@ -444,7 +449,8 @@ impl Tracker {
             views: v.len(),
             spread: f.sigma,
             confirmed: v.len() >= p.min_views
-                && v.iter().filter(|e| e.source == Source::Raycast).count() >= p.min_wall_views
+                && wall >= p.min_wall_views
+                && wall as f64 >= p.min_wall_fraction * v.len() as f64
                 && f.sigma <= loose * p.max_spread
                 && f.consistency <= loose * p.max_consistency,
         })
@@ -645,7 +651,25 @@ mod tests {
         t.add(4, &ray(2.01, 1.0));
         assert!(!t.target(4).unwrap().confirmed, "two wall views are not enough");
         t.add(4, &ray(2.0, 1.01));
-        assert!(t.target(4).unwrap().confirmed);
+        assert!(t.target(4).unwrap().confirmed, "3 of 11 views lidar-backed (27 %)");
+        // same count, smaller share: 3 lidar-backed of 15 (20 %) is not enough
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        for k in 0..12 {
+            t.add(6, &pnp(2.0 + 0.002 * k as f64, 1.0));
+        }
+        for _ in 0..3 {
+            t.add(6, &ray(2.0, 1.0));
+        }
+        assert!(!t.target(6).unwrap().confirmed, "20 % lidar-backed");
+        // the chair label from field run 184838: 3 lidar-backed views out of 39
+        let mut t = Tracker::new(TrackParams::default());
+        for k in 0..36 {
+            t.add(5, &pnp(3.4 + 0.001 * (k % 5) as f64, -2.7));
+        }
+        for _ in 0..3 {
+            t.add(5, &ray(3.4, -2.7));
+        }
+        assert!(!t.target(5).unwrap().confirmed);
     }
 
     #[test]

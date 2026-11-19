@@ -120,10 +120,16 @@ pub struct SlamStats {
     pub loop_rejections: u64,
     pub last_score: f64,
     pub last_match_ms: f64,
+    /// icp refinement incl. rebuilding its point map, 0 when skipped
+    pub last_icp_ms: f64,
+    /// loop candidate search on the latest keyframe, 0 when no new keyframe
+    pub last_loop_search_ms: f64,
     pub last_update_ms: f64,
     pub mean_update_ms: f64,
     pub max_update_ms: f64,
     pub last_optimisation_ms: f64,
+    /// how far the last accepted loop match moved the current keyframe from its estimate (m, rad)
+    pub last_loop_correction: (f64, f64),
     pub last_rebuild_ms: f64,
     pub icp_used: u64,
     pub icp_rejected: u64,
@@ -232,6 +238,8 @@ impl Slam {
 
     pub fn update(&mut self, odom: Pose2, points: &[(f64, f64)]) -> Option<Pose2> {
         let t0 = Instant::now();
+        self.stats.last_icp_ms = 0.0;
+        self.stats.last_loop_search_ms = 0.0;
         let pose = match self.last_odom {
             None => odom,
             Some(last) => {
@@ -307,7 +315,10 @@ impl Slam {
         match result {
             Some(m) => {
                 self.stats.last_score = m.score;
-                self.refine_icp(m.pose, &q)
+                let t = Instant::now();
+                let r = self.refine_icp(m.pose, &q);
+                self.stats.last_icp_ms = ms(t);
+                r
             }
             None => {
                 self.stats.last_score = 0.0;
@@ -374,7 +385,9 @@ impl Slam {
                 points,
             }],
         });
+        let t = Instant::now();
         self.try_loop_closure();
+        self.stats.last_loop_search_ms = ms(t);
     }
 
     fn try_loop_closure(&mut self) {
@@ -487,6 +500,9 @@ impl Slam {
 
     fn close_loop(&mut self, cands: &[LoopCand]) {
         let t = Instant::now();
+        let last = cands.last().expect("loop candidates");
+        let corr = between(last.est, last.matched);
+        let correction = (corr.x.hypot(corr.y), corr.yaw.abs());
         let n_before = self.edges.len();
         let (ll, la) = (self.p.loop_sigma_lin, self.p.loop_sigma_ang);
         for cd in cands {
@@ -523,6 +539,7 @@ impl Slam {
             self.stats.last_rebuild_ms = ms(t);
         }
         self.stats.loop_closures += 1;
+        self.stats.last_loop_correction = correction;
         self.last_loop_kf = Some(self.kfs.len() - 1);
     }
 

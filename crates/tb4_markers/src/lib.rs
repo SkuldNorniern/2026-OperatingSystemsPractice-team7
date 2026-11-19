@@ -234,6 +234,10 @@ enum Hit {
 #[derive(Debug, Clone)]
 pub struct TrackParams {
     pub min_views: usize,
+    /// views whose camera ray hit a lidar surface (Source::Raycast) needed to confirm. Targets sit on
+    /// faces that reach the floor, so a real marker always has one; a chair label or a pattern in
+    /// mid-air only gets pnp views (field run 20261118_184838 confirmed a chair label from 1 ray, 4 pnp)
+    pub min_wall_views: usize,
     /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
     /// median mahalanobis distance of views must be below this, else views disagree
@@ -259,6 +263,7 @@ impl Default for TrackParams {
     fn default() -> Self {
         Self {
             min_views: 5,
+            min_wall_views: 3,
             max_spread: 0.08,
             max_consistency: 3.0,
             max_history: 200,
@@ -438,7 +443,10 @@ impl Tracker {
             y: f.y,
             views: v.len(),
             spread: f.sigma,
-            confirmed: v.len() >= p.min_views && f.sigma <= loose * p.max_spread && f.consistency <= loose * p.max_consistency,
+            confirmed: v.len() >= p.min_views
+                && v.iter().filter(|e| e.source == Source::Raycast).count() >= p.min_wall_views
+                && f.sigma <= loose * p.max_spread
+                && f.consistency <= loose * p.max_consistency,
         })
     }
 
@@ -621,6 +629,23 @@ mod tests {
         assert!(!t.target(2).unwrap().confirmed);
         assert_eq!(t.confirmed().len(), 1);
         assert_eq!(to_csv(&t.confirmed()), "id,x,y\n1,1.003,0.997\n");
+    }
+
+    #[test]
+    fn confirmation_needs_wall_supported_views() {
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_wall_views: 3, ..Default::default() });
+        let pnp = |x, y| Estimate::point(x, y, Source::PnpRange);
+        let ray = |x, y| Estimate::point(x, y, Source::Raycast);
+        // a tight cluster of pnp-only views (pattern with nothing behind it in the scan): never a target
+        for k in 0..8 {
+            t.add(4, &pnp(2.0 + 0.002 * k as f64, 1.0));
+        }
+        assert!(!t.target(4).unwrap().confirmed);
+        t.add(4, &ray(2.0, 1.0));
+        t.add(4, &ray(2.01, 1.0));
+        assert!(!t.target(4).unwrap().confirmed, "two wall views are not enough");
+        t.add(4, &ray(2.0, 1.01));
+        assert!(t.target(4).unwrap().confirmed);
     }
 
     #[test]

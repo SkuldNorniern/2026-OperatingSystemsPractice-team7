@@ -8,7 +8,7 @@ use tb4_draw::palette as pal;
 use tb4_draw::prim::{self, Prim, fill, stroke};
 use tb4_draw::{Rgba, Viewport};
 
-use crate::model::{GridLayer, MapData, Model, ROBOT_RADIUS, ShapeKind};
+use crate::model::{GridLayer, MapData, Model, ROBOT_RADIUS, ShapeKind, Slot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layer {
@@ -31,33 +31,38 @@ pub enum Layer {
 pub struct LayerInfo {
     pub layer: Layer,
     pub name: &'static str,
-    /// one line: what it shows and where from
+    /// a few words: what it shows
     pub legend: &'static str,
     pub on: bool,
     /// None: no opacity control
     pub opacity: Option<f32>,
+    /// where its data comes from; None: always there (TF, or drawn by the viewer)
+    pub slot: Option<Slot>,
 }
 
-const fn info(layer: Layer, name: &'static str, legend: &'static str, on: bool, opacity: Option<f32>) -> LayerInfo {
-    LayerInfo { layer, name, legend, on, opacity }
+const fn info(layer: Layer, name: &'static str, legend: &'static str, on: bool, opacity: Option<f32>, slot: Option<Slot>) -> LayerInfo {
+    LayerInfo { layer, name, legend, on, opacity, slot }
 }
 
-/// all layers; the first nine toggle with keys 1-9
+/// default costmap opacity: readable over the map, walls stay on top
+pub const COST_OPACITY: f32 = 0.35;
+
+/// all layers in panel order; the first nine toggle with keys 1-9. Costmaps start off.
 pub const LAYERS: [LayerInfo; 14] = [
-    info(Layer::Map, "Map", "/map: free, wall, unknown", true, None),
-    info(Layer::GlobalCost, "Global costmap", "/global_costmap/costmap, blue low .. red high", false, Some(0.6)),
-    info(Layer::LocalCost, "MPPI local cost", "/team7/mppi/local_cost, 4 m disc", true, Some(0.3)),
-    info(Layer::Scan, "Scan", "/scan points in the map frame", true, None),
-    info(Layer::Path, "Path", "/team7/path, global plan", true, None),
-    info(Layer::Trajectory, "MPPI trajectory", "/team7/mppi/trajectory", true, None),
-    info(Layer::Frontiers, "Frontiers", "/team7/frontiers, frontier goals", true, None),
-    info(Layer::Goal, "Goal", "/team7/goal, active goal", true, None),
-    info(Layer::Targets, "Targets", "/team7/targets, tentative / confirmed", true, None),
-    info(Layer::Views, "Camera views", "/team7/frontiers, camera view poses", true, None),
-    info(Layer::SlamGraph, "SLAM graph", "/team7/slam/graph, keyframes and edges", true, None),
-    info(Layer::Robot, "Robot", "TF base_link, r 0.171 m, x/y axes", true, None),
-    info(Layer::Grid, "Grid", "1 m grid in the map frame", true, None),
-    info(Layer::Trail, "Trail", "where the robot has been", true, None),
+    info(Layer::Map, "Map", "free, wall, unknown", true, None, Some(Slot::Map)),
+    info(Layer::Scan, "Scan", "laser points", true, None, None),
+    info(Layer::Path, "Plan", "global path", true, None, Some(Slot::Plan)),
+    info(Layer::Trajectory, "Local plan", "MPPI / controller path", true, None, Some(Slot::Trajectory)),
+    info(Layer::Frontiers, "Frontiers", "exploration goals", true, None, Some(Slot::Frontiers)),
+    info(Layer::Goal, "Goal", "active goal", true, None, Some(Slot::Goal)),
+    info(Layer::Targets, "Targets", "tentative / confirmed", true, None, Some(Slot::Targets)),
+    info(Layer::GlobalCost, "Global costmap", "low .. high cost", false, Some(COST_OPACITY), Some(Slot::GlobalCost)),
+    info(Layer::LocalCost, "Local cost", "around the robot", false, Some(COST_OPACITY), Some(Slot::LocalCost)),
+    info(Layer::Robot, "Robot", "pose, x/y axes", true, None, None),
+    info(Layer::Views, "Camera views", "planned view poses", true, None, Some(Slot::Views)),
+    info(Layer::SlamGraph, "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph)),
+    info(Layer::Grid, "Grid", "1 m", true, None, None),
+    info(Layer::Trail, "Trail", "where it drove", true, None, None),
 ];
 
 pub fn index(l: Layer) -> usize {
@@ -199,12 +204,13 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
         && let Some((x, y, yaw)) = model.robot
     {
         let c = vp.to_screen(x, y);
-        let r = vp.len(ROBOT_RADIUS).max(3.0);
+        // true size when zoomed in, never smaller than an easy-to-see icon
+        let r = vp.len(ROBOT_RADIUS).max(9.0);
         out.extend(prim::robot(c, r, vp.heading(yaw)));
         // x (red) and y (green) axes, 0.3 m, like RViz's robot axes
         let axis = |a: f64, color| {
             let h = vp.heading(yaw + a);
-            let l = vp.len(0.3).max(12.0);
+            let l = vp.len(0.3).max(r + 8.0);
             Prim::Line { a: c, b: (c.0 + l * h.cos() as f32, c.1 - l * h.sin() as f32), color, width: 2.0, dashed: false }
         };
         out.push(axis(0.0, pal::AXIS_X));
@@ -215,7 +221,6 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
 
 /// one frame of the map view in `ctx` (the whole context is the view)
 pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache: &mut Cache, vp: &Viewport, grid_bounds: [f64; 4]) -> AureaResult<()> {
-    ctx.clear(prim::color(pal::BACKGROUND))?;
     let map = if layers.shown(Layer::Map) { cache.map(&model.map) } else { None };
     let place = |g: &GridLayer| g.grid.as_ref().map(|m| grid_layer(m, vp));
     if let (Some((img, _)), Some(l)) = (&map, place(&model.map)) {

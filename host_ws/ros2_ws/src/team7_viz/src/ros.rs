@@ -22,11 +22,10 @@ use r2r::visualization_msgs::msg::{Marker, MarkerArray};
 use tb4_core::nalgebra::{Point3, Quaternion, Translation3, UnitQuaternion};
 use tb4_core::{GridMeta, Isometry3, Pose2, Stamp, TfBuffer};
 
-use crate::model::{CameraFrame, MapData, Model, Shape, ShapeKind, Target, Topic};
+use crate::model::{CameraFrame, MapData, Model, Shape, ShapeKind, Slot, Target, Topic};
 
 pub const MAP_FRAME: &str = "map";
 pub const BASE_FRAME: &str = "base_link";
-pub const GOAL_ACTION: &str = "/team7/navigate_to_pose";
 
 pub type Shared = Arc<Mutex<Model>>;
 
@@ -338,33 +337,36 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
     let s = node.subscribe::<OccupancyGrid>("/map", QosProfile::default().reliable().transient_local())?;
     spawn(&pool, s, &ctx, |c, msg: OccupancyGrid| {
         c.update(|m, _| {
+            let now = Instant::now();
             m.count("map");
-            m.tick(Topic::Map, Instant::now());
+            m.tick(Topic::Map, now);
+            m.accept(Slot::Map, "/map", now);
             if let Some(g) = grid_of(msg) {
                 m.map.set(g);
             }
         });
     });
 
-    // costmaps: global is latched, the MPPI local cost is not; both in the map frame
-    let s = node.subscribe::<OccupancyGrid>("/global_costmap/costmap", QosProfile::default().reliable().transient_local())?;
-    spawn(&pool, s, &ctx, |c, msg: OccupancyGrid| {
-        c.update(|m, _| {
-            m.count("global_costmap");
-            if let Some(g) = grid_of(msg) {
-                m.global_cost.set(g);
-            }
+    // costmaps, in the map frame. Nav2's are latched; our MPPI local cost is not, and a latched
+    // subscription would not match a volatile publisher
+    for (topic, slot, latched) in [
+        ("/global_costmap/costmap", Slot::GlobalCost, true),
+        ("/team7/mppi/local_cost", Slot::LocalCost, false),
+        ("/local_costmap/costmap", Slot::LocalCost, true),
+    ] {
+        let qos = if latched { QosProfile::default().reliable().transient_local() } else { QosProfile::default() };
+        let s = node.subscribe::<OccupancyGrid>(topic, qos)?;
+        spawn(&pool, s, &ctx, move |c, msg: OccupancyGrid| {
+            c.update(|m, _| {
+                m.count(topic);
+                if m.accept(slot, topic, Instant::now())
+                    && let Some(g) = grid_of(msg)
+                {
+                    if slot == Slot::GlobalCost { m.global_cost.set(g) } else { m.local_cost.set(g) }
+                }
+            });
         });
-    });
-    let s = node.subscribe::<OccupancyGrid>("/team7/mppi/local_cost", QosProfile::default())?;
-    spawn(&pool, s, &ctx, |c, msg: OccupancyGrid| {
-        c.update(|m, _| {
-            m.count("local_cost");
-            if let Some(g) = grid_of(msg) {
-                m.local_cost.set(g);
-            }
-        });
-    });
+    }
 
     let s = node.subscribe::<LaserScan>("/scan", QosProfile::sensor_data())?;
     spawn(&pool, s, &ctx, |c, msg: LaserScan| {
@@ -389,14 +391,17 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
         });
     });
 
-    for (topic, is_traj) in [("/team7/path", false), ("/team7/mppi/trajectory", true)] {
+    for (topic, slot) in [("/team7/path", Slot::Plan), ("/plan", Slot::Plan), ("/team7/mppi/trajectory", Slot::Trajectory), ("/local_plan", Slot::Trajectory)] {
         let s = node.subscribe::<Path>(topic, QosProfile::default())?;
         spawn(&pool, s, &ctx, move |c, msg: Path| {
             c.update(|m, tf| {
-                m.count(if is_traj { "trajectory" } else { "path" });
+                m.count(topic);
+                if !m.accept(slot, topic, Instant::now()) {
+                    return;
+                }
                 let pts = msg.poses.iter().map(|p| (p.pose.position.x, p.pose.position.y));
                 if let Some(p) = in_map(m, header_points(tf, &msg.header, pts)) {
-                    if is_traj { m.trajectory = p } else { m.path = p }
+                    if slot == Slot::Trajectory { m.trajectory = p } else { m.path = p }
                 }
             });
         });
@@ -405,54 +410,94 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
     let s = node.subscribe::<MarkerArray>("/team7/frontiers", QosProfile::default())?;
     spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
         c.update(|m, tf| {
-            m.count("frontiers");
+            let now = Instant::now();
+            m.count("/team7/frontiers");
+            let (front, views) = (m.accept(Slot::Frontiers, "/team7/frontiers", now), m.accept(Slot::Views, "/team7/frontiers", now));
             if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
-                m.frontiers.clear();
-                m.views.clear();
+                if front {
+                    m.frontiers.clear();
+                }
+                if views {
+                    m.views.clear();
+                }
             }
             for mk in &msg.markers {
                 let pts = mk.points.iter().map(|p| (p.x, p.y));
                 let Some(p) = in_map(m, header_points(tf, &mk.header, pts)) else { continue };
                 match mk.ns.as_str() {
-                    "frontier_goals" => m.frontiers = p,
-                    "camera_views" => m.views = p,
+                    "frontier_goals" if front => m.frontiers = p,
+                    "camera_views" if views => m.views = p,
                     _ => {}
                 }
             }
         });
     });
-
-    let s = node.subscribe::<MarkerArray>("/team7/slam/graph", QosProfile::default())?;
+    // explore_lite: frontier cells and centres as points / spheres, all drawn as frontier dots
+    let s = node.subscribe::<MarkerArray>("/explore/frontiers", QosProfile::default())?;
     spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
         c.update(|m, tf| {
-            m.count("slam_graph");
-            if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
-                m.slam_graph.clear();
+            m.count("/explore/frontiers");
+            if !m.accept(Slot::Frontiers, "/explore/frontiers", Instant::now()) {
+                return;
             }
+            if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
+                m.frontiers.clear();
+            }
+            let mut pts = Vec::new();
             for mk in msg.markers.iter().filter(|mk| mk.action == 0) {
-                let Some(mut s) = shape_of(mk) else { continue };
-                let Some(p) = in_map(m, header_points(tf, &mk.header, s.pts.iter().copied())) else { continue };
-                s.pts = p;
-                m.slam_graph.push(s);
+                let Some(s) = shape_of(mk) else { continue };
+                if let Some(p) = in_map(m, header_points(tf, &mk.header, s.pts.iter().copied())) {
+                    pts.extend(p);
+                }
+            }
+            if !pts.is_empty() {
+                m.frontiers = pts;
             }
         });
     });
 
-    let s = node.subscribe::<PoseStamped>("/team7/goal", QosProfile::default())?;
-    spawn(&pool, s, &ctx, |c, msg: PoseStamped| {
-        c.update(|m, tf| {
-            m.count("goal");
-            let p = msg.pose.position;
-            if let Some(g) = in_map(m, header_points(tf, &msg.header, std::iter::once((p.x, p.y)))) {
-                m.goal = g.first().copied();
-            }
+    for topic in ["/team7/slam/graph", "/slam_toolbox/graph_visualization"] {
+        let s = node.subscribe::<MarkerArray>(topic, QosProfile::default())?;
+        spawn(&pool, s, &ctx, move |c, msg: MarkerArray| {
+            c.update(|m, tf| {
+                m.count(topic);
+                if !m.accept(Slot::SlamGraph, topic, Instant::now()) {
+                    return;
+                }
+                if msg.markers.iter().any(|mk| mk.action == DELETEALL) {
+                    m.slam_graph.clear();
+                }
+                for mk in msg.markers.iter().filter(|mk| mk.action == 0) {
+                    let Some(mut s) = shape_of(mk) else { continue };
+                    let Some(p) = in_map(m, header_points(tf, &mk.header, s.pts.iter().copied())) else { continue };
+                    s.pts = p;
+                    m.slam_graph.push(s);
+                }
+            });
         });
-    });
+    }
+
+    for topic in ["/team7/goal", "/goal_pose"] {
+        let s = node.subscribe::<PoseStamped>(topic, QosProfile::default())?;
+        spawn(&pool, s, &ctx, move |c, msg: PoseStamped| {
+            c.update(|m, tf| {
+                m.count(topic);
+                if !m.accept(Slot::Goal, topic, Instant::now()) {
+                    return;
+                }
+                let p = msg.pose.position;
+                if let Some(g) = in_map(m, header_points(tf, &msg.header, std::iter::once((p.x, p.y)))) {
+                    m.goal = g.first().copied();
+                }
+            });
+        });
+    }
 
     let s = node.subscribe::<MarkerArray>("/team7/targets", QosProfile::default())?;
     spawn(&pool, s, &ctx, |c, msg: MarkerArray| {
         c.update(|m, _| {
             m.count("targets");
+            m.accept(Slot::Targets, "/team7/targets", Instant::now());
             // targets are published in the map frame (marker_mapper `frame` = map)
             m.targets = targets_from(&msg, &m.targets);
         });
@@ -466,33 +511,56 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
         });
     });
 
-    let s = node.subscribe::<Image>("/team7/aruco/debug", QosProfile::sensor_data())?;
-    spawn(&pool, s, &ctx, |c, msg: Image| {
-        let frame = image_rgba(&msg);
-        c.update(|m, _| {
-            let now = Instant::now();
-            m.count("camera");
-            m.tick(Topic::Camera, now);
-            if let Some((width, height, rgba)) = frame {
-                let seq = m.camera.as_ref().map_or(1, |f| f.seq + 1);
-                m.camera = Some(CameraFrame { width, height, rgba, seq, at: now });
-            }
+    for topic in ["/team7/aruco/debug", "/aruco_tracker/debug"] {
+        let s = node.subscribe::<Image>(topic, QosProfile::sensor_data())?;
+        spawn(&pool, s, &ctx, move |c, msg: Image| {
+            let frame = image_rgba(&msg);
+            c.update(|m, _| {
+                let now = Instant::now();
+                m.count(topic);
+                if !m.accept(Slot::Camera, topic, now) {
+                    return;
+                }
+                m.tick(Topic::Camera, now);
+                if let Some((width, height, rgba)) = frame {
+                    let seq = m.camera.as_ref().map_or(1, |f| f.seq + 1);
+                    m.camera = Some(CameraFrame { width, height, rgba, seq, at: now });
+                }
+            });
         });
-    });
+    }
 
-    // goals: only with --allow-goals, and only to our navigator's action server
+    // goals: only with --allow-goals, to whichever NavigateToPose server is in the graph
     type Nav = r2r::nav2_msgs::action::NavigateToPose::Action;
-    let client = match &opts.goals {
-        Some(_) => Some(node.create_action_client::<Nav>(GOAL_ACTION)?),
-        None => None,
-    };
+    let mut clients = Vec::new();
+    if opts.goals.is_some() {
+        for &name in Slot::NavAction.candidates() {
+            clients.push((name, node.create_action_client::<Nav>(name)?));
+        }
+    }
 
     let mut pool = pool;
+    let mut last_graph = Instant::now() - GRAPH_EVERY;
     while !stop.load(Ordering::Relaxed) {
         node.spin_once(Duration::from_millis(10));
-        if let (Some(rx), Some(client)) = (&opts.goals, &client) {
-            while let Ok((x, y, yaw)) = rx.try_recv() {
-                send_goal(client, &pool, &ctx, (x, y, yaw));
+        if last_graph.elapsed() >= GRAPH_EVERY {
+            last_graph = Instant::now();
+            if let Ok(names) = node.get_topic_names_and_types() {
+                ctx.update(|m, _| {
+                    // only topics someone publishes: our own subscriptions put every candidate in the graph
+                    let mut g: Vec<String> = names.into_keys().filter(|t| node.get_publishers_info_by_topic(t, false).is_ok_and(|p| !p.is_empty())).collect();
+                    g.sort();
+                    m.graph = g;
+                });
+            }
+        }
+        if let Some(rx) = &opts.goals {
+            while let Ok(goal) = rx.try_recv() {
+                let bound = ctx.model.lock().ok().and_then(|m| m.bound(Slot::NavAction));
+                match clients.iter().find(|(n, _)| Some(*n) == bound) {
+                    Some((name, client)) => send_goal(client, name, &pool, &ctx, goal),
+                    None => ctx.update(|m, _| m.goal_status = Some("no NavigateToPose server in the graph: goal not sent".into())),
+                }
             }
         }
         pool.run_until_stalled();
@@ -500,7 +568,10 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
     Ok(())
 }
 
-fn send_goal(client: &r2r::ActionClient<r2r::nav2_msgs::action::NavigateToPose::Action>, pool: &LocalPool, ctx: &Rc<Ctx>, (x, y, yaw): (f64, f64, f64)) {
+/// how often the ROS graph is read to bind layers to topics
+const GRAPH_EVERY: Duration = Duration::from_secs(2);
+
+fn send_goal(client: &r2r::ActionClient<r2r::nav2_msgs::action::NavigateToPose::Action>, name: &str, pool: &LocalPool, ctx: &Rc<Ctx>, (x, y, yaw): (f64, f64, f64)) {
     let mut goal = r2r::nav2_msgs::action::NavigateToPose::Goal::default();
     goal.pose.header.frame_id = MAP_FRAME.into();
     goal.pose.pose.position.x = x;
@@ -511,7 +582,7 @@ fn send_goal(client: &r2r::ActionClient<r2r::nav2_msgs::action::NavigateToPose::
     match client.send_goal_request(goal) {
         Err(e) => say(ctx, format!("goal not sent: {e}")),
         Ok(request) => {
-            say(ctx, format!("goal ({x:.2}, {y:.2}) sent to {GOAL_ACTION}, waiting"));
+            say(ctx, format!("goal ({x:.2}, {y:.2}) sent to {name}"));
             let c = ctx.clone();
             let _ = pool.spawner().spawn_local(async move {
                 match request.await {

@@ -98,6 +98,7 @@ pub struct App {
     frame: Option<Frame>,
     drag: Option<Drag>,
     frames: (Instant, u32, f64),
+    draw_time: f64,
 }
 
 impl App {
@@ -119,6 +120,7 @@ impl App {
             frame: None,
             drag: None,
             frames: (Instant::now(), 0, 0.0),
+            draw_time: 0.0,
         }
     }
 
@@ -279,7 +281,30 @@ impl App {
     /// the whole canvas: map view, tool overlays, camera overlay, scale and hints
     pub fn draw(&mut self, ctx: &mut dyn DrawingContext, model: &Model, now: Instant) -> AureaResult<()> {
         let (w, h) = (ctx.width() as f32, ctx.height() as f32);
+        self.draw_in(ctx, model, now, Rect::new(0.0, 0.0, w, h))
+    }
+
+    /// the map view in `area` of a larger canvas; pointer positions given to this `App` are then
+    /// relative to the area's top left
+    pub fn draw_in(&mut self, ctx: &mut dyn DrawingContext, model: &Model, now: Instant, area: Rect) -> AureaResult<()> {
+        let started = Instant::now();
+        ctx.save()?;
+        ctx.clip_rect(area)?;
+        ctx.translate(area.x, area.y)?;
+        let out = self.draw_local(ctx, model, now, area.width, area.height);
+        ctx.restore()?;
+        self.draw_time = 0.8 * self.draw_time + 0.2 * started.elapsed().as_secs_f64();
+        out
+    }
+
+    /// seconds a map frame takes to draw (smoothed)
+    pub fn draw_time(&self) -> f64 {
+        self.draw_time
+    }
+
+    fn draw_local(&mut self, ctx: &mut dyn DrawingContext, model: &Model, now: Instant, w: f32, h: f32) -> AureaResult<()> {
         let rect = (0.0, 0.0, f64::from(w), f64::from(h));
+        ctx.draw_rect(Rect::new(0.0, 0.0, w, h), &fill(pal::BACKGROUND))?;
         let bounds = self.fit_bounds(model);
         self.frame = Some(Frame { bounds, rect, robot: model.robot.map(|r| (r.0, r.1)) });
         let (vp, _) = self.viewport().expect("frame just set");
@@ -383,7 +408,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{CameraFrame, GridLayer, MapData, Shape, ShapeKind, Target, Topic};
     use aurea::render::{CpuRasterizer, Renderer};
@@ -496,13 +521,15 @@ mod tests {
         assert!(near(at(&px, 1.0, 1.25), pal::AXIS_X, 40), "x axis {:?}", rgb(at(&px, 1.0, 1.25)));
         assert!(near(at(&px, 0.75, 1.0), pal::AXIS_Y, 40), "y axis {:?}", rgb(at(&px, 0.75, 1.0)));
 
-        // MPPI local cost on (default, faint): the disc tints, a wall-free point stays readable
+        // both costmaps start off; the local cost at its default opacity tints, but faintly
         app.layers.toggle(Layer::GlobalCost);
+        assert!(!App::new(false).shown(Layer::GlobalCost) && !App::new(false).shown(Layer::LocalCost));
+        app.layers.toggle(Layer::LocalCost);
         let px = render(&mut app, &m, w, h);
         let disc = at(&px, 1.4, 0.6);
         assert!(!near(disc, pal::FREE, 8) && near(disc, pal::FREE, 120), "faint disc {:?}", rgb(disc));
-        // key 3 hides it
-        app.key(KeyCode::Key3, Modifiers::default());
+        // key 9 (local cost) hides it
+        app.key(KeyCode::Key9, Modifiers::default());
         let px = render(&mut app, &m, w, h);
         assert!(near(at(&px, 1.4, 0.6), pal::FREE, 2));
 

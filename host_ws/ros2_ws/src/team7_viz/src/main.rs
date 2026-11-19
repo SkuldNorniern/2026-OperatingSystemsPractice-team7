@@ -1,41 +1,41 @@
-//! team7_viz: map view of a team7 run (see USAGE). Read-only unless `--allow-goals`.
+//! team7_viz: map view of a team7 or stock run (see USAGE). Read-only unless `--allow-goals`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use aurea::menu::MenuItem;
 use aurea::prelude::*;
 use aurea::render::{CpuRasterizer, Renderer, request_canvas_redraw};
-use team7_viz::app::{Action, App, Button as MouseKey};
-use team7_viz::gui::{self, GuiOptions};
+use team7_viz::app::{Action, App, Button as MouseKey, Tool};
+use team7_viz::chrome::Chrome;
 use team7_viz::model::Model;
-use team7_viz::{outputs, ros};
-use tb4_draw::palette;
+use team7_viz::{outputs, ros, shots};
 
 const W: u32 = 1440;
 const H: u32 = 900;
 /// the canvas size request is a minimum in GTK: keep it small so a tiling compositor can shrink the window
 const MIN_W: u32 = 320;
 const MIN_H: u32 = 240;
-/// redraw at most this often while data streams in, and at least every `IDLE_REDRAW` (rates decay)
-const FRAME: Duration = Duration::from_millis(50);
+/// redraw at most this often (60 Hz) while data streams in, and at least every `IDLE_REDRAW` (clocks, ages)
+const FRAME: Duration = Duration::from_millis(16);
+/// how often the pump looks for new data: short, so a camera frame is shown within a few ms
+const POLL: Duration = Duration::from_millis(4);
 const IDLE_REDRAW: Duration = Duration::from_millis(500);
-/// dock widgets follow the model this often
-const PANEL_REFRESH: Duration = Duration::from_millis(250);
 
-const USAGE: &str = "usage: team7_viz [--allow-goals] [--output-dir DIR] [--screens-dir DIR] [--light]
+const USAGE: &str = "usage: team7_viz [--allow-goals] [--output-dir DIR] [--screens-dir DIR]
                  [--exit-after SECONDS] [--verbose] [--dump-frame PNG]
-  read-only map view; set ROS_DOMAIN_ID=79 to watch a replay from run_demo.sh --replay
-  --allow-goals   the 2D Goal tool sends NavigateToPose goals to /team7/navigate_to_pose
-  --output-dir    run folder whose targets.csv and map.pgm the mission panel checks
-                  (default: the newest folder in ~/team7_runs)
-  --screens-dir   where quick screenshots go (default ~/team7_runs/screens)
-  --light         keep the desktop GTK theme (default: dark)
+  map view of a team7 or stock (Nav2, slam_toolbox, explore_lite) run; layers follow the topics
+  that exist. Set ROS_DOMAIN_ID=79 to watch a replay from run_demo.sh --replay
+  --allow-goals   the 2D Goal tool sends NavigateToPose to /team7/navigate_to_pose or /navigate_to_pose
+  --output-dir    run folder whose targets.csv and map.pgm the Targets panel checks
+                  (default: the most recently active folder in ~/team7_runs)
+  --screens-dir   where screenshots go (default ~/team7_runs/screens)
   --verbose       print received message counts every 2 s
-  --dump-frame    on exit save the map canvas (and PNG.ref.png drawn offscreen) for checks";
+  --dump-frame    on exit save the canvas (and PNG.ref.png drawn offscreen) for checks";
 
 struct Options {
     exit_after: Option<f64>,
@@ -44,11 +44,10 @@ struct Options {
     allow_goals: bool,
     output_dir: Option<PathBuf>,
     screens_dir: Option<PathBuf>,
-    light: bool,
 }
 
 fn parse() -> Result<Options, String> {
-    let mut o = Options { exit_after: None, verbose: false, dump_frame: None, allow_goals: false, output_dir: None, screens_dir: None, light: false };
+    let mut o = Options { exit_after: None, verbose: false, dump_frame: None, allow_goals: false, output_dir: None, screens_dir: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().ok_or(format!("{a} needs a value"));
@@ -62,7 +61,6 @@ fn parse() -> Result<Options, String> {
             "--allow-goals" => o.allow_goals = true,
             "--output-dir" => o.output_dir = Some(val()?.into()),
             "--screens-dir" => o.screens_dir = Some(val()?.into()),
-            "--light" => o.light = true,
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -70,8 +68,8 @@ fn parse() -> Result<Options, String> {
     Ok(o)
 }
 
-/// where the canvas sits in the window content, for turning window mouse positions into canvas
-/// pixels (aurea reports mouse events in window-content coordinates only)
+/// where the canvas sits in the window content: aurea reports mouse events in window-content
+/// coordinates only
 #[cfg(target_os = "linux")]
 fn canvas_origin(canvas: &Canvas, content: *mut std::ffi::c_void) -> (f64, f64) {
     use std::ffi::{c_int, c_void};
@@ -89,6 +87,91 @@ fn canvas_origin(_: &Canvas, _: *mut std::ffi::c_void) -> (f64, f64) {
     (0.0, 0.0)
 }
 
+/// a window event moved into canvas pixels
+fn shifted(e: &WindowEvent, ox: f64, oy: f64) -> WindowEvent {
+    let mut e = e.clone();
+    match &mut e {
+        WindowEvent::MouseMove { x, y, .. } | WindowEvent::MouseButton { x, y, .. } | WindowEvent::MouseWheel { x, y, .. } => {
+            *x -= ox;
+            *y -= oy;
+        }
+        _ => {}
+    }
+    e
+}
+
+thread_local! {
+    /// true while the menus are being set from the app state: GTK runs a check item's callback
+    /// when its state is set from code, and that must not toggle anything
+    static SYNCING: Cell<bool> = const { Cell::new(false) };
+    /// saves the canvas before the window closes (`--dump-frame`)
+    static DUMP: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    static STATS: RefCell<Stats> = RefCell::new(Stats::default());
+}
+
+/// paint times and camera frames shown, for the line printed at exit
+#[derive(Default)]
+struct Stats {
+    paints: Vec<f64>,
+    last_seq: Option<u64>,
+    shown: u64,
+}
+
+impl Stats {
+    fn frame(&mut self, paint: Duration, camera_seq: Option<u64>) {
+        self.paints.push(paint.as_secs_f64() * 1000.0);
+        if camera_seq.is_some() && camera_seq != self.last_seq {
+            self.shown += 1;
+            self.last_seq = camera_seq;
+        }
+    }
+
+    fn line(&self, received: u64, secs: f64) -> String {
+        let mut p = self.paints.clone();
+        p.sort_by(f64::total_cmp);
+        let q = |f: f64| p.get(((p.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(0.0);
+        format!(
+            "{} frames ({:.1} fps), paint p50 {:.1} ms p95 {:.1} ms max {:.1} ms; camera received {received} ({:.1} Hz), shown {} ({:.1} Hz)",
+            p.len(),
+            p.len() as f64 / secs,
+            q(0.5),
+            q(0.95),
+            q(1.0),
+            received as f64 / secs,
+            self.shown,
+            self.shown as f64 / secs
+        )
+    }
+}
+
+fn syncing() -> bool {
+    SYNCING.with(Cell::get)
+}
+
+struct Menus {
+    panel: MenuItem,
+    follow: MenuItem,
+    tools: Vec<(Tool, MenuItem)>,
+    last: Option<(bool, bool, Tool)>,
+}
+
+impl Menus {
+    fn sync(&mut self, chrome: &Chrome, app: &App) {
+        let now = (chrome.dock_open, app.camera.follow, app.tool);
+        if self.last == Some(now) {
+            return;
+        }
+        self.last = Some(now);
+        SYNCING.with(|s| s.set(true));
+        let _ = self.panel.set_checked(now.0);
+        let _ = self.follow.set_checked(now.1);
+        for (t, item) in &self.tools {
+            let _ = item.set_checked(*t == now.2);
+        }
+        SYNCING.with(|s| s.set(false));
+    }
+}
+
 fn main() -> AureaResult<()> {
     let opts = parse().unwrap_or_else(|e| {
         if !e.is_empty() {
@@ -97,10 +180,6 @@ fn main() -> AureaResult<()> {
         eprintln!("{USAGE}");
         std::process::exit(2)
     });
-    if !opts.light && std::env::var_os("GTK_THEME").is_none() {
-        // SAFETY: before any thread is started and before GTK reads its settings
-        unsafe { std::env::set_var("GTK_THEME", "Adwaita:dark") };
-    }
     let domain = std::env::var("ROS_DOMAIN_ID").unwrap_or_else(|_| "0".into());
     eprintln!("team7_viz: ROS_DOMAIN_ID={domain}, {}", if opts.allow_goals { "goals ENABLED" } else { "read-only" });
 
@@ -129,74 +208,178 @@ fn main() -> AureaResult<()> {
     };
 
     let app = Rc::new(RefCell::new(App::new(opts.allow_goals)));
+    let chrome = Rc::new(RefCell::new(Chrome::new(domain.clone(), opts.output_dir.clone())));
+    let screens_dir = opts.screens_dir.clone().unwrap_or_else(|| outputs::runs_root().join("screens"));
     let mut window = Window::new("team7 viewer", W as i32, H as i32)?;
     let canvas = Canvas::new(MIN_W, MIN_H, RendererBackend::Cpu)?;
-    let [r, g, b, _] = palette::BACKGROUND;
-    canvas.set_background_color(Color::rgb(r, g, b));
-    let out_dir = opts.output_dir.clone().or_else(|| outputs::newest_run_dir(&outputs::runs_root()));
-    let screens_dir = opts.screens_dir.clone().unwrap_or_else(|| outputs::runs_root().join("screens"));
-    let root = gui::build(&mut window, app.clone(), model.clone(), canvas.clone(), GuiOptions { domain: domain.clone(), out_dir, screens_dir })?;
-    let content = root.handle();
+    let id = canvas.id();
+    let redraw = move || request_canvas_redraw(id);
+
+    // native menu bar; everything else is drawn on the canvas
+    let shot: Rc<dyn Fn()> = {
+        let (canvas, app, dir) = (canvas.clone(), app.clone(), screens_dir.clone());
+        Rc::new(move || {
+            let path = dir.join(format!("team7_viz_{}.png", shots::stamp_name(SystemTime::now())));
+            let msg = match shots::save_canvas(&canvas, &path) {
+                Ok(()) => format!("screenshot saved: {}", path.display()),
+                Err(e) => format!("screenshot failed: {e}"),
+            };
+            eprintln!("team7_viz: {msg}");
+            app.borrow_mut().say(msg);
+            redraw();
+        })
+    };
+    let win_slot: Rc<RefCell<Weak<Window>>> = Rc::new(RefCell::new(Weak::new()));
+    let bar = window.create_menu_bar()?;
+    let mut file = bar.add_submenu("File")?;
+    let s = shot.clone();
+    file.add_item("Screenshot (P)", move || {
+        let s = s.clone();
+        aurea::after_frame(move || s());
+    })?;
+    {
+        let (canvas, app, dir, win) = (canvas.clone(), app.clone(), screens_dir.clone(), win_slot.clone());
+        file.add_item("Save screenshot as...", move || {
+            let (canvas, app, dir, win) = (canvas.clone(), app.clone(), dir.clone(), win.clone());
+            aurea::after_frame(move || {
+                let Some(w) = win.borrow().upgrade() else { return };
+                let dialog = aurea::dialog::FileDialog::new()
+                    .title("Save map screenshot")
+                    .file_name(&format!("team7_viz_{}.png", shots::stamp_name(SystemTime::now())))
+                    .directory(&dir)
+                    .filter("PNG image", &["png"]);
+                if let Ok(Some(path)) = dialog.save(&w) {
+                    let msg = match shots::save_canvas(&canvas, &path) {
+                        Ok(()) => format!("screenshot saved: {}", path.display()),
+                        Err(e) => format!("screenshot failed: {e}"),
+                    };
+                    app.borrow_mut().say(msg);
+                    redraw();
+                }
+            });
+        })?;
+    }
+    file.add_separator()?;
+    let win = win_slot.clone();
+    file.add_item("Quit (Ctrl+Q)", move || close_later(win.borrow().clone()))?;
+
+    let mut view = bar.add_submenu("View")?;
+    let c = chrome.clone();
+    let panel = view.add_check_item("Panel (D)", true, move || {
+        if !syncing() {
+            let mut c = c.borrow_mut();
+            c.dock_open = !c.dock_open;
+            redraw();
+        }
+    })?;
+    let a = app.clone();
+    let follow = view.add_check_item("Follow robot (F)", true, move || {
+        if !syncing() {
+            let mut a = a.borrow_mut();
+            a.camera.follow = !a.camera.follow;
+            redraw();
+        }
+    })?;
+    let a = app.clone();
+    view.add_item("Fit map, north up (0)", move || {
+        a.borrow_mut().fit();
+        redraw();
+    })?;
+    let c = chrome.clone();
+    view.add_item("Health details (H)", move || {
+        let mut c = c.borrow_mut();
+        c.sections[3] = !c.sections[3];
+        redraw();
+    })?;
+    let mut tools_menu = bar.add_submenu("Tools")?;
+    let mut tools = Vec::new();
+    for (t, title) in [(Tool::Interact, "Interact (I, Esc)"), (Tool::Measure, "Measure (M)"), (Tool::Goal, "2D Goal (G)")] {
+        let a = app.clone();
+        tools.push((
+            t,
+            tools_menu.add_radio_item(title, t == Tool::Interact, move || {
+                if !syncing() {
+                    a.borrow_mut().set_tool(t);
+                    redraw();
+                }
+            })?,
+        ));
+    }
+    let menus = Rc::new(RefCell::new(Menus { panel, follow, tools, last: None }));
+
+    let mut root = Stack::new(Orientation::Vertical)?;
+    root.set_padding(0)?;
+    // weight 1: the canvas takes all the room the window gets
+    root.add_weighted(canvas.clone(), 1.0)?;
+    let content = Element::handle(&root);
     window.set_content(root)?;
     let window = Rc::new(window);
-    gui::set_window(Rc::downgrade(&window));
+    *win_slot.borrow_mut() = Rc::downgrade(&window);
     let started = Instant::now();
 
-    let drawn = app.clone();
-    let shared = model.clone();
+    let (dc, da, shared, menus_d) = (chrome.clone(), app.clone(), model.clone(), menus.clone());
     let weak = Rc::downgrade(&window);
     let quit = interrupted.clone();
     let mut closing = false;
     let exit_after = opts.exit_after;
     let reference = opts.dump_frame.as_ref().map(|p| format!("{}.ref.png", p.trim_end_matches(".png")));
+    let shot_d = shot.clone();
     canvas.set_draw_callback(move |ctx| {
         let timed_out = exit_after.is_some_and(|s| started.elapsed().as_secs_f64() >= s);
         let last = (timed_out || quit.load(Ordering::Relaxed)) && !closing;
         let now = Instant::now();
-        let out = match shared.lock() {
-            Ok(m) => {
-                let out = drawn.borrow_mut().draw(ctx, &m, now);
-                // the same frame drawn offscreen, to compare the window path with the reference path
-                if let (true, Some(path)) = (last, reference.as_ref()) {
-                    let (w, h) = (ctx.width(), ctx.height());
-                    let mut r = CpuRasterizer::new(w, h);
-                    if let Ok(mut off) = r.begin_frame() {
-                        let _ = drawn.borrow_mut().draw(off.as_mut(), &m, now);
-                    }
-                    let _ = r.end_frame();
-                    report(path, gui::save_rgba(path.as_ref(), r.pixels(), w, h));
-                }
-                out
+        let Ok(m) = shared.lock() else { return Ok(()) };
+        let mut c = dc.borrow_mut();
+        let mut a = da.borrow_mut();
+        let paint = Instant::now();
+        let req = c.frame(ctx, &mut a, &m, now)?;
+        STATS.with(|s| s.borrow_mut().frame(paint.elapsed(), m.camera.as_ref().map(|f| f.seq)));
+        if c.ui.wants_frame() {
+            redraw();
+        }
+        // the same frame drawn offscreen, to compare the window path with the reference path
+        if let (true, Some(path)) = (last, reference.as_ref()) {
+            let (w, h) = (ctx.width(), ctx.height());
+            let mut r = CpuRasterizer::new(w, h);
+            if let Ok(mut off) = r.begin_frame() {
+                let _ = c.frame(off.as_mut(), &mut a, &m, now);
             }
-            Err(_) => Ok(()),
-        };
+            let _ = r.end_frame();
+            report(path, shots::save_rgba(path.as_ref(), r.pixels(), w, h));
+        }
+        let (cc, aa, mm) = (dc.clone(), da.clone(), menus_d.clone());
+        aurea::after_frame(move || {
+            if let (Ok(c), Ok(a), Ok(mut menus)) = (cc.try_borrow(), aa.try_borrow(), mm.try_borrow_mut()) {
+                menus.sync(&c, &a);
+            }
+        });
+        if req.screenshot {
+            let s = shot_d.clone();
+            aurea::after_frame(move || s());
+        }
         if last {
             closing = true;
             close_later(weak.clone());
         }
-        out
+        Ok(())
     })?;
     if let Some(path) = opts.dump_frame.clone() {
         let c = canvas.clone();
-        DUMP.with(|d| *d.borrow_mut() = Some(Box::new(move || report(&path, gui::save_canvas(&c, path.as_ref())))));
+        DUMP.with(|d| *d.borrow_mut() = Some(Box::new(move || report(&path, shots::save_canvas(&c, path.as_ref())))));
     }
 
-    // redraw pump: the ROS thread marks the model dirty, this asks for a canvas frame and a panel refresh
-    let id = canvas.id();
+    // redraw pump: the ROS thread marks the model dirty, this asks for a canvas frame
     let pump = {
         let (stop, dirty, model) = (stop.clone(), dirty.clone(), model.clone());
         let verbose = opts.verbose;
         std::thread::spawn(move || {
-            let (mut last_draw, mut last_panel, mut last_log) = (Instant::now(), Instant::now(), Instant::now());
+            let (mut last_draw, mut last_log) = (Instant::now(), Instant::now());
             while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(FRAME);
-                if dirty.swap(false, Ordering::Relaxed) || last_draw.elapsed() >= IDLE_REDRAW {
+                std::thread::sleep(POLL);
+                let due = last_draw.elapsed() >= FRAME;
+                if (due && dirty.swap(false, Ordering::Relaxed)) || last_draw.elapsed() >= IDLE_REDRAW {
                     request_canvas_redraw(id);
                     last_draw = Instant::now();
-                }
-                if last_panel.elapsed() >= PANEL_REFRESH {
-                    gui::refresh_soon();
-                    last_panel = Instant::now();
                 }
                 if verbose && last_log.elapsed() >= Duration::from_secs(2) {
                     if let Ok(m) = model.lock() {
@@ -213,60 +396,73 @@ fn main() -> AureaResult<()> {
     let debug_input = std::env::var_os("TEAM7_VIZ_DEBUG_INPUT").is_some();
     window.on_event(move |event| {
         let (ox, oy) = canvas_origin(&events_canvas, content);
-        if debug_input && matches!(event, WindowEvent::MouseButton { .. } | WindowEvent::MouseMove { .. }) {
-            eprintln!("team7_viz: input {event:?} canvas origin ({ox}, {oy}) size {:?}", events_canvas.size());
+        let e = shifted(event, ox, oy);
+        if debug_input && matches!(e, WindowEvent::MouseButton { .. }) {
+            eprintln!("team7_viz: input {e:?}");
         }
-        let (cw, ch) = events_canvas.size();
-        let inside = |x: f64, y: f64| x >= ox && y >= oy && x < ox + f64::from(cw) && y < oy + f64::from(ch);
-        let mut a = app.borrow_mut();
-        let changed = match *event {
-            WindowEvent::KeyInput { key, pressed: true, modifiers } => match a.key(key, modifiers) {
-                Action::Quit => {
-                    close_later(weak.clone());
-                    false
+        let (Ok(mut c), Ok(mut a)) = (chrome.try_borrow_mut(), app.try_borrow_mut()) else { return };
+        let area = c.map_area;
+        let in_map = |x: f64, y: f64| area.contains(aurea::render::Point::new(x as f32, y as f32));
+        let local = |x: f64, y: f64| (x - f64::from(area.x), y - f64::from(area.y));
+        let mut changed = match e {
+            WindowEvent::KeyInput { key, pressed: true, modifiers } => {
+                c.handle(&e);
+                if c.key(key, modifiers) {
+                    true
+                } else {
+                    match a.key(key, modifiers) {
+                        Action::Quit => {
+                            close_later(weak.clone());
+                            false
+                        }
+                        Action::Screenshot => {
+                            let s = shot.clone();
+                            aurea::after_frame(move || s());
+                            false
+                        }
+                        Action::Redraw => true,
+                        Action::None => false,
+                    }
                 }
-                Action::Screenshot => {
-                    drop(a);
-                    aurea::after_frame(|| {
-                        gui::with(gui::Gui::screenshot);
-                    });
-                    return;
-                }
-                Action::Redraw => true,
-                Action::None => false,
-            },
-            WindowEvent::MouseButton { button, pressed, x, y, .. } => {
+            }
+            // the map takes presses and the wheel over it; the widgets take the rest
+            WindowEvent::MouseButton { button, pressed: true, x, y, .. } if in_map(x, y) => {
                 let b = match button {
                     MouseButton::Left => Some(MouseKey::Left),
                     MouseButton::Middle => Some(MouseKey::Middle),
                     MouseButton::Right => Some(MouseKey::Right),
                     MouseButton::Other(_) => None,
                 };
-                match (b, pressed) {
-                    (Some(b), true) if inside(x, y) => a.press(b, x - ox, y - oy),
-                    (Some(_), false) => a.release(x - ox, y - oy),
-                    _ => false,
-                }
+                let (lx, ly) = local(x, y);
+                b.is_some_and(|b| a.press(b, lx, ly))
             }
-            WindowEvent::MouseMove { x, y, .. } => a.moved(x - ox, y - oy),
-            WindowEvent::MouseWheel { delta_y, x, y, .. } if inside(x, y) => a.wheel(delta_y, x - ox, y - oy),
-            _ => false,
+            WindowEvent::MouseButton { pressed: false, x, y, .. } => {
+                let (lx, ly) = local(x, y);
+                let used = a.release(lx, ly);
+                c.handle(&e) || used
+            }
+            WindowEvent::MouseMove { x, y, .. } => {
+                let (lx, ly) = local(x, y);
+                let used = a.moved(lx, ly);
+                c.handle(&e) || used || in_map(x, y)
+            }
+            WindowEvent::MouseWheel { delta_y, x, y, .. } if in_map(x, y) => {
+                let (lx, ly) = local(x, y);
+                a.wheel(delta_y, lx, ly)
+            }
+            _ => c.handle(&e),
         };
         if let Some(g) = a.pending_goal.take() {
             let _ = goal_tx.send(g);
+            changed = true;
         }
-        drop(a);
+        drop((c, a));
         if changed {
-            request_canvas_redraw(id);
-            gui::refresh_soon();
+            redraw();
         }
     });
 
     window.show();
-    // GTK places the divider by its own rule until the window has a size; place it again then
-    aurea::run_after(Duration::from_millis(300), || {
-        gui::with(gui::Gui::place_divider);
-    });
     let result = window.run();
 
     stop.store(true, Ordering::Relaxed);
@@ -274,14 +470,12 @@ fn main() -> AureaResult<()> {
     let _ = ros_thread.join();
     if let Ok(m) = model.lock() {
         let line = m.counts_line();
-        eprintln!("team7_viz: exit after {:.1} s, received {}", started.elapsed().as_secs_f64(), if line.is_empty() { "nothing" } else { &line });
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!("team7_viz: exit after {secs:.1} s, received {}", if line.is_empty() { "nothing" } else { &line });
+        let received = m.rate(team7_viz::model::Topic::Camera).total;
+        eprintln!("team7_viz: {}", STATS.with(|s| s.borrow().line(received, secs)));
     }
     result
-}
-
-thread_local! {
-    /// saves the canvas before the window closes (`--dump-frame`)
-    static DUMP: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
 }
 
 /// close once the current frame or event is done (`WindowProxy::dispatch` is not drained under `run`)

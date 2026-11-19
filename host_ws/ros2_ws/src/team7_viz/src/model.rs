@@ -12,6 +12,8 @@ use crate::Rgba;
 pub const ROBOT_RADIUS: f64 = 0.171;
 /// mission time limit, the countdown starts at the first RUNNING
 pub const MISSION_LIMIT: Duration = Duration::from_secs(600);
+/// no scan, odom or tf for this long: the replay ended or the robot is off
+pub const STALE_AFTER: Duration = Duration::from_secs(3);
 /// trail points are at least this far apart, and at most this many are kept
 const TRAIL_SPACING: f64 = 0.05;
 const TRAIL_MAX: usize = 20_000;
@@ -54,6 +56,50 @@ impl RateMeter {
             }
             _ => 0.0,
         }
+    }
+}
+
+/// a kind of data that can come from the team7 stack or the stock stack (Nav2, slam_toolbox,
+/// explore_lite, aruco_opencv); its source is picked from the topics that exist
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Map,
+    GlobalCost,
+    LocalCost,
+    Plan,
+    Trajectory,
+    Frontiers,
+    Views,
+    Goal,
+    Targets,
+    SlamGraph,
+    Camera,
+    /// the NavigateToPose action server for the 2D Goal tool
+    NavAction,
+}
+
+impl Slot {
+    /// candidate topics, team7 first
+    pub fn candidates(self) -> &'static [&'static str] {
+        match self {
+            Slot::Map => &["/map"],
+            Slot::GlobalCost => &["/global_costmap/costmap"],
+            Slot::LocalCost => &["/team7/mppi/local_cost", "/local_costmap/costmap"],
+            Slot::Plan => &["/team7/path", "/plan"],
+            Slot::Trajectory => &["/team7/mppi/trajectory", "/local_plan"],
+            Slot::Frontiers => &["/team7/frontiers", "/explore/frontiers"],
+            Slot::Views => &["/team7/frontiers"],
+            Slot::Goal => &["/team7/goal", "/goal_pose"],
+            Slot::Targets => &["/team7/targets"],
+            Slot::SlamGraph => &["/team7/slam/graph", "/slam_toolbox/graph_visualization"],
+            Slot::Camera => &["/team7/aruco/debug", "/aruco_tracker/debug"],
+            Slot::NavAction => &["/team7/navigate_to_pose", "/navigate_to_pose"],
+        }
+    }
+
+    /// the graph name that shows a candidate exists (actions show up as their status topic)
+    fn probe(self, topic: &str) -> String {
+        if self == Slot::NavAction { format!("{topic}/_action/status") } else { topic.to_owned() }
     }
 }
 
@@ -178,6 +224,10 @@ pub struct Model {
     pub tf_problem: Option<(String, Instant)>,
     /// what happened to the last goal sent with the 2D Goal tool
     pub goal_status: Option<String>,
+    /// topic names in the ROS graph, polled every few seconds
+    pub graph: Vec<String>,
+    /// last message per topic
+    pub seen: Vec<(&'static str, Instant)>,
 }
 
 impl Model {
@@ -191,6 +241,53 @@ impl Model {
         self.goal = None;
         self.tf_stamp = None;
         self.scan_delay = None;
+        // a new run on a new time line: its mission and targets start over
+        self.targets.clear();
+        self.mission_started = None;
+        self.mission_ended = None;
+    }
+
+    /// the topic a slot takes its data from: the first candidate in the graph, else the first
+    /// one that sent something; None when no candidate exists (the layer is hidden)
+    pub fn bound(&self, slot: Slot) -> Option<&'static str> {
+        let c = slot.candidates();
+        c.iter()
+            .find(|t| self.graph.iter().any(|g| *g == slot.probe(t)))
+            .or_else(|| c.iter().find(|t| self.seen.iter().any(|(s, _)| s == *t)))
+            .copied()
+    }
+
+    /// a message on `topic` for `slot`: noted, and true when it is the slot's source
+    pub fn accept(&mut self, slot: Slot, topic: &'static str, now: Instant) -> bool {
+        match self.seen.iter_mut().find(|(s, _)| *s == topic) {
+            Some(e) => e.1 = now,
+            None => self.seen.push((topic, now)),
+        }
+        self.bound(slot) == Some(topic)
+    }
+
+    /// which stack the sources look like: "team7", "stock", "mixed" or "-"
+    pub fn stack(&self) -> &'static str {
+        let slots = [Slot::Plan, Slot::LocalCost, Slot::Frontiers];
+        let team7 = slots.iter().filter(|&&s| self.bound(s).is_some_and(|t| t.starts_with("/team7/"))).count();
+        let stock = slots.iter().filter(|&&s| self.bound(s).is_some_and(|t| !t.starts_with("/team7/"))).count();
+        match (team7, stock) {
+            (0, 0) => "-",
+            (_, 0) => "team7",
+            (0, _) => "stock",
+            _ => "mixed",
+        }
+    }
+
+    /// when the robot data (scan, odom, tf) last came
+    pub fn last_data(&self) -> Option<Instant> {
+        [Topic::Scan, Topic::Odom, Topic::Tf].iter().filter_map(|&t| self.rate(t).last()).max()
+    }
+
+    /// how long no robot data has come, when that is over `STALE_AFTER`
+    pub fn stale_for(&self, now: Instant) -> Option<Duration> {
+        let d = now.saturating_duration_since(self.last_data()?);
+        (d > STALE_AFTER).then_some(d)
     }
 
     pub fn rate(&self, t: Topic) -> &RateMeter {
@@ -223,9 +320,13 @@ impl Model {
         }
     }
 
-    /// a mission state message: the countdown starts at the first RUNNING
+    /// a mission state message: the countdown starts at RUNNING, and starts again at a RUNNING
+    /// after the last run ended (DONE, or its data stopped)
     pub fn set_mission(&mut self, state: String, now: Instant) {
         if state == "RUNNING" {
+            if self.mission_ended.is_some() || self.stale_for(now).is_some() {
+                self.mission_started = None;
+            }
             self.mission_started.get_or_insert(now);
             self.mission_ended = None;
         } else if self.mission_started.is_some() && self.mission_ended.is_none() {
@@ -258,15 +359,46 @@ impl Model {
     }
 }
 
-/// "mm:ss" left of the 10 minutes, "-mm:ss" past them; frozen once the mission ended
-pub fn countdown(started: Option<Instant>, ended: Option<Instant>, now: Instant) -> String {
-    let Some(s) = started else { return "10:00".into() };
-    let used = ended.unwrap_or(now).saturating_duration_since(s);
-    let (sign, left) = match MISSION_LIMIT.checked_sub(used) {
-        Some(l) => ("", l.as_secs()),
-        None => ("-", (used - MISSION_LIMIT).as_secs()),
+fn mmss(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// the mission clock: (big text, small text). Counts down from 10:00 while running; once the run
+/// is DONE, or its data stopped (replay over), it shows the time used. Never negative.
+pub fn mission_clock(m: &Model, now: Instant) -> (String, String) {
+    let Some(start) = m.mission_started else { return ("--:--".into(), "not started".into()) };
+    let (end, why) = match (m.mission_ended, m.stale_for(now)) {
+        (Some(e), _) => (Some(e), format!("done ({})", m.mission.as_deref().unwrap_or("ended"))),
+        (None, Some(_)) => (m.last_data(), "stopped: no data".to_owned()),
+        (None, None) => (None, String::new()),
     };
-    format!("{sign}{:02}:{:02}", left / 60, left % 60)
+    if end.is_some_and(|e| e < start) {
+        // the RUNNING came after the data had already stopped (a latched message from an old run)
+        return ("--:--".into(), why);
+    }
+    let used = end.unwrap_or(now).saturating_duration_since(start);
+    if end.is_some() {
+        return (mmss(used), format!("{why}, time used"));
+    }
+    match MISSION_LIMIT.checked_sub(used) {
+        Some(left) => (mmss(left), "left of 10:00".into()),
+        None => ("00:00".into(), format!("time up, +{}", mmss(used - MISSION_LIMIT))),
+    }
+}
+
+/// a short human age: "0.4 s", "12 s", "3 min", "2 h"
+pub fn human_age(d: Duration) -> String {
+    let s = d.as_secs_f64();
+    if s < 10.0 {
+        format!("{s:.1} s")
+    } else if s < 60.0 {
+        format!("{s:.0} s")
+    } else if s < 3600.0 {
+        format!("{:.0} min", (s / 60.0).floor())
+    } else {
+        format!("{:.0} h", (s / 3600.0).floor())
+    }
 }
 
 #[cfg(test)]
@@ -313,18 +445,76 @@ mod tests {
         assert_eq!(m.counts_line(), "scan=2 map=1");
     }
 
+    /// robot data every 100 ms from `from` for `secs`
+    fn feed(m: &mut Model, from: Instant, secs: u64) {
+        for i in 0..=secs * 10 {
+            m.tick(Topic::Scan, from + Duration::from_millis(100 * i));
+        }
+    }
+
     #[test]
-    fn countdown_starts_at_running_and_freezes_at_the_end() {
+    fn mission_clock_counts_down_stops_and_never_goes_negative() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut m = Model::default();
+        assert_eq!(mission_clock(&m, t0), ("--:--".into(), "not started".into()));
+        m.set_mission("RUNNING".into(), t0);
+        feed(&mut m, t0, 700);
+        m.set_mission("RUNNING".into(), t0 + s(30));
+        assert_eq!(mission_clock(&m, t0 + s(83)).0, "08:37");
+        let (big, small) = mission_clock(&m, t0 + s(612));
+        assert_eq!((big.as_str(), small.as_str()), ("00:00", "time up, +00:12"));
+        // the replay ended at 700 s: the clock stops at the last data, 5 s later and 20 min later
+        let (big, small) = mission_clock(&m, t0 + s(705));
+        assert_eq!((big.as_str(), small.as_str()), ("11:40", "stopped: no data, time used"));
+        assert_eq!(mission_clock(&m, t0 + s(1900)).0, "11:40");
+        // DONE freezes the time used
+        let mut m = Model::default();
+        m.set_mission("RUNNING".into(), t0);
+        feed(&mut m, t0, 100);
+        m.set_mission("DONE".into(), t0 + s(83));
+        assert_eq!(mission_clock(&m, t0 + s(90)), ("01:23".into(), "done (DONE), time used".into()));
+        // a new RUNNING after the end starts over
+        m.set_mission("RUNNING".into(), t0 + s(95));
+        assert_eq!(mission_clock(&m, t0 + s(95)).0, "10:00");
+    }
+
+    #[test]
+    fn slots_bind_to_what_is_published() {
         let t0 = Instant::now();
         let mut m = Model::default();
-        assert_eq!(countdown(m.mission_started, m.mission_ended, t0), "10:00");
-        m.set_mission("RUNNING".into(), t0);
-        m.set_mission("RUNNING".into(), t0 + Duration::from_secs(30));
-        let at = t0 + Duration::from_secs(83);
-        assert_eq!(countdown(m.mission_started, m.mission_ended, at), "08:37");
-        assert_eq!(countdown(m.mission_started, m.mission_ended, t0 + Duration::from_secs(612)), "-00:12");
-        m.set_mission("DONE".into(), at);
-        assert_eq!(countdown(m.mission_started, m.mission_ended, t0 + Duration::from_secs(900)), "08:37");
+        assert_eq!(m.bound(Slot::Plan), None);
+        // stock graph: Nav2 /plan, explore_lite frontiers, the Nav2 action
+        m.graph = ["/plan", "/explore/frontiers", "/local_costmap/costmap", "/navigate_to_pose/_action/status"].map(String::from).to_vec();
+        assert_eq!(m.bound(Slot::Plan), Some("/plan"));
+        assert_eq!(m.bound(Slot::Frontiers), Some("/explore/frontiers"));
+        assert_eq!(m.bound(Slot::NavAction), Some("/navigate_to_pose"));
+        assert_eq!(m.bound(Slot::Views), None);
+        assert_eq!(m.stack(), "stock");
+        assert!(m.accept(Slot::Plan, "/plan", t0));
+        assert!(!m.accept(Slot::Plan, "/team7/path", t0));
+        // team7 topics win once they are in the graph
+        m.graph.push("/team7/path".into());
+        assert!(m.accept(Slot::Plan, "/team7/path", t0));
+        assert_eq!(m.stack(), "mixed");
+        // before the first graph poll, data decides
+        let mut m = Model::default();
+        assert!(m.accept(Slot::Camera, "/aruco_tracker/debug", t0));
+        assert_eq!(m.bound(Slot::Camera), Some("/aruco_tracker/debug"));
+    }
+
+    #[test]
+    fn stale_after_three_seconds_and_human_ages() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        assert!(m.stale_for(t0).is_none());
+        feed(&mut m, t0, 1);
+        assert!(m.stale_for(t0 + Duration::from_secs(3)).is_none());
+        assert_eq!(m.stale_for(t0 + Duration::from_secs(10)), Some(Duration::from_secs(9)));
+        assert_eq!(human_age(Duration::from_millis(400)), "0.4 s");
+        assert_eq!(human_age(Duration::from_secs(82)), "1 min");
+        assert_eq!(human_age(Duration::from_secs(42)), "42 s");
+        assert_eq!(human_age(Duration::from_secs(82125)), "22 h");
     }
 
     #[test]

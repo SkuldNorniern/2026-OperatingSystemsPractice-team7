@@ -8,7 +8,7 @@ mod refine;
 pub mod synth;
 
 pub use camera::{CameraModel, estimate_range, marker_bearing};
-pub use detect::{Detector, DetectorParams};
+pub use detect::{Detector, DetectorParams, stripe_flips};
 pub use dict::{Dictionary, Match};
 pub use image::GrayImage;
 

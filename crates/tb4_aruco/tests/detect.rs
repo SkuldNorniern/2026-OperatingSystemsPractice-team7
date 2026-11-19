@@ -1,7 +1,7 @@
 use std::f64::consts::FRAC_PI_2;
 
 use tb4_aruco::synth::{add_noise, gaussian_blur, render, square_corners};
-use tb4_aruco::{Detector, DetectorParams, Dictionary, GrayImage, Marker};
+use tb4_aruco::{Detector, DetectorParams, Dictionary, GrayImage, Marker, stripe_flips};
 
 fn load_pgm(bytes: &[u8]) -> GrayImage {
     let mut fields = Vec::new();
@@ -38,6 +38,11 @@ fn corner_err(m: &Marker, truth: &[[f64; 2]; 4]) -> f64 {
 
 fn detect(img: &GrayImage) -> Vec<Marker> {
     Detector::new(DetectorParams::default()).detect(img, &Dictionary::aruco_original())
+}
+
+// OpenCV parity: the barcode stripe filter (ids 0, 341, 682, 1023) is off, OpenCV has none
+fn no_stripe_filter() -> DetectorParams {
+    DetectorParams { max_stripe_flips: None, ..DetectorParams::default() }
 }
 
 fn check(found: &[Marker], expected: &[(u32, [[f64; 2]; 4])], tol: f64) {
@@ -96,7 +101,7 @@ fn golden_opencv_fixture() {
             (id, [0, 1, 2, 3].map(|j| sq[(j + 4 - k) % 4]))
         })
         .collect();
-    check(&detect(&img), &expected, 0.6);
+    check(&Detector::new(no_stripe_filter()).detect(&img, &Dictionary::aruco_original()), &expected, 0.6);
 }
 
 #[test]
@@ -141,7 +146,7 @@ fn small_markers() {
 #[test]
 fn multiple_markers_250() {
     let ms = [
-        (0u32, square_corners(50.0, 50.0, 40.0, 0.1)),
+        (3u32, square_corners(50.0, 50.0, 40.0, 0.1)),
         (7, square_corners(180.0, 60.0, 30.0, 2.5)),
         (512, square_corners(70.0, 180.0, 18.0, -0.4)),
         (1000, square_corners(170.0, 180.0, 60.0, 1.0)),
@@ -166,8 +171,10 @@ fn all_ids_decode() {
             .collect();
         let img = render(16 * 36 + 4, 16 * 36 + 4, &dict, &ms, 2);
         let found = det.detect(&img, &dict);
-        assert_eq!(found.len(), 256);
-        for (id, q) in &ms {
+        // barcode-like ids (all rows the same) are rejected on purpose
+        let striped = |id: u32| stripe_flips(dict.codes[id as usize], dict.bits) <= 1;
+        assert_eq!(found.len(), ms.iter().filter(|(id, _)| !striped(*id)).count());
+        for (id, q) in ms.iter().filter(|(id, _)| !striped(*id)) {
             let c = [(q[0][0] + q[2][0]) / 2.0, (q[0][1] + q[2][1]) / 2.0];
             let m = found
                 .iter()
@@ -278,9 +285,22 @@ fn every_dictionary_detects_its_own_markers() {
             .map(|(k, &id)| (id, square_corners(60.0 + 110.0 * k as f64, 70.0, 70.0, 0.3 * k as f64)))
             .collect();
         let img = render(340, 140, &dict, &ms, 4);
-        let found = Detector::new(DetectorParams::default()).detect(&img, &dict);
+        let found = Detector::new(no_stripe_filter()).detect(&img, &dict);
         let mut got: Vec<u32> = found.iter().map(|m| m.id).collect();
         got.sort();
         assert_eq!(got, ids.to_vec(), "{name}");
     }
+}
+
+// 1D barcodes (chair labels) decode as grids whose rows are all the same. In ARUCO_ORIGINAL only
+// ids 0, 341, 682 and 1023 are like that; every other id needs at least 3 flips to get there.
+#[test]
+fn barcode_stripes_rejected() {
+    let dict = Dictionary::aruco_original();
+    let near: Vec<u32> = (0..dict.len() as u32).filter(|&i| stripe_flips(dict.codes[i as usize], dict.bits) <= 2).collect();
+    assert_eq!(near, vec![0, 341, 682, 1023]);
+    let ms = [(1023, square_corners(60.0, 60.0, 50.0, 0.0)), (682, square_corners(180.0, 60.0, 50.0, 0.0)), (42, square_corners(120.0, 180.0, 50.0, 0.0))];
+    let found = detect(&scene(250, 250, &ms, 0.0, 0, 0));
+    assert_eq!(found.iter().map(|m| m.id).collect::<Vec<_>>(), vec![42]);
+    assert_eq!(Detector::new(no_stripe_filter()).detect(&scene(250, 250, &ms, 0.0, 0, 0), &dict).len(), 3);
 }

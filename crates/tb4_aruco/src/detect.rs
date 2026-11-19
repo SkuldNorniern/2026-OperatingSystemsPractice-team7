@@ -35,6 +35,10 @@ pub struct DetectorParams {
     pub uncertain_rate: f64,
     // A corrected match must beat every other id's soft cost by this much (in contrast units).
     pub min_decode_margin: f64,
+    // Reject bit grids within this many flips of "every row the same" or "every column the same".
+    // A 1D barcode (chair labels, striped panels) reads like that; real markers are far from it.
+    // None = off.
+    pub max_stripe_flips: Option<u32>,
 }
 
 impl Default for DetectorParams {
@@ -58,6 +62,7 @@ impl Default for DetectorParams {
             sharpen_levels: vec![0.0, 0.25, 0.5],
             uncertain_rate: 0.3,
             min_decode_margin: 0.5,
+            max_stripe_flips: Some(1),
         }
     }
 }
@@ -470,6 +475,9 @@ impl Detector {
             return None;
         }
         let nb = dict.bits;
+        if p.max_stripe_flips.is_some_and(|m| stripe_flips(code, nb) <= m) {
+            return None;
+        }
         self.weights.clear();
         for i in (0..nb * nb).rev() {
             let v = self.sharp[(i / nb + bb) * n + i % nb + bb];
@@ -502,6 +510,16 @@ impl Detector {
             self.found.push(cand);
         }
     }
+}
+
+// Fewest bit flips that make every row of the nb x nb grid equal, or every column equal.
+// Each column (row) is set to its majority value, so the cost is the minority count.
+pub fn stripe_flips(code: u64, nb: usize) -> u32 {
+    let bit = |r: usize, c: usize| ((code >> (nb * nb - 1 - (r * nb + c))) & 1) as u32;
+    let minority = |ones: u32| ones.min(nb as u32 - ones);
+    let rows_equal: u32 = (0..nb).map(|c| minority((0..nb).map(|r| bit(r, c)).sum())).sum();
+    let cols_equal: u32 = (0..nb).map(|r| minority((0..nb).map(|c| bit(r, c)).sum())).sum();
+    rows_equal.min(cols_equal)
 }
 
 // Soft-decision match against all rotations. `weights[b]` is the confidence of bit b (LSB first).

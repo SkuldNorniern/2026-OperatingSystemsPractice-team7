@@ -39,6 +39,11 @@ pub struct DetectorParams {
     // A 1D barcode (chair labels, striped panels) reads like that; real markers are far from it.
     // None = off.
     pub max_stripe_flips: Option<u32>,
+    // Ids whose own code is barcode-like (all rows or columns equal) are accepted only when read
+    // exactly, without bit correction. A dark panel with one bright strip reads as ARUCO_ORIGINAL
+    // id 0 after one corrected bit (field 184838: seat underside, 3 frames, all hamming 1); the
+    // printed id 0 on the bench sheet read exactly in 624 of 624 frames.
+    pub exact_stripe_ids: bool,
 }
 
 impl Default for DetectorParams {
@@ -63,6 +68,7 @@ impl Default for DetectorParams {
             uncertain_rate: 0.3,
             min_decode_margin: 0.5,
             max_stripe_flips: Some(1),
+            exact_stripe_ids: true,
         }
     }
 }
@@ -484,6 +490,9 @@ impl Detector {
             self.weights.push(((v - thr).abs() / contrast).min(1.0));
         }
         let (id, s, hamming) = soft_identify(&self.rot_codes, code, &self.weights, p.max_hamming.min(dict.max_correction), p.min_decode_margin)?;
+        if p.exact_stripe_ids && hamming > 0 && stripe_flips(dict.codes[id as usize], nb) == 0 {
+            return None;
+        }
         let corners = [0, 1, 2, 3].map(|k| quad[(k + s) % 4]);
         Some(Candidate {
             marker: Marker {

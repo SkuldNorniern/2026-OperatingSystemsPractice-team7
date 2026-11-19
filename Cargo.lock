@@ -240,6 +240,7 @@ name = "tb4_slam"
 version = "0.1.0"
 dependencies = [
  "tb4_core",
+ "tb4_scan",
 ]
 
 [[package]]

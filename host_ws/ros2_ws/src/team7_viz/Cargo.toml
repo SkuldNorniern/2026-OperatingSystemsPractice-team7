@@ -1,0 +1,24 @@
+[package]
+name = "team7_viz"
+version = "0.1.0"
+description = "Read-only map view of a team7 run (live or replay), an RViz replacement drawn with aurea"
+edition = "2024"
+# aurea needs 1.90
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+# its own workspace, like team7_nodes: needs ROS sourced (r2r) and GTK (aurea)
+[workspace]
+
+[dependencies]
+r2r = "0.9.7"
+futures = "0.3"
+ctrlc = { version = "3.5", features = ["termination"] }
+aurea = "0.1"
+tb4_core = { path = "../../../../crates/tb4_core" }
+tb4_draw = { path = "../../../../crates/tb4_draw" }
+png = "0.18"                        # --dump-frame and the test snapshot
+
+[profile.colcon]
+inherits = "release"

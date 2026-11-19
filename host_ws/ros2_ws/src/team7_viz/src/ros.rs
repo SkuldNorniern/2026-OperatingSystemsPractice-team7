@@ -313,6 +313,7 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>, opts: O
             c.update(|m, tf| {
                 if jumped {
                     // a new replay: drop what belongs to the old time line
+                    eprintln!("team7_viz: TF time jumped back, TF reset (replay restarted?)");
                     m.reset_run();
                     m.tf_problem = Some(("time jumped back: TF reset (replay restarted?)".into(), Instant::now()));
                 }

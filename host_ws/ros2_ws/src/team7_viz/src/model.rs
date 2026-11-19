@@ -241,10 +241,9 @@ impl Model {
         self.goal = None;
         self.tf_stamp = None;
         self.scan_delay = None;
-        // a new run on a new time line: its mission and targets start over
-        self.targets.clear();
-        self.mission_started = None;
-        self.mission_ended = None;
+        // the mission clock and the targets stay: the mission state is latched and sent once, so
+        // clearing it here would lose it; a new run's RUNNING restarts the clock (`set_mission`) and
+        // its target array replaces the targets
     }
 
     /// the topic a slot takes its data from: the first candidate in the graph, else the first

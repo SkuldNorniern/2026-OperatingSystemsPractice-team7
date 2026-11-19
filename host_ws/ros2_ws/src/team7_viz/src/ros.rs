@@ -67,20 +67,67 @@ pub fn targets_from(m: &MarkerArray, prev: &[Target]) -> Vec<Target> {
     out
 }
 
-/// frame -> map with the latest TF, as a 3D isometry (the laser may be mounted rolled)
+/// a dynamic TF stamp this much older than the newest one means the clock went back (a replay restarted)
+const JUMP_BACK_NS: i64 = 1_000_000_000;
+
+/// frame -> map through TF, as a 3D isometry (the laser may be mounted rolled)
 struct Tf {
     buf: TfBuffer,
+    /// newest dynamic stamp seen
+    newest: Stamp,
+    /// static transforms, kept across a reset: (child, parent, stamp, transform)
+    statics: Vec<(String, String, Stamp, Isometry3<f64>)>,
 }
 
 impl Tf {
-    fn to_map(&self, frame: &str) -> Result<Isometry3<f64>, String> {
-        let frame = if frame.is_empty() { MAP_FRAME } else { frame };
-        self.buf.lookup(MAP_FRAME, frame, Stamp::LATEST).map_err(|e| format!("TF {frame} -> map: {e}"))
+    fn new() -> Self {
+        Self { buf: TfBuffer::new(10.0, 0.1), newest: Stamp(0), statics: Vec::new() }
     }
 
-    fn points(&self, frame: &str, pts: impl Iterator<Item = (f64, f64)>) -> Result<Vec<(f64, f64)>, String> {
-        let t = self.to_map(frame)?;
+    /// adds one transform; true when time jumped back and the dynamic transforms were dropped.
+    /// Without the reset, `Stamp::LATEST` would keep returning the previous run's last pose,
+    /// because the buffer keeps samples sorted by stamp.
+    fn insert(&mut self, parent: &str, child: &str, stamp: Stamp, t: Isometry3<f64>, is_static: bool) -> bool {
+        if is_static {
+            self.statics.retain(|(c, ..)| c != child);
+            self.statics.push((child.to_owned(), parent.to_owned(), stamp, t));
+            self.buf.insert(parent, child, stamp, t, true);
+            return false;
+        }
+        let jumped = self.newest.0 > 0 && stamp.0 + JUMP_BACK_NS < self.newest.0;
+        if jumped {
+            self.buf = TfBuffer::new(10.0, 0.1);
+            for (c, p, s, t) in &self.statics {
+                self.buf.insert(p, c, *s, *t, true);
+            }
+            self.newest = stamp;
+        }
+        self.newest = self.newest.max(stamp);
+        self.buf.insert(parent, child, stamp, t, false);
+        jumped
+    }
+
+    /// at `stamp` (interpolated), or the latest transform when the buffer does not cover it
+    fn to_map_at(&self, frame: &str, stamp: Stamp) -> Result<Isometry3<f64>, String> {
+        let frame = if frame.is_empty() { MAP_FRAME } else { frame };
+        self.buf
+            .lookup(MAP_FRAME, frame, stamp)
+            .or_else(|_| self.buf.lookup(MAP_FRAME, frame, Stamp::LATEST))
+            .map_err(|e| format!("TF {frame} -> map: {e}"))
+    }
+
+    fn to_map(&self, frame: &str) -> Result<Isometry3<f64>, String> {
+        self.to_map_at(frame, Stamp::LATEST)
+    }
+
+    fn points_at(&self, frame: &str, stamp: Stamp, pts: impl Iterator<Item = (f64, f64)>) -> Result<Vec<(f64, f64)>, String> {
+        let t = self.to_map_at(frame, stamp)?;
         Ok(pts.map(|(x, y)| t * Point3::new(x, y, 0.0)).map(|p| (p.x, p.y)).collect())
+    }
+
+    #[cfg(test)]
+    fn points(&self, frame: &str, pts: impl Iterator<Item = (f64, f64)>) -> Result<Vec<(f64, f64)>, String> {
+        self.points_at(frame, Stamp::LATEST, pts)
     }
 }
 
@@ -114,8 +161,9 @@ fn in_map(m: &mut Model, r: Result<Vec<(f64, f64)>, String>) -> Option<Vec<(f64,
     r.map_err(|e| m.tf_problem = Some((e, Instant::now()))).ok()
 }
 
+/// points in the header's frame -> map, with TF at the header stamp (a zero stamp means latest)
 fn header_points<'a>(tf: &Tf, h: &Header, pts: impl Iterator<Item = (f64, f64)> + 'a) -> Result<Vec<(f64, f64)>, String> {
-    tf.points(&h.frame_id, pts)
+    tf.points_at(&h.frame_id, Stamp::from_ros(h.stamp.sec, h.stamp.nanosec), pts)
 }
 
 /// subscribe everything and spin until `stop`; sets `dirty` whenever the model changed
@@ -123,7 +171,7 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>) -> r2r:
     let ctx_r2r = r2r::Context::create()?;
     let mut node = r2r::Node::create(ctx_r2r, "team7_viz", "")?;
     let pool = LocalPool::new();
-    let tf = Rc::new(RefCell::new(Tf { buf: TfBuffer::new(10.0, 0.1) }));
+    let tf = Rc::new(RefCell::new(Tf::new()));
     let ctx = Rc::new(Ctx { model, tf: tf.clone(), dirty });
 
     // TF first: everything else is put in the map frame with it
@@ -131,14 +179,20 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>) -> r2r:
         let s = node.subscribe::<TFMessage>(topic, qos)?;
         let tf = tf.clone();
         spawn(&pool, s, &ctx, move |c, msg: TFMessage| {
+            let mut jumped = false;
             {
                 let mut t = tf.borrow_mut();
                 for x in &msg.transforms {
                     let st = Stamp::from_ros(x.header.stamp.sec, x.header.stamp.nanosec);
-                    t.buf.insert(&x.header.frame_id, &x.child_frame_id, st, iso(&x.transform), is_static);
+                    jumped |= t.insert(&x.header.frame_id, &x.child_frame_id, st, iso(&x.transform), is_static);
                 }
             }
             c.update(|m, tf| {
+                if jumped {
+                    // a new replay: drop what belongs to the old time line
+                    m.reset_run();
+                    m.tf_problem = Some(("time jumped back: TF reset (replay restarted?)".into(), Instant::now()));
+                }
                 m.count(if is_static { "tf_static" } else { "tf" });
                 if !is_static {
                     m.tick(Topic::Tf, Instant::now());
@@ -166,7 +220,9 @@ pub fn run(model: Shared, stop: Arc<AtomicBool>, dirty: Arc<AtomicBool>) -> r2r:
                     origin_x: i.origin.position.x,
                     origin_y: i.origin.position.y,
                 };
-                m.map = Some(MapData { meta, data: msg.data });
+                let q = &i.origin.orientation;
+                let origin_yaw = (2.0 * (q.w * q.z + q.x * q.y)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+                m.map = Some(MapData { meta, data: msg.data, origin_yaw });
                 m.map_seq += 1;
             }
         });
@@ -311,19 +367,50 @@ mod tests {
 
     #[test]
     fn points_go_through_tf_into_the_map_frame() {
-        let mut buf = TfBuffer::new(10.0, 0.1);
-        let t = |x: f64, yaw: f64| Isometry3::from_parts(Translation3::new(x, 0.0, 0.0), UnitQuaternion::from_euler_angles(0.0, 0.0, yaw));
-        buf.insert("map", "odom", Stamp(1), t(1.0, 0.0), false);
-        buf.insert("odom", "base_link", Stamp(1), t(0.5, std::f64::consts::FRAC_PI_2), false);
+        let mut tf = Tf::new();
+        tf.insert("map", "odom", Stamp(1), t(1.0, 0.0), false);
+        tf.insert("odom", "base_link", Stamp(1), t(0.5, std::f64::consts::FRAC_PI_2), false);
         // laser upside down: rolled by pi
         let rolled = Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.2), UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0));
-        buf.insert("base_link", "rplidar_link", Stamp(0), rolled, true);
-        let tf = Tf { buf };
+        tf.insert("base_link", "rplidar_link", Stamp(0), rolled, true);
         let p = tf.points("rplidar_link", [(1.0, 0.0), (0.0, 1.0)].into_iter()).unwrap();
         // base at (1.5, 0) facing +y; laser +x is base +x (map +y), laser +y is base -y (map +x)
         assert!((p[0].0 - 1.5).abs() < 1e-9 && (p[0].1 - 1.0).abs() < 1e-9, "{:?}", p[0]);
         assert!((p[1].0 - 2.5).abs() < 1e-9 && p[1].1.abs() < 1e-9, "{:?}", p[1]);
         assert!(tf.points("camera", std::iter::empty()).is_err());
         assert_eq!(tf.points("", [(2.0, 3.0)].into_iter()).unwrap(), vec![(2.0, 3.0)]);
+    }
+
+    fn t(x: f64, yaw: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, 0.0, 0.0), UnitQuaternion::from_euler_angles(0.0, 0.0, yaw))
+    }
+
+    const S: i64 = 1_000_000_000;
+
+    #[test]
+    fn scans_use_tf_at_their_stamp() {
+        let mut tf = Tf::new();
+        tf.insert("map", "base_link", Stamp(10 * S), t(0.0, 0.0), false);
+        tf.insert("map", "base_link", Stamp(11 * S), t(1.0, 0.0), false);
+        let h = Header { stamp: r2r::builtin_interfaces::msg::Time { sec: 10, nanosec: 500_000_000 }, frame_id: "base_link".into() };
+        let p = header_points(&tf, &h, std::iter::once((0.0, 0.0))).unwrap();
+        assert!((p[0].0 - 0.5).abs() < 1e-9, "interpolated at the stamp {:?}", p[0]);
+        // stamp far outside the buffer: latest
+        let h = Header { stamp: r2r::builtin_interfaces::msg::Time { sec: 50, nanosec: 0 }, frame_id: "base_link".into() };
+        assert!((header_points(&tf, &h, std::iter::once((0.0, 0.0))).unwrap()[0].0 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn time_jumping_back_resets_tf_but_keeps_statics() {
+        let mut tf = Tf::new();
+        tf.insert("base_link", "laser", Stamp(0), t(0.1, 0.0), true);
+        assert!(!tf.insert("map", "base_link", Stamp(100 * S), t(5.0, 0.0), false));
+        assert!(!tf.insert("map", "base_link", Stamp(101 * S), t(6.0, 0.0), false));
+        // a replay restarts at t = 10 s: the old pose must not stay the "latest"
+        assert!(tf.insert("map", "base_link", Stamp(10 * S), t(1.0, 0.0), false));
+        assert!((tf.to_map("base_link").unwrap().translation.x - 1.0).abs() < 1e-9);
+        assert!((tf.to_map("laser").unwrap().translation.x - 1.1).abs() < 1e-9);
+        // small reorderings are not a jump
+        assert!(!tf.insert("map", "base_link", Stamp(10 * S - S / 2), t(0.9, 0.0), false));
     }
 }

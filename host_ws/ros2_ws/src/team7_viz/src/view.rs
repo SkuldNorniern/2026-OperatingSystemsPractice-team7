@@ -11,7 +11,7 @@ use tb4_draw::prim::{self, Prim, fill, stroke};
 use tb4_draw::view::ScreenRect;
 use tb4_draw::{Camera, Rgba, Viewport};
 
-use crate::model::{Model, ROBOT_RADIUS, Topic};
+use crate::model::{MapData, Model, ROBOT_RADIUS, Topic};
 
 pub const PANEL_WIDTH: f32 = 320.0;
 const MARGIN: f64 = 12.0;
@@ -75,6 +75,15 @@ pub struct Viewer {
     map_image: Option<(u64, Image)>,
     frame: Option<Frame>,
     drag: Option<(f64, f64)>,
+    /// world box the view was fitted to, kept so the view does not jump each time SLAM grows the
+    /// map; `0`/`r` fits again
+    fit_bounds: Option<[f64; 4]>,
+}
+
+/// where the map image lands: the grid frame is `info.origin` (position and yaw) in the map frame
+pub fn map_layer(m: &MapData, vp: &Viewport) -> tb4_draw::MapLayer {
+    let at_origin = tb4_core::GridMeta { origin_x: 0.0, origin_y: 0.0, ..m.meta };
+    tb4_draw::map_layer(&at_origin, (m.meta.origin_x, m.meta.origin_y, m.origin_yaw), vp)
 }
 
 impl Default for Viewer {
@@ -85,11 +94,20 @@ impl Default for Viewer {
 
 impl Viewer {
     pub fn new() -> Self {
-        Self { camera: Camera { follow: true, ..Camera::default() }, layers: [true; 7], map_image: None, frame: None, drag: None }
+        Self { camera: Camera { follow: true, ..Camera::default() }, layers: [true; 7], map_image: None, frame: None, drag: None, fit_bounds: None }
     }
 
     pub fn shown(&self, l: Layer) -> bool {
         self.layers[l as usize]
+    }
+
+    /// the box to fit: fixed at the first map, until `0`/`r` asks for a new fit
+    fn fit_bounds(&mut self, model: &Model) -> [f64; 4] {
+        match (self.fit_bounds, &model.map) {
+            (Some(b), _) => b,
+            (None, Some(_)) => *self.fit_bounds.insert(model.bounds()),
+            (None, None) => model.bounds(),
+        }
     }
 
     fn viewport(&self) -> Option<(Viewport, ScreenRect)> {
@@ -114,7 +132,10 @@ impl Viewer {
         }
         match key {
             KeyCode::F => self.camera.follow = !self.camera.follow,
-            KeyCode::Key0 | KeyCode::R => self.camera.reset(),
+            KeyCode::Key0 | KeyCode::R => {
+                self.camera.reset();
+                self.fit_bounds = None;
+            }
             KeyCode::Equals | KeyCode::Minus => {
                 let f = if key == KeyCode::Equals { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
                 if let Some((vp, rect)) = self.viewport() {
@@ -165,7 +186,7 @@ impl Viewer {
         let map_w = (w - PANEL_WIDTH).max(100.0);
         let rect = (0.0, 0.0, f64::from(map_w), f64::from(h));
         let robot = model.robot.map(|r| (r.0, r.1));
-        self.frame = Some(Frame { bounds: model.bounds(), rect, robot });
+        self.frame = Some(Frame { bounds: self.fit_bounds(model), rect, robot });
         let (vp, _) = self.viewport().expect("frame just set");
 
         ctx.save()?;
@@ -173,7 +194,7 @@ impl Viewer {
         if self.shown(Layer::Map)
             && let (Some(m), Some(img)) = (model.map.as_ref(), self.map_image(model))
         {
-            tb4_draw::draw_map(ctx, &img, &tb4_draw::map_layer(&m.meta, (0.0, 0.0, 0.0), &vp))?;
+            tb4_draw::draw_map(ctx, &img, &map_layer(m, &vp))?;
         }
         tb4_draw::paint_prims(ctx, &self.scene(model, &vp))?;
         self.overlay(ctx, model, &vp, h, now)?;
@@ -353,7 +374,7 @@ mod tests {
             }
         }
         let now = Instant::now();
-        let mut m = Model { map: Some(MapData { meta, data }), map_seq: 1, robot: Some((1.0, 1.0, std::f64::consts::FRAC_PI_2)), ..Model::default() };
+        let mut m = Model { map: Some(MapData { meta, data, origin_yaw: 0.0 }), map_seq: 1, robot: Some((1.0, 1.0, std::f64::consts::FRAC_PI_2)), ..Model::default() };
         m.path = vec![(1.0, 1.0), (3.0, 1.0), (3.0, 2.0)];
         m.trajectory = vec![(1.0, 1.2), (1.0, 2.0)];
         m.scan = (0..90).map(|i| (-0.8 + 0.06 * f64::from(i), 2.8)).collect();
@@ -450,6 +471,51 @@ mod tests {
         v.key(KeyCode::Key0);
         assert_eq!(v.camera.zoom, 1.0);
         assert!(v.key(KeyCode::Q));
+    }
+
+    /// the same world (a wall at x in [2.0, 2.1]) as a grid with origin (ox, oy) and yaw
+    fn world_map(ox: f64, oy: f64, yaw: f64, w: u32, h: u32) -> MapData {
+        let meta = GridMeta { width: w, height: h, resolution: 0.05, origin_x: ox, origin_y: oy };
+        let (s, c) = yaw.sin_cos();
+        let mut data = vec![0i8; (w * h) as usize];
+        for r in 0..h {
+            for col in 0..w {
+                let (u, v) = ((f64::from(col) + 0.5) * 0.05, (f64::from(r) + 0.5) * 0.05);
+                let x = ox + c * u - s * v;
+                if (2.0..=2.1).contains(&x) {
+                    data[(r * w + col) as usize] = 100;
+                }
+            }
+        }
+        MapData { meta, data, origin_yaw: yaw }
+    }
+
+    #[test]
+    fn a_growing_map_keeps_its_walls_on_the_same_pixels() {
+        let (w, h) = (900u32, 600u32);
+        let mut v = Viewer::new();
+        v.camera.follow = false;
+        let mut m = Model { map: Some(world_map(-1.0, -1.0, 0.0, 120, 80)), map_seq: 1, ..Model::default() };
+        render(&mut v, &m, w, h);
+        let (vp, _) = v.viewport().unwrap();
+        let (sx, sy) = vp.to_screen(2.05, 0.5);
+        let at = |px: &[u32]| px[sy as usize * w as usize + sx as usize];
+
+        // SLAM grew the map: new origin, new size, same world
+        m.map = Some(world_map(-2.5, -1.75, 0.0, 170, 110));
+        m.map_seq = 2;
+        let px = render(&mut v, &m, w, h);
+        assert_eq!(v.viewport().unwrap().0, vp, "the view must not jump when the map grows");
+        assert!(near(at(&px), pal::OCCUPIED, 2), "wall pixel {:?}", rgb(at(&px)));
+        // a free pixel beside the wall stays free
+        let (fx, fy) = vp.to_screen(1.8, 0.5);
+        assert!(near(px[fy as usize * w as usize + fx as usize], pal::FREE, 2));
+
+        // a rotated origin: grid u axis along map +y, the wall still lands on the same pixel
+        m.map = Some(world_map(3.0, -1.0, std::f64::consts::FRAC_PI_2, 60, 40));
+        m.map_seq = 3;
+        let px = render(&mut v, &m, w, h);
+        assert!(near(at(&px), pal::OCCUPIED, 2), "rotated wall pixel {:?}", rgb(at(&px)));
     }
 
     fn press(pressed: bool, x: f64, y: f64) -> WindowEvent {

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aurea::prelude::*;
-use aurea::render::request_canvas_redraw;
+use aurea::render::{CpuRasterizer, Renderer, request_canvas_redraw};
 use team7_viz::model::Model;
 use team7_viz::ros;
 use team7_viz::view::Viewer;
@@ -105,13 +105,29 @@ fn main() -> AureaResult<()> {
     let quit = interrupted.clone();
     let mut closing = false;
     let exit_after = opts.exit_after;
+    let reference = opts.dump_frame.as_ref().map(|p| format!("{}.ref.png", p.trim_end_matches(".png")));
     canvas.set_draw_callback(move |ctx| {
+        let timed_out = exit_after.is_some_and(|s| started.elapsed().as_secs_f64() >= s);
+        let last = (timed_out || quit.load(Ordering::Relaxed)) && !closing;
+        let now = Instant::now();
         let out = match shared.lock() {
-            Ok(m) => drawn.borrow_mut().draw(ctx, &m, Instant::now()),
+            Ok(m) => {
+                let out = drawn.borrow_mut().draw(ctx, &m, now);
+                // the same frame drawn offscreen, to compare the window path with the reference path
+                if let (true, Some(path)) = (last, reference.as_ref()) {
+                    let (w, h) = (ctx.width(), ctx.height());
+                    let mut r = CpuRasterizer::new(w, h);
+                    if let Ok(mut off) = r.begin_frame() {
+                        let _ = drawn.borrow_mut().draw(off.as_mut(), &m, now);
+                    }
+                    let _ = r.end_frame();
+                    report_png(path, write_png(path, r.pixels(), w, h));
+                }
+                out
+            }
             Err(_) => Ok(()),
         };
-        let timed_out = exit_after.is_some_and(|s| started.elapsed().as_secs_f64() >= s);
-        if (timed_out || quit.load(Ordering::Relaxed)) && !closing {
+        if last {
             closing = true;
             close_later(weak.clone());
         }
@@ -195,17 +211,25 @@ fn close_later(window: Weak<Window>) {
 
 /// the canvas's last presented frame as a PNG (debug: shows what the window really drew)
 fn dump_frame(canvas: &Canvas, path: &str) {
-    let saved = canvas.with_frame_pixels(|px, w, h| {
-        let rgba: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]).collect();
-        let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).map_err(|e| e.to_string())
-    });
-    match saved {
-        Some(Ok(())) => eprintln!("team7_viz: frame saved to {path}"),
-        Some(Err(e)) => eprintln!("team7_viz: cannot save frame: {e}"),
+    match canvas.with_frame_pixels(|px, w, h| write_png(path, px, w, h)) {
+        Some(r) => report_png(path, r),
         None => eprintln!("team7_viz: no frame to save"),
+    }
+}
+
+/// 0xAARRGGBB pixels to an RGBA PNG
+fn write_png(path: &str, px: &[u32], w: u32, h: u32) -> Result<(), String> {
+    let rgba: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]).collect();
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).map_err(|e| e.to_string())
+}
+
+fn report_png(path: &str, r: Result<(), String>) {
+    match r {
+        Ok(()) => eprintln!("team7_viz: frame saved to {path}"),
+        Err(e) => eprintln!("team7_viz: cannot save {path}: {e}"),
     }
 }

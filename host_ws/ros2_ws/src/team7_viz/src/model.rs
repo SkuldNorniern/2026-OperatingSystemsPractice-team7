@@ -80,6 +80,8 @@ pub struct Target {
 pub struct MapData {
     pub meta: GridMeta,
     pub data: Vec<i8>,
+    /// yaw of `info.origin` (cell (0, 0) corner); 0 for slam_toolbox and our SLAM
+    pub origin_yaw: f64,
 }
 
 /// everything drawn, in the map frame
@@ -106,6 +108,15 @@ pub struct Model {
 }
 
 impl Model {
+    /// time went back (a replay restarted): forget the poses of the old time line, keep the rest
+    pub fn reset_run(&mut self) {
+        self.robot = None;
+        self.scan.clear();
+        self.path.clear();
+        self.trajectory.clear();
+        self.goal = None;
+    }
+
     pub fn rate(&self, t: Topic) -> &RateMeter {
         &self.rates[t as usize]
     }
@@ -170,6 +181,7 @@ mod tests {
         m.map = Some(MapData {
             meta: GridMeta { width: 20, height: 10, resolution: 0.05, origin_x: -0.5, origin_y: 0.0 },
             data: vec![-1; 200],
+            origin_yaw: 0.0,
         });
         assert_eq!(m.bounds(), [-0.5, 0.0, 0.5, 0.5]);
     }

@@ -9,11 +9,13 @@ use std::time::Instant;
 
 use tb4_core::{Grid, Isometry3, Pose2, Stamp, TfBuffer, Vector3};
 use tb4_scan::{Scan, ScanParams};
-use tb4_slam::se2::{apply, wrap};
+use tb4_slam::se2::{apply, compose, wrap};
+use tb4_slam::smooth::PoseSmoother;
 use tb4_slam::{Slam, SlamParams};
 
 const MAP_PERIOD: f64 = 1.0;
 const WINDOW: u64 = 200;
+const TF_PERIOD: f64 = 0.05;
 
 fn read_f64<R: Read>(r: &mut R) -> Option<f64> {
     let mut b = [0u8; 8];
@@ -102,6 +104,10 @@ fn set_param(p: &mut SlamParams, key: &str, val: &str) -> bool {
         "loop_cooldown" => p.loop_cooldown = f().unwrap() as usize,
         "loop_min_score" => p.loop_min_score = f().unwrap(),
         "icp" => p.icp = b(),
+        "icp_max_flatness" => p.icp_max_flatness = f().unwrap(),
+        "occupied_threshold" => p.occupied_threshold = f().unwrap() as f32,
+        "publish_occupied_on" => p.publish_occupied_on = f().unwrap() as f32,
+        "publish_occupied_keep" => p.publish_occupied_keep = f().unwrap() as f32,
         "icp_max_keyframes" => p.icp_max_keyframes = f().unwrap() as usize,
         "redraw_min_shift" => p.redraw_min_shift = f().unwrap(),
         "redraw_min_turn" => p.redraw_min_turn = f().unwrap(),
@@ -155,6 +161,26 @@ impl Acc {
     }
 }
 
+/// keeps every value for percentiles
+#[derive(Default)]
+struct Dist(Vec<f64>);
+
+impl Dist {
+    fn add(&mut self, v: f64) {
+        self.0.push(v);
+    }
+}
+
+impl std::fmt::Display for Dist {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut v = self.0.clone();
+        v.sort_by(f64::total_cmp);
+        let q = |p: f64| v.get(((v.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0.0);
+        let mean = v.iter().sum::<f64>() / v.len().max(1) as f64;
+        write!(f, "mean {mean:.4} p95 {:.4} p99 {:.4} max {:.4}", q(0.95), q(0.99), q(1.0))
+    }
+}
+
 impl std::fmt::Display for Acc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "mean {:.4} max {:.4} (n {})", self.mean(), self.max, self.n)
@@ -164,6 +190,8 @@ impl std::fmt::Display for Acc {
 fn main() {
     let mut params = SlamParams::default();
     let (mut map_out, mut time_offset) = (None, 0.0);
+    // slam node map->odom publisher: smoothing time constant (s) and jump limits (m, rad)
+    let (mut tau, mut jump_lin, mut jump_ang) = (0.0, 0.2, 0.05);
     let mut sp = ScanParams::default();
     for a in std::env::args().skip(1) {
         let (k, v) = a.split_once('=').expect("key=value");
@@ -172,6 +200,12 @@ fn main() {
         } else if k == "time_offset" {
             // look odometry up at scan stamp + this (s)
             time_offset = v.parse().expect("seconds");
+        } else if k == "smooth_tau" {
+            tau = v.parse().expect("seconds");
+        } else if k == "smooth_jump_lin" {
+            jump_lin = v.parse().expect("m");
+        } else if k == "smooth_jump_ang" {
+            jump_ang = v.parse().expect("rad");
         } else if k == "keep_spikes" {
             // scan_filter parameter: keep one/two-beam returns in front of the background (poles)
             sp.keep_foreground_spikes = matches!(v, "1" | "true");
@@ -205,6 +239,13 @@ fn main() {
     // occupied cells of the previous published map that are gone in the next one
     let (mut lost_loop, mut lost_other) = (Acc::default(), Acc::default());
     let mut last_closures = 0;
+    let (mut gained_other, mut m2o_d, mut yaw_d) = (Acc::default(), Dist::default(), Dist::default());
+    // cells occupied again after having been dropped: flicker, real removals do not come back
+    let (mut back_other, mut ever) = (Acc::default(), HashSet::new());
+    // published map->odom, simulated at transform_publish_period on scan time; effect on the robot's map pose
+    let mut smoother = PoseSmoother::new(tau, jump_lin, jump_ang);
+    let (mut next_tick, mut last_odom, mut published) = (None::<f64>, Pose2::default(), None::<Pose2>);
+    let (mut hop, mut hop_yaw, mut lag, mut lag_yaw) = (Dist::default(), Dist::default(), Dist::default(), Dist::default());
 
     for e in &events[start..] {
         let (stamp, raw) = match e {
@@ -226,6 +267,26 @@ fn main() {
             }
         };
         let f = Frame { t: stamp - *t0.get_or_insert(stamp), odom };
+        if slam.stats().scans_processed > 0 {
+            let target = slam.map_to_odom();
+            let mut tick = next_tick.unwrap_or(f.t);
+            while tick <= f.t {
+                let p = smoother.step(target, TF_PERIOD);
+                let robot = compose(p, last_odom);
+                if let Some(prev) = published {
+                    let before = compose(prev, last_odom);
+                    hop.add(robot.distance_to(before.x, before.y));
+                    hop_yaw.add(wrap(robot.yaw - before.yaw).abs());
+                }
+                let want = compose(target, last_odom);
+                lag.add(robot.distance_to(want.x, want.y));
+                lag_yaw.add(wrap(robot.yaw - want.yaw).abs());
+                published = Some(p);
+                tick += TF_PERIOD;
+            }
+            next_tick = Some(tick);
+        }
+        last_odom = f.odom;
         frames += 1;
         last_t = f.t;
         // scan_filter: deskew with the latest odom twist, then range / median / isolated filter
@@ -293,6 +354,8 @@ fn main() {
                 m2o_other.add(jump);
                 yaw_other.add(jump_yaw);
             }
+            m2o_d.add(jump);
+            yaw_d.add(jump_yaw);
             prev_kfs = kfs;
             if n % WINDOW == 0 {
                 let w = WINDOW as f64;
@@ -321,26 +384,29 @@ fn main() {
             next_map = f.t + MAP_PERIOD;
             if dirty {
                 dirty = false;
-                let occ = occupied(&slam.occupancy());
+                let occ = occupied(&slam.published_map());
                 if let Some(p) = &prev_occ {
                     let lost = p.difference(&occ).count() as f64;
                     if closed_since_pub {
                         lost_loop.add(lost);
                     } else {
                         lost_other.add(lost);
+                        gained_other.add(occ.difference(p).count() as f64);
+                        back_other.add(occ.difference(p).filter(|c| ever.contains(*c)).count() as f64);
                     }
                 }
                 closed_since_pub = false;
+                ever.extend(occ.iter().copied());
                 prev_occ = Some(occ);
             }
         }
     }
 
+    let g = slam.published_map();
     let st = slam.stats();
     if win.n > 0 {
         println!("last {} scans: window mean {:.1} max {:.1} ms", win.n, win.mean(), win.max);
     }
-    let g = slam.occupancy();
     let occ = g.data.iter().filter(|&&v| v == 100).count();
     let known = g.data.iter().filter(|&&v| v != -1).count();
     let mut lost_all = lost_loop;
@@ -368,7 +434,11 @@ fn main() {
     );
     println!("  m2o jump loop   {m2o_loop} m | yaw {yaw_loop} rad");
     println!("  m2o jump other  {m2o_other} m | yaw {yaw_other} rad");
-    println!("  map lost occ    all {lost_all} | after loop {lost_loop} | other {lost_other}");
+    println!("  m2o per scan    {m2o_d} m | yaw {yaw_d} rad");
+    let visible = hop.0.iter().zip(&hop_yaw.0).filter(|(p, y)| **p > 0.01 || **y > 0.005).count();
+    println!("  published hop   {hop} m | yaw {hop_yaw} rad (per {TF_PERIOD} s tick, robot map pose), {visible} ticks > 1 cm or 0.005 rad");
+    println!("  published lag   {lag} m | yaw {lag_yaw} rad");
+    println!("  map lost occ    all {lost_all} | after loop {lost_loop} | other {lost_other} | gained other {gained_other} | back other {back_other}");
     println!(
         "  final map       occ {occ} known {known} occ/known {:.4} | front-end match score {:.3}",
         occ as f64 / known.max(1) as f64,

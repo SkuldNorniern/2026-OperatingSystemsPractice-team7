@@ -252,6 +252,11 @@ pub struct TrackParams {
     /// 7 views at almost one bearing). 0 = off.
     pub min_triangulation_spread: f64,
     pub max_triangulation_gap: f64,
+    /// ids that also need a learned physical size (ray/pnp scale from clean wall hits) to confirm.
+    /// For ARUCO_ORIGINAL: 0, 341, 682, 1023, the codes whose rows are all equal, which barcode
+    /// labels on chairs decode as. Field 184838: label 1023 was confirmed from 7 views next to a
+    /// wall with no learned scale (NaN). A real one printed on a wall learns its scale.
+    pub strict_ids: Vec<i64>,
     /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
     /// median mahalanobis distance of views must be below this, else views disagree
@@ -281,6 +286,7 @@ impl Default for TrackParams {
             min_wall_fraction: 0.25,
             min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
+            strict_ids: Vec::new(),
             max_spread: 0.08,
             max_consistency: 3.0,
             max_history: 200,
@@ -470,6 +476,7 @@ impl Tracker {
             confirmed: v.len() >= p.min_views
                 && wall >= p.min_wall_views
                 && wall as f64 >= p.min_wall_fraction * v.len() as f64
+                && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
                 && (p.min_triangulation_spread <= 0.0
                     || triangulate(v).is_some_and(|t| {
                         t.spread >= p.min_triangulation_spread && (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap
@@ -755,6 +762,40 @@ mod tests {
             t.add(2, &view_at(c, label, 0.0, Source::Raycast));
         }
         assert!(t.target(2).unwrap().confirmed);
+    }
+
+    #[test]
+    fn strict_ids_need_a_learned_marker_size() {
+        let m = (2.4, -1.3);
+        let views = |t: &mut Tracker, id: i64| {
+            for k in 0..8 {
+                t.add(id, &view_at((0.0, -1.0 + 0.3 * k as f64), m, 0.0, Source::Raycast));
+            }
+        };
+        let mut t = Tracker::new(TrackParams { strict_ids: vec![1023], ..Default::default() });
+        views(&mut t, 1023);
+        views(&mut t, 7);
+        assert!(!t.target(1023).unwrap().confirmed, "stripe id without a learned size");
+        assert!(t.target(7).unwrap().confirmed, "same views, ordinary id");
+    }
+
+    #[test]
+    fn strict_id_on_a_wall_confirms_once_its_size_is_learned() {
+        // a real id 0 printed on the wall at x = 3, seen while the robot drives past
+        let g = wall_map();
+        let mut t = Tracker::new(TrackParams { strict_ids: vec![0], ..Default::default() });
+        let p = LocateParams::default();
+        let m = (3.0, 0.45);
+        for cy in [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0, 1.4] {
+            let (dx, dy): (f64, f64) = (m.0, m.1 - cy);
+            let r = dx.hypot(dy);
+            // marker is 2x the configured size: pnp says half the range, consistently
+            t.observe(Some(&g), &Observation { id: 0, camera: (0.0, cy, 0.25), bearing: (dx / r, dy / r, 0.0), pnp_range: r * 0.5 }, &p);
+        }
+        assert!(t.scale(0).is_some(), "size learned from clean wall hits");
+        let tg = t.target(0).unwrap();
+        assert!(tg.confirmed, "{tg:?}");
+        assert!((tg.x - 3.0).abs() < 0.1 && (tg.y - 0.45).abs() < 0.1);
     }
 
     #[test]

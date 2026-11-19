@@ -22,9 +22,11 @@ crates/
   tb4_control/             own MPPI, multithreaded rollouts, create3 limits
   tb4_aruco/               own ArUco detector (all OpenCV dictionaries), camera model with rational_polynomial
   tb4_sim/                 headless closed-loop sim: 2D world, lidar, camera, our slam + navigator + explorer
+  tb4_draw/                top-down drawing shared by both viewers: palette, viewport/camera, map image, shapes (aurea renderer only)
   tb4_viewer/              live window for tb4_sim (aurea, needs GTK3 dev libs)
 host_ws/                   laptop (Ubuntu 24.04, Jazzy), runs everything heavy
   ros2_ws/src/team7_nodes/   r2r nodes: marker_mapper, explorer, mission, scan_filter, slam, navigator, aruco_detector
+  ros2_ws/src/team7_viz/     read-only map viewer for live runs and replays (r2r + aurea), RViz replacement
   ros2_ws/src/team7_bringup/ launch, params, RViz config
   ros2_ws/team7.repos        explore_lite source
   scripts/run_demo.sh        undock, reset odom, launch
@@ -69,7 +71,8 @@ robot setup and network is in [rpi4_ws/README.md](rpi4_ws/README.md).
 
 runs tb4_sim in a window and draws the slam map, true walls/glass, robot, path, MPPI trajectory,
 frontiers, camera views, markers and bumps, with run stats on the right. needs `libgtk-3-dev libx11-xcb-dev`.
-plain `cargo build` / `cargo test` skip it (workspace `default-members`).
+plain `cargo build` / `cargo test` skip it and `tb4_draw` (workspace `default-members`, aurea needs Rust 1.90);
+test them with `cargo test -p tb4_draw -p tb4_viewer`. the ROS map viewer is in [host_ws/README.md](host_ws/README.md#map-viewer-team7_viz).
 
 ```bash
 cargo run --release -p tb4_viewer -- --world studio --seed 1 [--perfect-pose] [--set name=value] [--speed 4x]

@@ -210,6 +210,50 @@ our parts show up too: Lazy Theta* path (cyan), MPPI predicted trajectory (magen
 
 node params are in `src/team7_bringup/config/team7.yaml`. nav2.yaml and slam.yaml are turtlebot4_navigation 2.1.1 copies, our changes have `team7:` on them.
 
+## map viewer (team7_viz)
+
+RViz replacement for the demo, drawn with aurea (same toolkit and colours as the sim viewer, shared
+code in `crates/tb4_draw`). It only subscribes, never publishes, so it is safe next to a live run or a
+replay. Needs Rust >= 1.90 and `libgtk-3-dev libx11-xcb-dev`.
+
+It is its own colcon package (`src/team7_viz`) and not part of team7_nodes, so the GTK and Rust 1.90
+needs never block the node build; `run_demo.sh` builds only team7_nodes and team7_bringup, so build
+the viewer once yourself (prep.sh builds it too, with everything else):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd host_ws/ros2_ws
+colcon build --packages-select team7_viz
+source install/setup.bash
+ros2 run team7_viz team7_viz                          # live run (same ROS_DOMAIN_ID as the robot)
+ROS_DOMAIN_ID=79 ros2 run team7_viz team7_viz         # replay from run_demo.sh --replay
+```
+
+Or without colcon: `cd src/team7_viz && cargo run --release` (ROS sourced).
+Options: `--verbose` prints received message counts every 2 s, `--exit-after SEC` closes the window,
+`--dump-frame out.png` saves the last frame on exit.
+
+What it draws, all in the map frame:
+
+| layer (key) | topic | look |
+|---|---|---|
+| 1 map | `/map` | light free, black occupied, grey unknown |
+| 2 scan | `/scan`, put in map with TF | red points |
+| 3 path | `/team7/path` | green line |
+| 4 MPPI | `/team7/mppi/trajectory` | magenta line |
+| 5 frontiers | `/team7/frontiers` | blue frontier goals, orange camera views |
+| 6 goal | `/team7/goal` | yellow ring with cross |
+| 7 targets | `/team7/targets` | amber `ID n?` tentative, green `ID n` confirmed |
+| robot | TF map -> base_link | white disc r = 0.171 m, black heading line |
+
+Side panel: mission state (`/team7/mission_state`), confirmed and tentative targets with ids and
+map positions, message rates of `/scan`, `/map`, `/tf`, `/odom` (grey at 0 Hz), and a legend that
+shows each symbol as drawn on the map, its toggle key, and `(off)` for hidden layers.
+
+Keys and mouse: wheel zoom at the pointer, left drag pan (stops follow), `f` follow robot (on at
+start), `+`/`-` zoom, `0` or `r` back to the fitted view, `1`-`7` toggle layers, `q`/Esc quit.
+Colours are defined once in `crates/tb4_draw/src/palette.rs`.
+
 ## simulation
 
 ```bash

@@ -13,7 +13,7 @@ pub mod palette;
 pub mod prim;
 pub mod view;
 
-pub use map::{MapLayer, cell_color, draw_map, map_image, map_layer, map_rgba};
+pub use map::{MapLayer, cell_color, cost_color, costmap_image, draw_map, map_image, map_layer, map_rgba, occupied_image};
 pub use prim::{Prim, paint_prims};
 pub use view::{Camera, Viewport};
 

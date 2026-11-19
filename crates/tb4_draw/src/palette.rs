@@ -12,7 +12,9 @@
 //! | `GOAL` yellow | the active goal (`/team7/goal`), drawn as a ring with a cross |
 //! | `TARGET_TENTATIVE` amber, `TARGET_CONFIRMED` green | ArUco targets (`/team7/targets`) |
 //! | `SCAN` red | latest `/scan` points |
-//! | `WALL`, `GLASS`, `ESTIMATE`, `TRAIL`, `BUMP`, `MARKER_*` | sim only: ground truth and metrics |
+//! | `COST_LOW` blue .. `COST_MID` magenta .. `COST_HIGH` red, `COST_INSCRIBED` cyan, `COST_LETHAL` purple | costmaps, see-through, under the walls |
+//! | `GRID`, `SLAM_GRAPH` pink, `MEASURE` cyan, `AXIS_X` red, `AXIS_Y` green | 1 m grid, SLAM pose graph, measure tool, robot axes |
+//! | `WALL`, `GLASS`, `ESTIMATE`, `TRAIL`, `BUMP`, `MARKER_*` | sim only: ground truth and metrics (`TRAIL` also the ROS robot trail) |
 
 use crate::Rgba;
 
@@ -35,6 +37,18 @@ pub const GOAL: Rgba = [255, 230, 0, 255];
 pub const TARGET_TENTATIVE: Rgba = [255, 200, 0, 255];
 pub const TARGET_CONFIRMED: Rgba = [0, 210, 90, 255];
 pub const SCAN: Rgba = [255, 70, 70, 255];
+
+// costmaps (global costmap, MPPI local cost): ramp from low to high cost, then inscribed and lethal
+pub const COST_LOW: Rgba = [40, 90, 255, 255];
+pub const COST_MID: Rgba = [210, 50, 210, 255];
+pub const COST_HIGH: Rgba = [255, 50, 40, 255];
+pub const COST_INSCRIBED: Rgba = [0, 210, 255, 255];
+pub const COST_LETHAL: Rgba = [150, 0, 190, 255];
+pub const GRID: Rgba = [140, 150, 160, 70];
+pub const SLAM_GRAPH: Rgba = [255, 110, 200, 255];
+pub const MEASURE: Rgba = [0, 230, 230, 255];
+pub const AXIS_X: Rgba = [230, 40, 40, 255];
+pub const AXIS_Y: Rgba = [40, 200, 60, 255];
 
 // sim only
 pub const WALL: Rgba = [170, 110, 255, 255];

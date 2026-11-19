@@ -48,6 +48,59 @@ pub fn map_image(meta: &GridMeta, data: &[i8]) -> Option<Image> {
     (n > 0 && data.len() == n).then(|| Image::new(meta.width, meta.height, map_rgba(meta, data)).with_opaque(true))
 }
 
+/// costmap cell colour, straight alpha scaled by `opacity` (0..1): unknown and free cells are clear,
+/// 1..98 run blue -> magenta -> red and get more opaque with cost, 99 (inscribed) is cyan, 100
+/// (lethal) purple
+pub fn cost_color(v: i8, opacity: f32) -> Rgba {
+    use crate::palette::{COST_HIGH, COST_INSCRIBED, COST_LETHAL, COST_LOW, COST_MID};
+    let a = |alpha: f32| (alpha * opacity.clamp(0.0, 1.0)).round() as u8;
+    let lerp = |p: Rgba, q: Rgba, t: f32| {
+        let m = |i: usize| (f32::from(p[i]) + (f32::from(q[i]) - f32::from(p[i])) * t).round() as u8;
+        [m(0), m(1), m(2)]
+    };
+    match v {
+        i8::MIN..=0 => [0, 0, 0, 0],
+        100.. => [COST_LETHAL[0], COST_LETHAL[1], COST_LETHAL[2], a(235.0)],
+        99 => [COST_INSCRIBED[0], COST_INSCRIBED[1], COST_INSCRIBED[2], a(210.0)],
+        _ => {
+            let t = f32::from(v - 1) / 97.0;
+            let [r, g, b] = if t < 0.5 { lerp(COST_LOW, COST_MID, t * 2.0) } else { lerp(COST_MID, COST_HIGH, t * 2.0 - 1.0) };
+            [r, g, b, a(70.0 + 140.0 * t)]
+        }
+    }
+}
+
+/// a costmap as a see-through image (north row first), `opacity` 0..1
+pub fn costmap_image(meta: &GridMeta, data: &[i8], opacity: f32) -> Option<Image> {
+    let (w, h) = (meta.width as usize, meta.height as usize);
+    if w == 0 || h == 0 || data.len() != w * h {
+        return None;
+    }
+    let mut out = Vec::with_capacity(w * h * 4);
+    for v in 0..h {
+        for &c in &data[(h - 1 - v) * w..(h - v) * w] {
+            out.extend_from_slice(&cost_color(c, opacity));
+        }
+    }
+    Some(Image::new(meta.width, meta.height, out).with_opaque(false))
+}
+
+/// only the occupied cells of a map (>= 65), opaque, the rest clear: drawn over the costmaps so
+/// walls stay readable
+pub fn occupied_image(meta: &GridMeta, data: &[i8]) -> Option<Image> {
+    let (w, h) = (meta.width as usize, meta.height as usize);
+    if w == 0 || h == 0 || data.len() != w * h {
+        return None;
+    }
+    let mut out = Vec::with_capacity(w * h * 4);
+    for v in 0..h {
+        for &c in &data[(h - 1 - v) * w..(h - v) * w] {
+            out.extend_from_slice(&if c >= 65 { OCCUPIED } else { [0, 0, 0, 0] });
+        }
+    }
+    Some(Image::new(meta.width, meta.height, out).with_opaque(false))
+}
+
 /// where the grid lands on screen; `frame` = (x, y, yaw) of the grid's frame in the drawn frame
 /// (identity when the map frame is the drawn frame)
 pub fn map_layer(meta: &GridMeta, frame: (f64, f64, f64), vp: &Viewport) -> MapLayer {
@@ -109,5 +162,52 @@ mod tests {
         assert_eq!(cell_color(-1), UNKNOWN);
         assert!(map_image(&m, &[0]).is_none());
         assert!(map_image(&m, &[0, 0]).is_some());
+    }
+
+    #[test]
+    fn cost_ramp_is_clear_for_free_and_rises_with_cost() {
+        assert_eq!(cost_color(0, 1.0)[3], 0);
+        assert_eq!(cost_color(-1, 1.0)[3], 0);
+        let (lo, hi) = (cost_color(5, 1.0), cost_color(95, 1.0));
+        assert!(lo[3] < hi[3] && lo[2] > lo[0] && hi[0] > hi[2], "{lo:?} {hi:?}");
+        assert_eq!(cost_color(100, 0.5)[3], 118);
+        assert_eq!(cost_color(100, 0.0)[3], 0);
+    }
+
+    fn rgb(p: u32) -> [u8; 3] {
+        [(p >> 16) as u8, (p >> 8) as u8, p as u8]
+    }
+
+    #[test]
+    fn walls_stay_on_top_of_a_full_costmap_in_a_turned_view() {
+        use aurea_render::{CpuRasterizer, Renderer};
+        // 2 x 2 m, free, one occupied column at x in [1.0, 1.1); a costmap of lethal-ish cost everywhere
+        let m = meta(20, 20, 0.1, 0.0, 0.0);
+        let mut data = vec![0i8; 400];
+        for r in 0..20 {
+            data[r * 20 + 10] = 100;
+        }
+        let cost = vec![90i8; 400];
+        let (w, h) = (200u32, 200u32);
+        let vp = Viewport::centred_rotated((1.0, 1.0), 80.0, (0.0, 0.0, 200.0, 200.0), 0.5);
+        let layer = map_layer(&m, (0.0, 0.0, 0.0), &vp);
+        let mut r = CpuRasterizer::new(w, h);
+        {
+            let mut ctx = r.begin_frame().unwrap();
+            draw_map(ctx.as_mut(), &map_image(&m, &data).unwrap(), &layer).unwrap();
+            draw_map(ctx.as_mut(), &costmap_image(&m, &cost, 1.0).unwrap(), &layer).unwrap();
+            draw_map(ctx.as_mut(), &occupied_image(&m, &data).unwrap(), &layer).unwrap();
+        }
+        r.end_frame().unwrap();
+        let px = r.pixels();
+        let at = |x: f64, y: f64| {
+            let (sx, sy) = vp.to_screen(x, y);
+            rgb(px[sy as usize * w as usize + sx as usize])
+        };
+        // the wall is drawn black over the costmap, on its rotated place
+        assert!(at(1.05, 1.3).iter().all(|&c| c < 30), "wall {:?}", at(1.05, 1.3));
+        // free cells are tinted by the costmap: no longer the free grey
+        let free = at(0.5, 0.5);
+        assert!(free.iter().zip(FREE).any(|(&a, b)| (i32::from(a) - i32::from(b)).abs() > 20), "tint {free:?}");
     }
 }

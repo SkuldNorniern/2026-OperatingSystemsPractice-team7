@@ -21,3 +21,12 @@ ros2 bag play ~/bags/<name> --clock
 
 raw bags are for SLAM tuning, full bags already have map->odom in /tf so dont run SLAM again on them.
 MPPI cant be tuned from bags, use gazebo sim for that.
+
+offline SLAM replay without ROS running (timing, loop closures, map jitter per run). source ROS in bash
+for rosbag2_py, pass the .mcap files of a run in order:
+
+```bash
+python3 host_ws/tools/bag_scans.py ~/team7_runs/<run>/rosbag_* > /tmp/scans.bin
+cargo run --release -p tb4_slam --example replay -- map=/tmp/map.pgm < /tmp/scans.bin
+cargo run --release -p tb4_slam --example replay -- time_offset=-0.15 redraw_min_turn=0.005 < /tmp/scans.bin
+```

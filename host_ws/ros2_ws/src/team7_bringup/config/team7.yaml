@@ -3,6 +3,9 @@
 # map_origin_shift (marker_mapper, mission)
 
 marker_mapper:
+  # publishes /team7/marker_approach (PoseArray, map frame): tentative markers with 2+ views at their fused
+  # position, oriented along the face normal toward the side they were seen from (no ids); the explorer's
+  # approach_* parameters pick the viewpoints
   ros__parameters:
     detections_topic: /aruco_detections
     map_topic: /map
@@ -21,7 +24,6 @@ marker_mapper:
     min_range: 0.3            # m, ignore hits / pnp ranges closer to the camera (robot's own cells)
     strict_ids: [0, 341, 682, 1023]  # ARUCO_ORIGINAL codes with all rows equal (= chair barcode labels): these
                               # also need a learned marker size from clean wall hits (label 1023 had none)
-    approach_standoff: 1.3    # m, /team7/marker_approach poses for tentative markers
     max_spread: 0.08          # m, fused position 1 sigma
     max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
     max_history: 200
@@ -75,6 +77,19 @@ explorer:
                               # robot in clutter (field 184838 waited 75 s until pushed: speckled one-scan map)
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
     retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
+    # approach on sight: a marker marker_mapper holds but has not confirmed (/team7/marker_approach) is looked at
+    # from approach_standoff in front and +-approach_spread around its facing direction, before any frontier or
+    # camera view; stops as soon as it is confirmed. A decoy is given up after the timeout, max_failures failed
+    # views or all three views done, and then ignored for approach_blacklist_duration
+    approach_markers: true    # sim studio + studio_glass, seeds 1-3, two batches: all 3 targets confirmed in 10/12
+                              # runs (off: 2/12); one decoy confirmed in 30 approach-on runs (sticker in mid-air)
+    approach_topic: /team7/marker_approach
+    approach_standoff: 1.3    # m from the marker (inside the 2 m scoring radius)
+    approach_max_standoff: 1.9  # m, never further when the standoff point is blocked
+    approach_spread: 0.52     # rad, views at 0 and +-30 deg off the face normal (triangulation wants >= 0.2 rad)
+    approach_timeout: 90.0    # s from the first approach goal to giving the marker up
+    approach_max_failures: 2  # failed views (aborted / no progress / timeout) before giving up
+    approach_blacklist_duration: 300.0  # s a given-up marker is ignored, so a decoy cannot trap the robot
 
 velocity_guard:
   ros__parameters:

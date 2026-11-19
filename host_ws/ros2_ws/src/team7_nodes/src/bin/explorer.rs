@@ -11,7 +11,10 @@ use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{ActionClient, ActionClientGoal, GoalStatus, QosProfile, log_info, log_warn};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener, viz};
 use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
-use tb4_explore::{Action, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, Frontier, NavStatus, TickInput, View};
+use tb4_explore::{
+    Action, ApproachParams, CoverageParams, ExploreParams, ExplorerParams, ExplorerPolicy, Frontier, MarkerHint, NavStatus, TickInput,
+    View,
+};
 
 type Nav = NavigateToPose::Action;
 
@@ -28,6 +31,8 @@ struct State {
     handle: Option<((f64, f64), ActionClientGoal<Nav>)>,
     result: Option<((f64, f64), NavStatus)>,
     viz_seq: u64,
+    /// tentative markers from marker_mapper (/team7/marker_approach)
+    markers: Vec<MarkerHint>,
 }
 
 impl State {
@@ -76,8 +81,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         look_around_turns: p.i64("look_around_turns", 3).max(0) as u32,
         preempt_distance: p.f64("preempt_distance", 0.5),
         switch_cooldown: p.f64("switch_cooldown", 20.0),
-        approach: None,
+        // approach on sight: views of unconfirmed markers from close by and from three angles
+        approach: p.bool("approach_markers", true).then(|| {
+            let d = ApproachParams::default();
+            ApproachParams {
+                standoff: p.f64("approach_standoff", d.standoff),
+                max_standoff: p.f64("approach_max_standoff", d.max_standoff),
+                spread: p.f64("approach_spread", d.spread),
+                timeout: p.f64("approach_timeout", d.timeout),
+                max_failures: p.i64("approach_max_failures", d.max_failures as i64).max(1) as u32,
+                blacklist_duration: p.f64("approach_blacklist_duration", d.blacklist_duration),
+                ..d
+            }
+        }),
     };
+    let approach_topic = p.string("approach_topic", "/team7/marker_approach");
     let map_frame = Rc::new(p.string("map_frame", "map"));
     let base_frame = Rc::new(p.string("base_frame", "base_link"));
     let map_topic = p.string("coverage_map_topic", "/map");
@@ -102,7 +120,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handle: None,
         result: None,
         viz_seq: 0,
+        markers: Vec::new(),
     }));
+
+    // marker_mapper's tentative markers: one pose per marker that is not confirmed yet, at its fused
+    // position in the map frame, orientation = yaw of its face normal toward the free side it was seen
+    // from (no ids). A marker leaving the list was confirmed. Subscribed even with approach off (cheap)
+    let approach_sub = node.subscribe::<r2r::geometry_msgs::msg::PoseArray>(&approach_topic, QosProfile::default())?;
+    let st = state.clone();
+    spawner.spawn_local(approach_sub.for_each(move |m| {
+        st.borrow_mut().markers = m
+            .poses
+            .iter()
+            .map(|p| {
+                let q = &p.orientation;
+                let facing = (2.0 * (q.w * q.z + q.x * q.y)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+                MarkerHint { id: None, x: p.position.x, y: p.position.y, facing }
+            })
+            .collect();
+        futures::future::ready(())
+    }))?;
 
     let costmap = node.subscribe::<OccupancyGrid>(&costmap_topic, QosProfile::default().reliable().transient_local())?;
     let st = state.clone();
@@ -212,7 +249,7 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
         robot,
         result: s.result.take(),
         done: s.done,
-        markers: &[],
+        markers: &s.markers,
     };
     let actions = s.policy.tick(now, input);
     let (frontiers, views, seq) = s.policy.viz();

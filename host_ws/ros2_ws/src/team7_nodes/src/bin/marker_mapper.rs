@@ -144,10 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
 
     let pub_targets = node.create_publisher::<MarkerArray>("/team7/targets", QosProfile::default())?;
-    // tentative markers: where to stand (approach_standoff m in front, facing it) to read it properly.
-    // For the explorer's approach-on-sight; empty array when nothing is tentative
+    // Tentative markers for the explorer's approach on sight. /team7/marker_approach, geometry_msgs/PoseArray
+    // in the map frame: one pose per marker that is not confirmed and has 2+ views, position = fused
+    // marker position (z 0), orientation = yaw of the marker's face normal, pointing to the free side it
+    // was seen from (Tracker::facing: the wall line in the map, else back along the views). Ids are not
+    // carried. Empty array when nothing is tentative. The explorer picks the viewpoints itself.
     let pub_approach = node.create_publisher::<r2r::geometry_msgs::msg::PoseArray>("/team7/marker_approach", QosProfile::default())?;
-    let approach_standoff = Params(&node).f64("approach_standoff", 1.3);
     let det_sub = node.subscribe::<ArucoDetection>(&detections_topic, QosProfile::sensor_data())?;
     let st = state.clone();
     let log2 = log.clone();
@@ -223,8 +225,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         approach.poses = targets
             .iter()
             .filter(|t| !t.confirmed && t.views >= 2)
-            .filter_map(|t| s.tracker.approach(t.id, approach_standoff))
-            .map(|(x, y, yaw)| team7_nodes::pose_msg(x, y, yaw))
+            .filter_map(|t| {
+                let yaw = s.tracker.facing(t.id, s.grid.as_ref(), s.locate.occupied_threshold)?;
+                Some(team7_nodes::pose_msg(t.x, t.y, yaw))
+            })
             .collect();
         let _ = pub_approach.publish(&approach);
         futures::future::ready(())

@@ -172,7 +172,7 @@ prepare_live() {
   done
   # bump and IR data for the later wall filling; none of the 2026-11-18 bags had them
   for topic in /hazard_detection /ir_intensity; do
-    grep -qx "$topic" <<<"$topics" || echo "warning: $topic not visible, so it is not recorded; add it to the create3 republisher topics on the Pi" >&2
+    grep -qx "$topic" <<<"$topics" || echo "warning: $topic not visible, so it is not recorded; run tb4_ops.sh sensors enable once (Docs case 28)" >&2
   done
 
   # Create 3 clock: /odom stamps must be close to this laptop's time (case 25). Warning only,

@@ -10,6 +10,10 @@
 #    tb4_ops.sh logs [N]            last N bringup log lines from the Pi (default 60)
 #    tb4_ops.sh tunnel [PORT]       open the Create3 web UI at http://localhost:PORT (default 8081)
 #    tb4_ops.sh tunnel-stop         close that tunnel
+#    tb4_ops.sh sensors [check|enable|restore]
+#                                   bump (/hazard_detection) and IR (/ir_intensity) relay from the Create3.
+#                                   enable uncomments them in the Pi's republisher.yaml (backup .orig kept,
+#                                   copy in /etc/turtlebot4/) and restarts the bringup. Docs case 28.
 #    tb4_ops.sh create3-off         ask the Create3 to power off (/robot_power). Needs a button press to boot again.
 #
 #  Environment (all optional):
@@ -100,6 +104,46 @@ cmd_ssh() {
   fi
 }
 
+REPUB=/opt/ros/jazzy/share/turtlebot4_bringup/config/republisher.yaml
+
+# root script on the Pi from stdin: the password is the first stdin line for sudo -S
+sudo_script() {
+  { printf '%s\n' "$PW"; cat; } | rssh_in "sudo -S -p '' bash -s"
+}
+
+cmd_sensors() {
+  case "${1:-check}" in
+    check)
+      rssh "grep -nE '\"(hazard_detection|ir_intensity)\"' $REPUB" | sed 's/^/republisher.yaml:/' \
+        || echo "republisher.yaml: no hazard_detection / ir_intensity lines (file differs from the jazzy repo?)"
+      echo "laptop topics:"
+      ros_local "timeout 20 ros2 topic list" | grep -xE '/(hazard_detection|ir_intensity)' | sed 's/^/  /' || echo "  none visible"
+      ;;
+    enable)
+      sudo_script <<EOS
+set -e
+F=$REPUB
+[ -f "\$F.orig" ] || cp "\$F" "\$F.orig"
+sed -i -E 's/^(\s*)# ("(hazard_detection|ir_intensity)",)/\1  \2/' "\$F"
+grep -nE '^\s*"(hazard_detection|ir_intensity)",' "\$F" || { echo "enable failed: lines not found"; exit 1; }
+mkdir -p /etc/turtlebot4 && cp "\$F" /etc/turtlebot4/republisher.yaml
+EOS
+      cmd_restart_bringup
+      cmd_sensors check
+      ;;
+    restore)
+      sudo_script <<EOS
+set -e
+F=$REPUB
+[ -f "\$F.orig" ] || { echo "no \$F.orig backup"; exit 1; }
+cp "\$F.orig" "\$F"
+EOS
+      cmd_restart_bringup
+      ;;
+    *) die "sensors: check, enable or restore" ;;
+  esac
+}
+
 cmd_restart_bringup() {
   echo "restarting turtlebot4.service on the Pi (ROS bringup; the Create3 is not restarted)"
   sudo_remote "systemctl restart turtlebot4.service"
@@ -152,6 +196,7 @@ case "${1:-}" in
   logs)             shift; cmd_logs "$@" ;;
   tunnel)           shift; cmd_tunnel "$@" ;;
   tunnel-stop)      cmd_tunnel_stop ;;
+  sensors)          shift; cmd_sensors "$@" ;;
   create3-off)      cmd_create3_off ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

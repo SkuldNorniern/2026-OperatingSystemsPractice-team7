@@ -32,6 +32,7 @@ TB4_PW=... ./tb4_ops.sh status   # set in the command, never saved to a file
 | `tunnel [PORT]` | Opens an SSH tunnel to the Create3 web UI (`192.168.186.2:80`) on `localhost:PORT` (default 8081). |
 | `tunnel-stop` | Closes the tunnel opened by `tunnel`. |
 | `create3-off` | Calls the Create3's `/robot_power` service to cut its battery power. It asks you to type `yes` first. The robot only comes back when someone presses its power button. |
+| `sensors [check\|enable\|restore]` | Bump (`/hazard_detection`) and IR (`/ir_intensity`) are commented out in the Pi's `republisher.yaml`, so they never reach the laptop or the bag. `check` shows the lines and the laptop topics; `enable` uncomments them (backup `.orig`, copy in `/etc/turtlebot4/` to re-apply after an apt upgrade) and restarts the bringup; `restore` puts the original back. Run `enable` once per robot. |
 
 ## Environment
 

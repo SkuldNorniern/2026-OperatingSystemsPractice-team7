@@ -236,6 +236,17 @@ name = "tb4_scan"
 version = "0.1.0"
 
 [[package]]
+name = "tb4_sim"
+version = "0.1.0"
+dependencies = [
+ "tb4_control",
+ "tb4_core",
+ "tb4_explore",
+ "tb4_planning",
+ "tb4_slam",
+]
+
+[[package]]
 name = "tb4_slam"
 version = "0.1.0"
 dependencies = [

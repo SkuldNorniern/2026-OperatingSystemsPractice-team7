@@ -45,10 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spawner = pool.spawner();
     team7_nodes::spawn_param_services(&mut node, &spawner)?;
     spawner.spawn_local(targets.for_each(move |m| {
-        let mut f = f.borrow_mut();
-        for mk in m.markers.iter().filter(|mk| mk.ns == "target_confirmed") {
-            f.insert(mk.id);
-        }
+        // the mapper's current confirmed set: a target it drops again (LOST) must not count
+        // toward "all found" (replay 184838 counted a chair label it confirmed and lost)
+        *f.borrow_mut() = m.markers.iter().filter(|mk| mk.ns == "target_confirmed").map(|mk| mk.id).collect();
         futures::future::ready(())
     }))?;
 

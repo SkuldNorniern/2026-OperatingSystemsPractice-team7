@@ -175,8 +175,8 @@ struct Active {
     frontier_missing: u32,
     /// camera view goal: wall point it looks at
     view_target: Option<(f64, f64)>,
-    /// approach goal: marker position when sent, and the viewpoint slot
-    approach: Option<((f64, f64), usize)>,
+    /// approach goal: the marker's serial and the viewpoint slot
+    approach: Option<(u64, usize)>,
     /// the navigator accepted it (cancel is possible from then on)
     accepted: bool,
     started: f64,
@@ -218,6 +218,7 @@ pub struct ExplorerPolicy {
     stats: ExplorerStats,
     /// markers seen but not confirmed, and the ones given up
     approaches: Vec<Approach>,
+    next_serial: u64,
 }
 
 impl ExplorerPolicy {
@@ -237,6 +238,7 @@ impl ExplorerPolicy {
             viz_seq: 0,
             stats: ExplorerStats::default(),
             approaches: Vec::new(),
+            next_serial: 0,
             p,
         }
     }
@@ -322,19 +324,13 @@ impl ExplorerPolicy {
         }
     }
 
-    fn approach_entry(&mut self, key: (f64, f64)) -> Option<&mut Approach> {
-        let r = 2.0 * self.p.approach.as_ref().map_or(0.5, |a| a.match_radius);
-        self.approaches
-            .iter_mut()
-            .map(|a| (dist(a.pos, key), a))
-            .filter(|(d, _)| *d <= r)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, a)| a)
+    fn approach_entry(&mut self, serial: u64) -> Option<&mut Approach> {
+        self.approaches.iter_mut().find(|a| a.serial == serial)
     }
 
-    fn give_up(&mut self, key: (f64, f64), now: f64, why: &str, out: &mut Vec<Action>) {
+    fn give_up(&mut self, serial: u64, now: f64, why: &str, out: &mut Vec<Action>) {
         let Some(ap) = self.p.approach.clone() else { return };
-        if let Some(a) = self.approach_entry(key) {
+        if let Some(a) = self.approach_entry(serial) {
             a.ignore_until = now + ap.blacklist_duration;
             a.started = None;
             a.tried = [false; 3];
@@ -346,16 +342,16 @@ impl ExplorerPolicy {
     }
 
     /// outcome of an approach goal for its marker
-    fn approach_result(&mut self, key: (f64, f64), slot: usize, status: NavStatus, cancel_ok: bool, now: f64, out: &mut Vec<Action>) {
+    fn approach_result(&mut self, serial: u64, slot: usize, status: NavStatus, cancel_ok: bool, now: f64, out: &mut Vec<Action>) {
         let max_failures = self.p.approach.as_ref().map_or(0, |a| a.max_failures);
-        let Some(a) = self.approach_entry(key) else { return };
+        let Some(a) = self.approach_entry(serial) else { return };
         if status == NavStatus::Succeeded {
             a.tried[slot] = true;
         } else if !cancel_ok {
             a.tried[slot] = true;
             a.failures += 1;
             if a.failures >= max_failures {
-                self.give_up(key, now, "viewpoints failed", out);
+                self.give_up(serial, now, "viewpoints failed", out);
             }
         }
     }
@@ -369,37 +365,36 @@ impl ExplorerPolicy {
         grid: Option<&Grid>,
         robot: Pose2,
         out: &mut Vec<Action>,
-    ) -> Option<(Viewpoint, (f64, f64))> {
+    ) -> Option<(Viewpoint, u64)> {
         let ap = self.p.approach.clone()?;
-        let gone = approach::sync(&mut self.approaches, markers, &ap, now);
+        approach::sync(&mut self.approaches, markers, &ap, now, &mut self.next_serial);
         let active = self.active.as_ref().filter(|a| a.accepted && !a.cancelling).and_then(|a| a.approach);
-        if let Some((key, _)) = active
-            && gone.iter().any(|g| dist(*g, key) <= 2.0 * ap.match_radius)
-            && !self.approaches.iter().any(|a| a.present && dist(a.pos, key) <= 2.0 * ap.match_radius)
+        if let Some((serial, _)) = active
+            && self.approach_entry(serial).is_none()
         {
-            out.push(Action::Info(format!("approach: marker at ({:.2}, {:.2}) confirmed, cancelling its view", key.0, key.1)));
+            out.push(Action::Info("approach: marker confirmed, cancelling its view".into()));
             self.cancel_active(CancelReason::MarkerConfirmed, out);
         }
         // time out, or every viewpoint done without a confirmation
-        let expired: Vec<((f64, f64), &str)> = self
+        let expired: Vec<(u64, &str)> = self
             .approaches
             .iter()
             .filter(|a| a.present && now >= a.ignore_until)
             .filter_map(|a| {
                 if a.started.is_some_and(|s| now - s > ap.timeout) {
-                    Some((a.pos, "timeout"))
+                    Some((a.serial, "timeout"))
                 } else if a.tried.iter().all(|t| *t) {
-                    Some((a.pos, "all viewpoints done, still not confirmed"))
+                    Some((a.serial, "all viewpoints done, still not confirmed"))
                 } else {
                     None
                 }
             })
             .collect();
-        for (key, why) in expired {
-            if active.is_some_and(|(k, _)| dist(k, key) <= 2.0 * ap.match_radius) {
+        for (serial, why) in expired {
+            if active.is_some_and(|(s, _)| s == serial) {
                 self.cancel_active(CancelReason::Timeout, out);
             }
-            self.give_up(key, now, why, out);
+            self.give_up(serial, now, why, out);
         }
         let grid = grid?;
         let open: Vec<usize> = (0..self.approaches.len())
@@ -409,7 +404,7 @@ impl ExplorerPolicy {
             return None;
         }
         let clearance = DistanceField::from_grid(grid, ap.occupied_threshold, true);
-        let mut best: Option<(Viewpoint, (f64, f64))> = None;
+        let mut best: Option<(Viewpoint, u64)> = None;
         let cost = |v: &Viewpoint| robot.distance_to(v.x, v.y);
         for i in open {
             let a = &mut self.approaches[i];
@@ -422,7 +417,7 @@ impl ExplorerPolicy {
             if let Some(v) = approach::nearest(&vps, robot, self.p.turn_weight)
                 && best.is_none_or(|(b, _)| cost(&v) < cost(&b))
             {
-                best = Some((v, a.pos));
+                best = Some((v, a.serial));
             }
         }
         best
@@ -591,19 +586,17 @@ impl ExplorerPolicy {
             }
         }
         let choice = if let Some((vp, key, replace)) = approach_goal {
-            let label = match self.approach_entry(key) {
-                Some(a) => {
-                    a.started.get_or_insert(now);
-                    a.label()
-                }
-                None => format!("marker at ({:.2}, {:.2})", key.0, key.1),
-            };
+            let label = self.approach_entry(key).map_or_else(String::new, |a| {
+                a.started.get_or_insert(now);
+                a.label()
+            });
+            let offset = approach::OFFSETS[vp.slot] * p.approach.as_ref().map_or(0.0, |a| a.spread);
             out.push(Action::Info(format!(
-                "new goal ({:.2}, {:.2}) yaw={:.2}: approach {label}, view {} of 3{}",
+                "new goal ({:.2}, {:.2}) yaw={:.2}: approach {label}, view at {:+.0} deg{}",
                 vp.x,
                 vp.y,
                 vp.yaw,
-                vp.slot + 1,
+                offset.to_degrees(),
                 if replace { ", replacing the current goal" } else { "" }
             )));
             ((vp.x, vp.y), vp.yaw, None, GoalKind::Approach)
@@ -961,6 +954,26 @@ mod tests {
         assert_ne!(next.kind, GoalKind::Approach);
         assert_eq!(e.blacklist().count(), 0);
         assert_eq!(e.stats().approach_confirmed, 1);
+    }
+
+    #[test]
+    fn a_jumping_estimate_with_the_same_id_keeps_its_approach() {
+        let g = room();
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let r = Pose2::new(2.5, 1.0, 0.0);
+        let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &[HINT]))).unwrap();
+        e.goal_accepted((a.x, a.y));
+        let moved = [MarkerHint { y: 3.0, ..HINT }];
+        let acts = e.tick(1.0, with_markers(input(&g, r, None, 1.0), &moved));
+        assert!(!acts.iter().any(|a| matches!(a, Action::Cancel(_))), "{acts:?}");
+        // without ids (the ROS hints) a jump past match_radius reads as a confirmation
+        let no_id = [MarkerHint { id: None, ..HINT }];
+        let mut e = ExplorerPolicy::new(approach_params(), 0.0);
+        let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &no_id))).unwrap();
+        e.goal_accepted((a.x, a.y));
+        let moved = [MarkerHint { id: None, y: 3.0, ..HINT }];
+        let acts = e.tick(1.0, with_markers(input(&g, r, None, 1.0), &moved));
+        assert!(acts.contains(&Action::Cancel(CancelReason::MarkerConfirmed)));
     }
 
     #[test]

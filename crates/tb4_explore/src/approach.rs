@@ -56,6 +56,8 @@ impl Default for ApproachParams {
 /// what the explorer remembers per marker
 #[derive(Debug, Clone)]
 pub(crate) struct Approach {
+    /// unique per marker, so a goal finds its marker after the estimate moved
+    pub serial: u64,
     pub pos: (f64, f64),
     pub facing: f64,
     pub id: Option<i64>,
@@ -92,17 +94,21 @@ pub struct Viewpoint {
 
 pub(crate) const OFFSETS: [f64; 3] = [0.0, 1.0, -1.0];
 
-/// update the remembered markers from this tick's hints; returns markers that just disappeared
-/// from the hints (confirmed by the mapper)
-pub(crate) fn sync(list: &mut Vec<Approach>, hints: &[MarkerHint], p: &ApproachParams, now: f64) -> Vec<(f64, f64)> {
+/// update the remembered markers from this tick's hints. A marker that left the hints was confirmed
+/// by the mapper (or its estimate jumped): it is dropped unless it is being ignored.
+pub(crate) fn sync(list: &mut Vec<Approach>, hints: &[MarkerHint], p: &ApproachParams, now: f64, serial: &mut u64) {
     for a in list.iter_mut() {
         a.present = false;
     }
     for h in hints {
+        // same id: same marker however far its estimate moved; without ids: the nearest one close by
         let near = list
             .iter_mut()
             .filter(|a| !a.present && (h.id.is_none() || a.id.is_none() || a.id == h.id))
-            .map(|a| (((a.pos.0 - h.x).hypot(a.pos.1 - h.y)), a))
+            .map(|a| {
+                let same_id = h.id.is_some() && a.id == h.id;
+                (if same_id { 0.0 } else { (a.pos.0 - h.x).hypot(a.pos.1 - h.y) }, a)
+            })
             .filter(|(d, _)| *d <= p.match_radius)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, a)| a);
@@ -114,6 +120,10 @@ pub(crate) fn sync(list: &mut Vec<Approach>, hints: &[MarkerHint], p: &ApproachP
                 a.present = true;
             }
             None => list.push(Approach {
+                serial: {
+                    *serial += 1;
+                    *serial
+                },
                 pos: (h.x, h.y),
                 facing: h.facing,
                 id: h.id,
@@ -125,10 +135,7 @@ pub(crate) fn sync(list: &mut Vec<Approach>, hints: &[MarkerHint], p: &ApproachP
             }),
         }
     }
-    let gone: Vec<(f64, f64)> = list.iter().filter(|a| !a.present && now >= a.ignore_until).map(|a| a.pos).collect();
-    // a marker that left the list was confirmed (or merged); forget it unless it is being ignored
     list.retain(|a| a.present || now < a.ignore_until);
-    gone
 }
 
 /// free, clear viewpoints of `a` for the slots not tried yet, at the standoff or a little nearer / further

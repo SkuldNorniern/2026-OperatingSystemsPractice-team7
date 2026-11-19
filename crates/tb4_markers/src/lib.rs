@@ -257,6 +257,10 @@ pub struct TrackParams {
     /// labels on chairs decode as. Field 184838: label 1023 was confirmed from 7 views next to a
     /// wall with no learned scale (NaN). A real one printed on a wall learns its scale.
     pub strict_ids: Vec<i64>,
+    /// every id needs a consistent learned size to confirm (as strict_ids, plus the samples must
+    /// agree within scale_tolerance). A sticker in mid-air seen from several angles has its rays
+    /// land on different surfaces, so its ray/pnp ratio drifts; a printed marker's stays put.
+    pub require_scale_all: bool,
     /// fused position 1 sigma must be below this (m)
     pub max_spread: f64,
     /// median mahalanobis distance of views must be below this, else views disagree
@@ -287,6 +291,7 @@ impl Default for TrackParams {
             min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
             strict_ids: Vec::new(),
+            require_scale_all: false,
             max_spread: 0.08,
             max_consistency: 3.0,
             max_history: 200,
@@ -440,6 +445,14 @@ impl Tracker {
         (all.len() >= self.params.scale_min_samples).then(|| median(all))
     }
 
+    /// learned scale whose samples agree: median absolute deviation within scale_tolerance of the median
+    pub fn scale_consistent(&self, id: i64) -> bool {
+        let Some(v) = self.scales.get(&id).filter(|v| v.len() >= self.params.scale_min_samples) else { return false };
+        let m = median(v.clone());
+        let mad = median(v.iter().map(|s| (s - m).abs()).collect());
+        m > 0.0 && mad <= self.params.scale_tolerance * m
+    }
+
     /// learned ray/pnp scale of a marker, if enough samples
     pub fn scale(&self, id: i64) -> Option<f64> {
         self.scales.get(&id).filter(|v| v.len() >= self.params.scale_min_samples).map(|v| median(v.clone()))
@@ -477,6 +490,7 @@ impl Tracker {
                 && wall >= p.min_wall_views
                 && wall as f64 >= p.min_wall_fraction * v.len() as f64
                 && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
+                && (!p.require_scale_all || self.scale_consistent(id))
                 && (p.min_triangulation_spread <= 0.0
                     || triangulate(v).is_some_and(|t| {
                         t.spread >= p.min_triangulation_spread && (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap

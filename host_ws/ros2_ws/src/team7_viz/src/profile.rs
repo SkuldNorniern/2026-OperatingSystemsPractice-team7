@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Tool};
-use crate::chrome::Chrome;
+use crate::chrome::{Chrome, N_SECTIONS};
 use crate::scene::{self, Binding, LAYERS, LayerSpec, Layers};
 
 /// a change is saved once nothing else changed for this long
@@ -38,8 +38,9 @@ impl Default for LayerEntry {
 pub struct DockEntry {
     pub open: bool,
     pub width: f32,
-    pub sections: [bool; 4],
-    pub heights: [f32; 4],
+    /// one per dock section; a list of another length (an older layout) is ignored
+    pub sections: Vec<bool>,
+    pub heights: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,7 +117,7 @@ pub fn capture(app: &App, chrome: &Chrome) -> Profile {
             .map(|s| LayerEntry { kind: s.info().key.into(), on: s.on, opacity: s.opacity, topic: binding_str(&s.binding), extra: s.extra })
             .collect(),
         camera_topic: binding_str(&app.layers.camera),
-        dock: DockEntry { open: chrome.dock_open, width: chrome.dock_w, sections: chrome.sections, heights: chrome.layout.heights },
+        dock: DockEntry { open: chrome.dock_open, width: chrome.dock_w, sections: chrome.sections.to_vec(), heights: chrome.layout.heights.to_vec() },
         view: ViewEntry { zoom: app.camera.zoom, rotation: app.camera.rotation, follow: app.camera.follow },
         tool: tool_str(app.tool).into(),
     }
@@ -150,9 +151,13 @@ pub fn apply(p: &Profile, app: &mut App, chrome: &mut Chrome) {
     if p.dock.width.is_finite() && p.dock.width > 0.0 {
         chrome.dock_w = p.dock.width;
     }
-    chrome.sections = p.dock.sections;
-    if p.dock.heights.iter().all(|h| h.is_finite() && *h > 0.0) {
-        chrome.layout.heights = p.dock.heights;
+    if let Ok(s) = <[bool; N_SECTIONS]>::try_from(p.dock.sections.as_slice()) {
+        chrome.sections = s;
+    }
+    if let Ok(h) = <[f32; N_SECTIONS]>::try_from(p.dock.heights.as_slice())
+        && h.iter().all(|h| h.is_finite() && *h > 0.0)
+    {
+        chrome.layout.heights = h;
     }
 }
 
@@ -345,8 +350,8 @@ mod tests {
         app.tool = Tool::Measure;
         chrome.dock_open = false;
         chrome.dock_w = 410.0;
-        chrome.sections = [true, false, true, true];
-        chrome.layout.heights = [300.0, 120.0, 200.0, 90.0];
+        chrome.sections = [true, false, true, false, true];
+        chrome.layout.heights = [300.0, 120.0, 200.0, 140.0, 90.0];
     }
 
     #[test]
@@ -364,7 +369,7 @@ mod tests {
         assert_eq!(app2.layers, app.layers);
         assert_eq!((app2.camera.zoom, app2.camera.rotation, app2.camera.follow), (2.5, 0.4, false));
         assert_eq!(app2.tool, Tool::Measure);
-        assert_eq!((chrome2.dock_open, chrome2.dock_w, chrome2.sections, chrome2.layout.heights), (false, 410.0, [true, false, true, true], [300.0, 120.0, 200.0, 90.0]));
+        assert_eq!((chrome2.dock_open, chrome2.dock_w, chrome2.sections, chrome2.layout.heights), (false, 410.0, [true, false, true, false, true], [300.0, 120.0, 200.0, 140.0, 90.0]));
         assert_eq!(capture(&app2, &chrome2), p);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -388,6 +393,17 @@ mod tests {
         let p = ps.load("team7-live");
         assert_eq!((p.tool.as_str(), p.view.zoom, p.view.follow), ("goal", 3.0, defaults().view.follow));
         assert_eq!(p.layers, defaults().layers);
+        // a profile from before the target split: 4 dock sections and a "targets" layer. The old
+        // dock lists are ignored, the rest still applies.
+        let old = "[[layers]]\nkind = \"targets\"\non = false\n[[layers]]\nkind = \"scan\"\non = false\n[dock]\nopen = true\nwidth = 300.0\nsections = [true, false, true, true]\nheights = [380.0, 250.0, 170.0, 170.0]\n";
+        std::fs::write(dir.join("team7-live.toml"), old).unwrap();
+        let p = ps.load("team7-live");
+        let (mut app, mut chrome) = (App::new(false), Chrome::new(String::new(), None));
+        apply(&p, &mut app, &mut chrome);
+        assert_eq!(chrome.sections, Chrome::new(String::new(), None).sections);
+        assert_eq!(chrome.dock_w, 300.0);
+        assert!(!app.layers.shown(Layer::Scan));
+        assert!(app.layers.shown(Layer::Candidates) && app.layers.shown(Layer::Confirmed));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

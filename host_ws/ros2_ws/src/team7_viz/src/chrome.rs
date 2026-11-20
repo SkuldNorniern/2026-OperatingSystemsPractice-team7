@@ -31,8 +31,14 @@ const PAD: f32 = 12.0;
 const CAMERA_STALE: Duration = Duration::from_secs(3);
 const OUT_EVERY: Duration = Duration::from_secs(5);
 
-/// dock sections, in order
-pub const SECTIONS: [&str; 4] = ["Layers", "Camera", "Targets", "Health"];
+/// dock sections, in order (Candidates and Confirmed get their counts in the title)
+pub const SECTIONS: [&str; N_SECTIONS] = ["Layers", "Camera", "Candidates", "Confirmed", "Health"];
+pub const N_SECTIONS: usize = 5;
+pub const CANDIDATES: usize = 2;
+pub const CONFIRMED: usize = 3;
+pub const HEALTH: usize = 4;
+/// the mission's target count, for "Confirmed (n/3)"
+const TARGETS_WANTED: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Wid {
@@ -57,6 +63,9 @@ pub enum Wid {
     CameraTopic,
     Overflow,
     Camera,
+    /// a row of the Candidates / Confirmed sections, by place in the list
+    CandRow(u16),
+    ConfRow(u16),
 }
 
 /// what the window must do after a frame
@@ -75,7 +84,7 @@ pub struct Chrome {
     pub dock_w: f32,
     /// the dock as a drawer over the map (narrow windows)
     pub drawer_open: bool,
-    pub sections: [bool; 4],
+    pub sections: [bool; N_SECTIONS],
     /// the map's rectangle in the last frame, canvas pixels
     pub map_area: Rect,
     /// what covers part of the map (the drawer), so presses there are not the map's
@@ -108,6 +117,13 @@ thread_local! {
     static LAYOUT: std::cell::RefCell<Vec<(&'static str, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// full text of what the pointer is over, shown in the status bar
     static HOVER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// target rows of the last frame (id, rect), for the tests
+    static TARGET_ROWS: std::cell::RefCell<Vec<(i32, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// the Candidates and Confirmed rows of the last frame: target id and rectangle
+pub fn target_rows() -> Vec<(i32, Rect)> {
+    TARGET_ROWS.with(|r| r.borrow().clone())
 }
 
 /// a layout rectangle: never negative, and noted for the size tests
@@ -155,7 +171,7 @@ impl Chrome {
             dock_open: true,
             dock_w: 340.0,
             drawer_open: false,
-            sections: [true, true, true, false],
+            sections: [true, true, true, true, false],
             map_area: Rect::new(0.0, 0.0, 1.0, 1.0),
             overlay: None,
             domain,
@@ -188,7 +204,7 @@ impl Chrome {
     pub fn key(&mut self, key: KeyCode, mods: Modifiers) -> bool {
         match key {
             KeyCode::D if !mods.ctrl => self.toggle_panel(),
-            KeyCode::H if !mods.ctrl => self.sections[3] = !self.sections[3],
+            KeyCode::H if !mods.ctrl => self.sections[HEALTH] = !self.sections[HEALTH],
             _ => return false,
         }
         true
@@ -231,6 +247,7 @@ impl Chrome {
         let (w, h) = (ctx.width() as f32, ctx.height() as f32);
         LAYOUT.with(|l| l.borrow_mut().clear());
         HOVER.with(|v| *v.borrow_mut() = None);
+        TARGET_ROWS.with(|r| r.borrow_mut().clear());
         self.last_w = w;
         let mut req = Requests::default();
         let run_dir = self.run_dir(now);
@@ -268,8 +285,11 @@ impl Chrome {
                 *dock_open = !*dock_open;
             }
         }
-        let found = app.targets(model);
-        strip(&mut ui, model, &found, now, w)?;
+        let all = app.targets(model);
+        let found = crate::model::confirmed(&all);
+        let waiting = crate::model::candidates(&all);
+        map_hover(app, &all);
+        strip(&mut ui, model, &found, &waiting, now, w)?;
         let drawer = (narrow && *drawer_open).then(|| {
             let dw = if w < SHEET { w } else { dock_w.clamp(DOCK_MIN, DOCK_MAX).min(w * 0.85) };
             note("drawer", Rect::new(0.0, body.y, dw, body.height))
@@ -473,9 +493,10 @@ enum SlotLook {
     Hidden,
 }
 
-/// the header strip: mission clock (always), the 3 targets as slots, small chips or one count, and
-/// one status light (or the stale banner), shortened to the room left
-fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], now: Instant, w: f32) -> AureaResult<()> {
+/// the header strip: mission clock (always), the confirmed targets as 3 slots (small chips, or one
+/// count), the candidates only as a count chip, and one status light (or the stale banner),
+/// shortened to the room left. A candidate never takes a slot, so it is not taken for a find.
+fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], waiting: &[Target], now: Instant, w: f32) -> AureaResult<()> {
     let t = ui.theme.clone();
     let r = note("strip", Rect::new(0.0, TOOLBAR_H, w, STRIP_H));
     let stale = model.stale_for(now);
@@ -497,46 +518,51 @@ fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], now: 
         hover(format!("mission {big} {small}"));
     }
 
-    // targets: what fits between the clock and a minimal status
-    let mut targets: Vec<_> = found.iter().collect();
-    targets.sort_by_key(|t| (!t.confirmed, t.id));
+    // targets: what fits between the clock and a minimal status; the candidate chip goes first
     let status_min = if w >= SHEET { 140.0 } else { 100.0 };
     let tx = x + clock_w + 24.0;
     let room = w - tx - status_min - 2.0 * PAD;
-    let look = if room >= 3.0 * 158.0 {
-        SlotLook::Full
-    } else if room >= 3.0 * 72.0 {
-        SlotLook::Compact
-    } else if room >= 92.0 {
-        SlotLook::Chip
-    } else {
-        SlotLook::Hidden
+    let cand_text = match waiting.len() {
+        1 => "1 candidate".to_owned(),
+        n => format!("{n} candidates"),
     };
+    let cand_w = if waiting.is_empty() { 0.0 } else { ui.text_width(&cand_text, &font(12.0)) + 34.0 };
+    let pick = |room: f32| {
+        if room >= 3.0 * 158.0 {
+            SlotLook::Full
+        } else if room >= 3.0 * 72.0 {
+            SlotLook::Compact
+        } else if room >= 92.0 {
+            SlotLook::Chip
+        } else {
+            SlotLook::Hidden
+        }
+    };
+    let mut show_cand = !waiting.is_empty();
+    let mut look = pick(room - cand_w - 8.0);
+    if show_cand && look == SlotLook::Hidden {
+        show_cand = false;
+        look = pick(room);
+    }
     let mut x = tx;
     if look != SlotLook::Hidden {
         ui.text("TARGETS", note("targets", Rect::new(x, r.y + 8.0, 80.0, 12.0)), &bold(10.0), t.palette.dim, Align::Start)?;
     }
-    let full_text = |tg: &Target| {
-        let state = if tg.confirmed { "confirmed".to_owned() } else { tg.views.map_or("tentative".to_owned(), |v| format!("tentative, {v} views")) };
-        format!("ID {} at ({:.2}, {:.2}) {state}", tg.id, tg.x, tg.y)
-    };
-    let dot = |tg: &Target| rgba(if tg.confirmed { pal::TARGET_CONFIRMED } else { pal::TARGET_TENTATIVE });
+    let full_text = |tg: &Target| format!("ID {} at ({:.2}, {:.2}) confirmed", tg.id, tg.x, tg.y);
+    let green = rgba(pal::TARGET_CONFIRMED);
     match look {
         SlotLook::Full | SlotLook::Compact => {
             let slot_w = if look == SlotLook::Full { 150.0 } else { 64.0 };
-            for i in 0..3 {
+            for i in 0..TARGETS_WANTED {
                 let sr = note("slot", Rect::new(x, r.y + 22.0, slot_w, 28.0));
                 ui.round(sr, 6.0, t.palette.surface)?;
-                match targets.get(i) {
+                match found.get(i) {
                     Some(tg) => {
-                        ui.circle(aurea::render::Point::new(sr.x + 12.0, sr.y + 14.0), 5.0, dot(tg))?;
-                        let id = if tg.confirmed { format!("ID {}", tg.id) } else { format!("ID {}?", tg.id) };
+                        ui.circle(aurea::render::Point::new(sr.x + 12.0, sr.y + 14.0), 5.0, green)?;
+                        let id = format!("ID {}", tg.id);
                         if look == SlotLook::Full {
                             ui.text_clipped(&id, Rect::new(sr.x + 24.0, sr.y + 1.0, slot_w - 28.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
-                            let sub = match (tg.confirmed, tg.views) {
-                                (false, Some(v)) => format!("({:.2}, {:.2}) {v}v", tg.x, tg.y),
-                                _ => format!("({:.2}, {:.2})", tg.x, tg.y),
-                            };
+                            let sub = format!("({:.2}, {:.2})", tg.x, tg.y);
                             ui.text_clipped(&sub, Rect::new(sr.x + 24.0, sr.y + 14.0, slot_w - 28.0, 13.0), &font(11.0), t.palette.dim, Align::Start)?;
                         } else {
                             ui.text_clipped(&id, Rect::new(sr.x + 22.0, sr.y + 7.0, slot_w - 24.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
@@ -552,24 +578,41 @@ fn strip(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], now: 
                 }
                 x += slot_w + 8.0;
             }
-            if targets.len() > 3 {
-                ui.text(&format!("+{}", targets.len() - 3), note("more", Rect::new(x, r.y + 29.0, 28.0, 14.0)), &font(11.0), t.palette.dim, Align::Start)?;
+            if found.len() > TARGETS_WANTED {
+                ui.text(&format!("+{}", found.len() - TARGETS_WANTED), note("more", Rect::new(x, r.y + 29.0, 28.0, 14.0)), &font(11.0), t.palette.dim, Align::Start)?;
                 x += 32.0;
             }
         }
         SlotLook::Chip => {
-            let confirmed = targets.iter().filter(|t| t.confirmed).count();
             let chip = note("chip", Rect::new(x, r.y + 22.0, 92.0, 28.0));
             ui.round(chip, 14.0, t.palette.surface)?;
-            let c = if confirmed > 0 { rgba(pal::TARGET_CONFIRMED) } else if targets.is_empty() { t.palette.faint } else { rgba(pal::TARGET_TENTATIVE) };
+            let c = if found.is_empty() { t.palette.faint } else { green };
             ui.circle(aurea::render::Point::new(chip.x + 14.0, chip.y + 14.0), 5.0, c)?;
-            ui.text(&format!("{confirmed}/3 found"), Rect::new(chip.x + 24.0, chip.y + 7.0, 64.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
+            ui.text(&format!("{}/{TARGETS_WANTED} found", found.len()), Rect::new(chip.x + 24.0, chip.y + 7.0, 64.0, 14.0), &bold(12.0), t.palette.text, Align::Start)?;
             if ui.pointer().is_some_and(|p| chip.contains(p)) {
-                hover(if targets.is_empty() { "no targets yet".to_owned() } else { targets.iter().map(|t| full_text(t)).collect::<Vec<_>>().join("; ") });
+                let mut text = if found.is_empty() { "nothing confirmed yet".to_owned() } else { found.iter().map(full_text).collect::<Vec<_>>().join("; ") };
+                if !show_cand && !waiting.is_empty() {
+                    text.push_str(&format!(" ({cand_text})"));
+                }
+                hover(text);
             }
             x += 92.0 + 8.0;
         }
         SlotLook::Hidden => {}
+    }
+    // the candidates: a count only, a hollow amber ring as on the map
+    if show_cand {
+        let chip = note("candidates_chip", Rect::new(x, r.y + 22.0, cand_w, 28.0));
+        ui.round(chip, 14.0, t.palette.surface)?;
+        ui.border(chip, 14.0, 1.0, t.palette.border)?;
+        let c = aurea::render::Point::new(chip.x + 15.0, chip.y + 14.0);
+        ui.circle(c, 5.5, rgba(pal::TARGET_TENTATIVE))?;
+        ui.circle(c, 3.5, t.palette.surface)?;
+        ui.text_clipped(&cand_text, Rect::new(chip.x + 26.0, chip.y + 7.0, cand_w - 30.0, 14.0), &font(12.0), t.palette.dim, Align::Start)?;
+        if ui.pointer().is_some_and(|p| chip.contains(p)) {
+            hover(waiting.iter().map(candidate_line).collect::<Vec<_>>().join("; "));
+        }
+        x += cand_w + 8.0;
     }
 
     // status light, or the banner when nothing comes; shortened to the room
@@ -610,25 +653,32 @@ pub const MIN_BODY: f32 = 2.0 * ROW_H + 8.0;
 #[derive(Debug, Clone)]
 pub struct DockLayout {
     /// preferred body heights (without the header), pixels
-    pub heights: [f32; 4],
-    pub scrolls: [f32; 4],
-    content: [f32; 4],
+    pub heights: [f32; N_SECTIONS],
+    pub scrolls: [f32; N_SECTIONS],
+    content: [f32; N_SECTIONS],
     /// a handle being dragged: (section above, section below, pointer y at the press, their heights then)
     drag: Option<(usize, usize, f32, f32, f32)>,
     /// last frame: body rectangles of the open sections, and the handles (above, below, rect)
-    pub bodies: [Option<Rect>; 4],
+    pub bodies: [Option<Rect>; N_SECTIONS],
     pub handles: Vec<(usize, usize, Rect)>,
 }
 
 impl Default for DockLayout {
     fn default() -> Self {
-        Self { heights: [380.0, 250.0, 170.0, 170.0], scrolls: [0.0; 4], content: [0.0; 4], drag: None, bodies: [None; 4], handles: Vec::new() }
+        Self {
+            heights: [420.0, 230.0, 150.0, 110.0, 170.0],
+            scrolls: [0.0; N_SECTIONS],
+            content: [0.0; N_SECTIONS],
+            drag: None,
+            bodies: [None; N_SECTIONS],
+            handles: Vec::new(),
+        }
     }
 }
 
 /// open sections' preferred heights scaled to fill `avail`, each at least `MIN_BODY`
-fn fit(heights: &[f32; 4], open: &[usize], avail: f32) -> [f32; 4] {
-    let mut out = [0.0; 4];
+fn fit(heights: &[f32; N_SECTIONS], open: &[usize], avail: f32) -> [f32; N_SECTIONS] {
+    let mut out = [0.0; N_SECTIONS];
     let sum: f32 = open.iter().map(|&i| heights[i].max(1.0)).sum();
     if open.is_empty() || sum <= 0.0 {
         return out;
@@ -652,7 +702,7 @@ fn dock_sections(
     ui: &mut aurea::ui::Ui<'_, Wid>,
     d: Rect,
     layout: &mut DockLayout,
-    sections: &mut [bool; 4],
+    sections: &mut [bool; N_SECTIONS],
     camera_image: &mut Option<(u64, bool, Image)>,
     cam: Option<&crate::model::CameraFrame>,
     app: &mut App,
@@ -661,16 +711,27 @@ fn dock_sections(
     run_dir: Option<&std::path::Path>,
 ) -> AureaResult<()> {
     let t = ui.theme.clone();
-    let open: Vec<usize> = (0..4).filter(|&i| sections[i]).collect();
-    let headers = 4.0 * (HEADER_H + 2.0) + 8.0;
+    let open: Vec<usize> = (0..N_SECTIONS).filter(|&i| sections[i]).collect();
+    let headers = N_SECTIONS as f32 * (HEADER_H + 2.0) + 8.0;
     let avail = (d.height - headers - SPLIT_H * open.len().saturating_sub(1) as f32).max(0.0);
     let shown = fit(&layout.heights, &open, avail);
-    layout.bodies = [None; 4];
+    layout.bodies = [None; N_SECTIONS];
     layout.handles.clear();
     let (x, w) = (d.x + 8.0, d.width - 16.0);
     let mut y = d.y + 4.0;
+    let all = app.targets(model);
+    let (waiting, found) = (crate::model::candidates(&all), crate::model::confirmed(&all));
+    let titles: Vec<String> = SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, s)| match i {
+            CANDIDATES => format!("{s} ({})", waiting.len()),
+            CONFIRMED => format!("{s} ({}/{TARGETS_WANTED})", found.len()),
+            _ => (*s).to_owned(),
+        })
+        .collect();
     ui.clipped(d, |ui| -> AureaResult<()> {
-        for (i, title) in SECTIONS.iter().enumerate() {
+        for (i, title) in titles.iter().enumerate() {
             Disclosure::new(title, &mut sections[i]).show(ui, Wid::Section(i as u8), Rect::new(x, y, w, HEADER_H))?;
             y += HEADER_H + 2.0;
             if !open.contains(&i) {
@@ -685,7 +746,8 @@ fn dock_sections(
                     0 => layers(ui, app, model, cx, c.y, cw)?,
                     // image, 4 px gap, 16 px info line, 6 px bottom margin: fits without a bar
                     1 => camera(ui, camera_image, cam, app, model, now, cx, c.y, cw, body.height - 28.0)?,
-                    2 => targets(ui, model, &app.targets(model), cx, c.y, cw, run_dir)?,
+                    CANDIDATES => candidate_rows(ui, app, &waiting, cx, c.y, cw)?,
+                    CONFIRMED => confirmed_rows(ui, app, model, &found, now, cx, c.y, cw, run_dir)?,
                     _ => health_rows(ui, model, now, cx, c.y, cw)?,
                 };
                 Ok(end - c.y + 6.0)
@@ -823,8 +885,23 @@ fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32,
         let name_w = (w * 0.5 - 62.0).clamp(40.0, 130.0);
         ui.text_clipped(info.name, Rect::new(name_x, y + 4.0, name_w, 16.0), &font(13.0), name_c, Align::Start)?;
 
+        // a small opacity step button for the layers without a slider (ArUco)
+        let mut right = x + w - 22.0;
+        if info.opacity.is_some() && !scene::has_slider(info.layer) {
+            let pct = format!("{:.0}%", spec.opacity * 100.0);
+            // as wide as "100%" needs, so the label never cuts and the row does not jump
+            let small = font(11.0);
+            let bw = Button::new("100%").quiet().font(&small).width(ui).min(44.0);
+            let b = Rect::new(right - bw - 2.0, y + 3.0, bw, ROW_H - 6.0);
+            if Button::new(&pct).quiet().font(&small).show(ui, Wid::Opacity(i as u8), b)?.clicked {
+                app.layers.list[i].opacity = scene::next_opacity(spec.opacity);
+            }
+            if ui.pointer().is_some_and(|p| b.contains(p)) {
+                hover(format!("{} opacity {pct}: click for {:.0}%", info.name, scene::next_opacity(spec.opacity) * 100.0));
+            }
+            right -= bw + 4.0;
+        }
         // the topic picker, or the legend for layers without a topic
-        let right = x + w - 22.0;
         let fx = name_x + name_w + 4.0;
         if let Some(kind) = info.msg {
             let auto = info.slot.and_then(|s| model.bound(s));
@@ -853,7 +930,7 @@ fn layers(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, x: f32,
             ui.text(&format!("{}", i + 1), Rect::new(x + w - 16.0, y + 5.0, 12.0, 14.0), &font(11.0), t.palette.faint, Align::End)?;
         }
         y += ROW_H + 2.0;
-        if let (Some(_), true) = (info.opacity, on) {
+        if let (Some(_), true, true) = (info.opacity, on, scene::has_slider(info.layer)) {
             let mut o = spec.opacity;
             let pct = format!("{:.0}%", o * 100.0);
             ui.text("opacity", Rect::new(x + 62.0, y + 2.0, 60.0, 14.0), &font(11.0), t.palette.dim, Align::Start)?;
@@ -894,32 +971,158 @@ fn recolor(p: &mut prim::Prim, c: tb4_draw::Rgba) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn targets(ui: &mut aurea::ui::Ui<'_, Wid>, model: &Model, found: &[Target], x: f32, mut y: f32, w: f32, run_dir: Option<&std::path::Path>) -> AureaResult<f32> {
+/// a candidate in one line: "ID 3? 5v: wall 1/3, angle 4/11 deg"
+fn candidate_line(tg: &Target) -> String {
+    let views = tg.views.map_or(String::new(), |v| format!(" {v}v"));
+    let why = if tg.reasons.is_empty() { String::new() } else { format!(": {}", tg.reasons.join(", ")) };
+    format!("ID {}?{views}{why}", tg.id)
+}
+
+/// the target under the pointer on the map (within 12 px, of a shown layer) into the status bar
+fn map_hover(app: &App, all: &[Target]) {
+    let (Some(c), Some((vp, _))) = (app.cursor, app.viewport()) else { return };
+    let (cx, cy) = vp.to_screen(c.0, c.1);
+    let shown = |t: &Target| app.layers.shown(if t.confirmed { scene::Layer::Confirmed } else { scene::Layer::Candidates });
+    let near = all
+        .iter()
+        .filter(|t| shown(t))
+        .map(|t| {
+            let (sx, sy) = vp.to_screen(t.x, t.y);
+            (t, (sx - cx).hypot(sy - cy))
+        })
+        .filter(|(_, d)| *d <= 12.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((t, _)) = near {
+        hover(if t.confirmed { format!("ID {} confirmed at ({:.2}, {:.2})", t.id, t.x, t.y) } else { candidate_line(t) });
+    }
+}
+
+/// short rule chips from `x0`, wrapping inside `w`; returns the height used. Drawn only when `draw`.
+fn chips(ui: &mut aurea::ui::Ui<'_, Wid>, rules: &[String], x0: f32, y: f32, w: f32, close: bool, draw: bool) -> AureaResult<f32> {
+    const CH: f32 = 18.0;
     let t = ui.theme.clone();
-    // columns scale with the dock; state carries the view count ("tentative, 2 views")
-    let col = |f: f32| x + 6.0 + (w - 12.0) * f;
-    let cols = [(0.0, "ID"), (0.16, "x [m]"), (0.36, "y [m]"), (0.56, "state")];
+    let f = font(11.0);
+    let (mut x, mut row) = (x0, 0.0);
+    for r in rules {
+        let cw = (ui.text_width(r, &f) + 12.0).min(w);
+        if x > x0 && x + cw > x0 + w {
+            x = x0;
+            row += CH + 4.0;
+        }
+        if draw {
+            let cr = Rect::new(x, y + row, cw, CH);
+            let (bg, fg) = if close { (t.palette.warning.with_alpha(50), t.palette.text) } else { (t.palette.raised, t.palette.dim) };
+            ui.round(cr, 9.0, bg)?;
+            ui.text_clipped(r, Rect::new(cr.x + 6.0, cr.y + 2.0, cw - 12.0, 14.0), &f, fg, Align::Start)?;
+        }
+        x += cw + 4.0;
+    }
+    Ok(if rules.is_empty() { 0.0 } else { row + CH })
+}
+
+/// the Candidates section: every id seen and not confirmed, closest to confirming first, with the
+/// rules it still fails as chips; one rule left is marked "close". A click centres the map on it.
+fn candidate_rows(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, list: &[Target], x: f32, mut y: f32, w: f32) -> AureaResult<f32> {
+    let t = ui.theme.clone();
+    if list.is_empty() {
+        ui.text("no candidates", Rect::new(x + 6.0, y, w, 16.0), &font(12.0), t.palette.faint, Align::Start)?;
+        return Ok(y + 20.0);
+    }
+    let amber = rgba(pal::TARGET_TENTATIVE);
+    for (i, tg) in list.iter().enumerate() {
+        let close = tg.close();
+        let chip_x = x + 30.0;
+        let chip_h = chips(ui, &tg.reasons, chip_x, 0.0, w - 36.0, close, false)?;
+        let h = 22.0 + if chip_h > 0.0 { chip_h + 4.0 } else { 0.0 } + 4.0;
+        let row = Rect::new(x, y, w, h);
+        TARGET_ROWS.with(|r| r.borrow_mut().push((tg.id, row)));
+        let input = ui.interact(Wid::CandRow(i as u16), 0, row, Sense::Click, true);
+        if close {
+            ui.round(row, 6.0, t.palette.warning.with_alpha(28))?;
+            ui.border(row, 6.0, 1.0, t.palette.warning.with_alpha(120))?;
+        }
+        if input.hovered || input.held {
+            ui.round(row, 6.0, if input.held { t.palette.pressed } else { t.palette.hover })?;
+        }
+        if app.selected == Some(tg.id) {
+            ui.border(row, 6.0, 1.5, t.palette.accent)?;
+        }
+        if input.hovered {
+            hover(format!("{} at ({:.2}, {:.2}); click to centre", candidate_line(tg), tg.x, tg.y));
+        }
+        if input.clicked {
+            app.centre_on(tg.id, tg.x, tg.y);
+        }
+        let c = aurea::render::Point::new(x + 15.0, y + 12.0);
+        ui.circle(c, 6.0, amber)?;
+        ui.circle(c, 4.0, t.palette.surface)?;
+        ui.text(&format!("ID {}?", tg.id), Rect::new(x + 30.0, y + 4.0, 70.0, 16.0), &bold(12.0), t.palette.text, Align::Start)?;
+        let views = tg.views.map_or("- views".to_owned(), |v| if v == 1 { "1 view".to_owned() } else { format!("{v} views") });
+        ui.text_clipped(&views, Rect::new(x + 96.0, y + 5.0, (w - 150.0).max(0.0), 14.0), &font(11.0), t.palette.dim, Align::Start)?;
+        if close {
+            let b = Rect::new(x + w - 50.0, y + 4.0, 44.0, 16.0);
+            ui.round(b, 8.0, t.palette.warning)?;
+            ui.text("close", b, &bold(10.0), t.palette.background, Align::Center)?;
+        }
+        chips(ui, &tg.reasons, chip_x, y + 24.0, w - 36.0, close, true)?;
+        y += h + 4.0;
+    }
+    Ok(y)
+}
+
+/// "mm:ss" into the mission, or how long ago
+fn when(model: &Model, at: Instant, now: Instant) -> String {
+    match model.mission_started {
+        Some(s) if at >= s => {
+            let d = at.duration_since(s).as_secs();
+            format!("{:02}:{:02}", d / 60, d % 60)
+        }
+        _ => format!("{} ago", human_age(now.saturating_duration_since(at))),
+    }
+}
+
+/// the Confirmed section: id, x, y, views, when; a click centres the map. Then the last goal
+/// result and the run folder with its files.
+#[allow(clippy::too_many_arguments)]
+fn confirmed_rows(ui: &mut aurea::ui::Ui<'_, Wid>, app: &mut App, model: &Model, list: &[Target], now: Instant, x: f32, mut y: f32, w: f32, run_dir: Option<&std::path::Path>) -> AureaResult<f32> {
+    let t = ui.theme.clone();
+    let col = |f: f32| x + 26.0 + (w - 32.0) * f;
+    let cols = [(0.0, "ID"), (0.16, "x [m]"), (0.36, "y [m]"), (0.56, "views"), (0.74, "at")];
     for (f, head) in cols {
-        ui.text(head, Rect::new(col(f), y, 70.0, 14.0), &bold(10.0), t.palette.dim, Align::Start)?;
+        ui.text_clipped(head, Rect::new(col(f), y, 60.0, 14.0), &bold(10.0), t.palette.dim, Align::Start)?;
     }
     y += 18.0;
-    if found.is_empty() {
-        ui.text("no targets yet", Rect::new(x + 6.0, y, w, 16.0), &font(12.0), t.palette.faint, Align::Start)?;
+    if list.is_empty() {
+        ui.text("nothing confirmed yet", Rect::new(x + 6.0, y, w, 16.0), &font(12.0), t.palette.faint, Align::Start)?;
         y += 20.0;
     }
-    for tg in found {
-        let c = rgba(if tg.confirmed { pal::TARGET_CONFIRMED } else { pal::TARGET_TENTATIVE });
-        let state = match (tg.confirmed, tg.views) {
-            (true, _) => "confirmed".to_owned(),
-            (false, Some(v)) => format!("tentative, {v}v"),
-            (false, None) => "tentative".to_owned(),
-        };
-        ui.text(&tg.id.to_string(), Rect::new(col(0.0), y, 60.0, 16.0), &font(12.0), t.palette.text, Align::Start)?;
-        ui.text(&format!("{:.2}", tg.x), Rect::new(col(0.16), y, 60.0, 16.0), &font(12.0), t.palette.text, Align::Start)?;
-        ui.text(&format!("{:.2}", tg.y), Rect::new(col(0.36), y, 60.0, 16.0), &font(12.0), t.palette.text, Align::Start)?;
-        ui.text_clipped(&state, Rect::new(col(0.56), y, (w - 12.0) * 0.44, 16.0), &font(12.0), c, Align::Start)?;
-        y += 19.0;
+    for (i, tg) in list.iter().enumerate() {
+        let row = Rect::new(x, y - 2.0, w, 21.0);
+        TARGET_ROWS.with(|r| r.borrow_mut().push((tg.id, row)));
+        let input = ui.interact(Wid::ConfRow(i as u16), 0, row, Sense::Click, true);
+        if input.hovered || input.held {
+            ui.round(row, 5.0, if input.held { t.palette.pressed } else { t.palette.hover })?;
+        }
+        if app.selected == Some(tg.id) {
+            ui.border(row, 5.0, 1.5, t.palette.accent)?;
+        }
+        let seen = model.target_log.get(&tg.id);
+        let views = seen.and_then(|s| s.views).map_or("-".to_owned(), |v| v.to_string());
+        let at = seen.and_then(|s| s.confirmed_at).map_or("-".to_owned(), |a| when(model, a, now));
+        if input.hovered {
+            hover(format!("ID {} confirmed at ({:.2}, {:.2}), {views} views, {at}; click to centre", tg.id, tg.x, tg.y));
+        }
+        if input.clicked {
+            app.centre_on(tg.id, tg.x, tg.y);
+        }
+        ui.circle(aurea::render::Point::new(x + 14.0, y + 8.0), 5.0, rgba(pal::TARGET_CONFIRMED))?;
+        let cell = |f: f32, g: f32| Rect::new(col(f), y, ((g - f) * (w - 32.0) - 4.0).max(0.0), 16.0);
+        ui.text_clipped(&tg.id.to_string(), cell(0.0, 0.16), &bold(12.0), t.palette.text, Align::Start)?;
+        ui.text_clipped(&format!("{:.2}", tg.x), cell(0.16, 0.36), &font(12.0), t.palette.text, Align::Start)?;
+        ui.text_clipped(&format!("{:.2}", tg.y), cell(0.36, 0.56), &font(12.0), t.palette.text, Align::Start)?;
+        ui.text_clipped(&views, cell(0.56, 0.74), &font(12.0), t.palette.dim, Align::Start)?;
+        ui.text_clipped(&at, cell(0.74, 1.0), &font(12.0), t.palette.dim, Align::Start)?;
+        y += 23.0;
     }
     if let Some(g) = &model.goal_status {
         ui.text_clipped(g, Rect::new(x + 6.0, y + 2.0, w - 12.0, 15.0), &font(11.0), t.palette.dim, Align::Start)?;
@@ -1211,7 +1414,7 @@ mod tests {
                 return y + ROW_H / 2.0;
             }
             y += ROW_H + 2.0;
-            if info.opacity.is_some() && s.on {
+            if info.opacity.is_some() && s.on && scene::has_slider(info.layer) {
                 y += 24.0;
             }
         }
@@ -1241,7 +1444,7 @@ mod tests {
         let m = team7_model();
         let mut chrome = Chrome::new("91".into(), None);
         chrome.set_run_dir(None);
-        chrome.sections = [true; 4];
+        chrome.sections = [true; N_SECTIONS];
         let mut app = App::new(false);
         let (w, h) = (1280u32, 900u32);
         draw(&mut chrome, &mut app, &m, w, h, now);
@@ -1450,6 +1653,115 @@ mod tests {
         }
         times.sort_by(f64::total_cmp);
         eprintln!("full frame {w}x{h}: p50 {:.1} ms p95 {:.1} ms", times[30], times[57]);
+    }
+
+    /// targets as marker_mapper sends them: confirmed (id, x, y) and candidates (id, x, y, label)
+    fn aruco_model(confirmed: &[(i32, f64, f64)], cands: &[(i32, f64, f64, &str)]) -> Model {
+        let now = Instant::now();
+        let mut m = team7_model();
+        let mk = |ns: &str, id: i32, x: f64, y: f64, text: &str| crate::model::Mk {
+            ns: ns.into(),
+            id,
+            kind: crate::model::ShapeKind::Points,
+            pts: vec![],
+            pos: (x, y),
+            color: [0, 0, 0, 255],
+            text: text.into(),
+        };
+        let mut v = Vec::new();
+        for &(id, x, y) in confirmed {
+            v.push(mk("target_confirmed", id, x, y, ""));
+            v.push(mk("target_confirmed_label", id, x, y, &format!("ID {id} ({x:.2}, {y:.2})")));
+        }
+        for &(id, x, y, label) in cands {
+            v.push(mk("target_tentative", id, x, y, ""));
+            v.push(mk("target_tentative_label", id, x, y, label));
+        }
+        m.put("/team7/targets", crate::model::Feed::Markers(v), now);
+        m
+    }
+
+    #[test]
+    fn the_header_shows_confirmed_targets_only_and_counts_the_candidates() {
+        let now = Instant::now();
+        let m = aruco_model(&[(7, 0.0, 2.0)], &[(3, 2.5, -0.5, "ID 3? 5v | angle 4/11 deg"), (4, 1.0, 0.5, "ID 4? 2v | views 2/5, wall 0/3"), (5, 3.0, 2.0, "ID 5? 1v | views 1/5")]);
+        let mut chrome = Chrome::new("91".into(), None);
+        chrome.set_run_dir(None);
+        let mut app = App::new(false);
+        let (w, h) = (1440u32, 800u32);
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        let px = draw(&mut chrome, &mut app, &m, w, h, now);
+        snapshot(&px, w, h, "header_aruco.png");
+        let slots: Vec<Rect> = layout_rects().into_iter().filter(|(n, _)| *n == "slot").map(|(_, r)| r).collect();
+        assert_eq!(slots.len(), 3);
+        let dot = |r: Rect| rgb(px[(r.y + 14.0) as usize * w as usize + (r.x + 12.0) as usize]);
+        // slot 1: the confirmed one (green); slots 2 and 3 stay empty although 3 candidates exist
+        assert!(near(px[(slots[0].y + 14.0) as usize * w as usize + (slots[0].x + 12.0) as usize], pal::TARGET_CONFIRMED, 30), "{:?}", dot(slots[0]));
+        for s in &slots[1..] {
+            let p = px[(s.y + 14.0) as usize * w as usize + (s.x + 12.0) as usize];
+            assert!(!near(p, pal::TARGET_TENTATIVE, 60) && !near(p, pal::TARGET_CONFIRMED, 60), "empty slot {:?}", rgb(p));
+        }
+        // the candidates are only a count chip, after the slots
+        let chip = layout_rects().into_iter().find(|(n, _)| *n == "candidates_chip").expect("candidate chip").1;
+        assert!(chip.x > slots[2].right());
+        // hovering it lists them, closest first
+        pointer(&mut chrome, f64::from(chip.x + 20.0), f64::from(chip.y + 10.0));
+        draw(&mut chrome, &mut app, &m, w, h, now);
+        let text = HOVER.with(|h| h.borrow().clone()).unwrap_or_default();
+        assert!(text.starts_with("ID 3? 5v: angle 4/11 deg; ID 5?"), "{text}");
+        // the dock titles carry the counts
+        assert!(chrome.layout.bodies[CANDIDATES].is_some() && chrome.layout.bodies[CONFIRMED].is_some());
+
+        // narrow: one "1/3 found" chip beside the candidate count
+        draw(&mut chrome, &mut app, &m, 520, 800, now);
+        let rects = layout_rects();
+        assert!(!rects.iter().any(|(n, _)| *n == "slot"));
+        assert!(rects.iter().any(|(n, _)| *n == "chip") && rects.iter().any(|(n, _)| *n == "candidates_chip"));
+        // narrower still: the candidate chip goes first, the found chip stays
+        draw(&mut chrome, &mut app, &m, 400, 800, now);
+        let rects = layout_rects();
+        assert!(rects.iter().any(|(n, _)| *n == "chip") && !rects.iter().any(|(n, _)| *n == "candidates_chip"));
+        // no candidate at all: no chip
+        let m2 = aruco_model(&[(7, 0.0, 2.0)], &[]);
+        draw(&mut chrome, &mut app, &m2, 1440, 800, now);
+        assert!(!layout_rects().iter().any(|(n, _)| *n == "candidates_chip"));
+    }
+
+    #[test]
+    fn a_click_on_a_target_row_centres_the_map_on_it() {
+        let now = Instant::now();
+        let m = aruco_model(&[(7, 0.0, 2.0)], &[(3, 2.5, -0.5, "ID 3? 5v | angle 4/11 deg"), (4, 1.0, 0.5, "ID 4? 2v | views 2/5, wall 0/3")]);
+        let mut chrome = Chrome::new("91".into(), None);
+        chrome.set_run_dir(None);
+        // only the two target sections open, so their rows are in view at 1280 x 800
+        chrome.sections = [false, false, true, true, false];
+        let mut app = App::new(false);
+        draw(&mut chrome, &mut app, &m, 1280, 800, now);
+        let px = draw(&mut chrome, &mut app, &m, 1280, 800, now);
+        snapshot(&px, 1280, 800, "dock_aruco.png");
+        let rows = target_rows();
+        // candidates closest first (3 has one rule left), then the confirmed one
+        assert_eq!(rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![3, 4, 7]);
+        // the "close" one is taller than a bare row: it has its chip line
+        assert!(rows[0].1.height > 30.0);
+        assert!(app.camera.follow && app.selected.is_none());
+
+        let (_, r) = rows[1];
+        click(&mut chrome, &mut app, &m, now, f64::from(r.x + 40.0), f64::from(r.y + 10.0));
+        assert_eq!(app.selected, Some(4));
+        assert!(!app.camera.follow, "follow off, or the robot pulls the view away again");
+        let px = draw(&mut chrome, &mut app, &m, 1280, 800, now);
+        snapshot(&px, 1280, 800, "dock_aruco_selected.png");
+        let (vp, rect) = app.viewport().unwrap();
+        let mid = vp.to_world(rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        assert!((mid.0 - 1.0).abs() < 1e-6 && (mid.1 - 0.5).abs() < 1e-6, "centre {mid:?}");
+
+        let (_, r) = target_rows()[2];
+        click(&mut chrome, &mut app, &m, now, f64::from(r.x + 40.0), f64::from(r.y + 10.0));
+        assert_eq!(app.selected, Some(7));
+        let (vp, rect) = app.viewport().unwrap();
+        let mid = vp.to_world(rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        assert!((mid.0 - 0.0).abs() < 1e-6 && (mid.1 - 2.0).abs() < 1e-6, "centre {mid:?}");
     }
 
     #[test]

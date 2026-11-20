@@ -83,8 +83,8 @@ pub struct App {
     pub cache: Cache,
     /// show the camera image big over the map
     pub camera_big: bool,
-    /// dock sections open: mission, camera, health, layers
-    pub sections: [bool; 4],
+    /// the target picked in the dock (centred, drawn larger, its rules on the map)
+    pub selected: Option<i32>,
     /// a goal to send (x, y, yaw), taken by the window
     pub pending_goal: Option<(f64, f64, f64)>,
     /// measured segment, world
@@ -110,7 +110,7 @@ impl App {
             allow_goals,
             cache: Cache::default(),
             camera_big: false,
-            sections: [true; 4],
+            selected: None,
             pending_goal: None,
             measure: None,
             goal_pose: None,
@@ -152,7 +152,7 @@ impl App {
     }
 
     /// put the subscriptions the layers need and the camera topic into the model, for the ROS
-    /// thread (it compares and subscribes or drops)
+    /// thread (it compares and subscribes or drops), and log the targets as they are now
     pub fn publish_wants(&self, model: &mut Model) {
         let wanted = self.layers.wanted();
         if model.wanted != wanted {
@@ -162,11 +162,32 @@ impl App {
         if model.camera_topic != cam {
             model.camera_topic = cam;
         }
+        // when each target was confirmed, and the views it had before
+        let targets = self.targets(model);
+        model.note_targets(&targets, Instant::now());
     }
 
-    /// the targets of the base Targets layer's topic
+    /// the targets: those of the Confirmed layer's topic, plus the candidates of the Candidates
+    /// layer's topic when it is pinned elsewhere
     pub fn targets(&self, model: &Model) -> Vec<crate::model::Target> {
-        self.layers.topic(Layer::Targets, model).map_or_else(Vec::new, |t| crate::model::targets_of(model.markers(&t)))
+        let of = |l: Layer| self.layers.topic(l, model).map_or_else(Vec::new, |t| crate::model::targets_of(model.markers(&t)));
+        let mut out = of(Layer::Confirmed);
+        if self.layers.topic(Layer::Candidates, model) != self.layers.topic(Layer::Confirmed, model) {
+            for c in of(Layer::Candidates).into_iter().filter(|c| !c.confirmed) {
+                if !out.iter().any(|t| t.id == c.id) {
+                    out.push(c);
+                }
+            }
+            out.sort_by_key(|t| t.id);
+        }
+        out
+    }
+
+    /// pick a target and put it in the middle of the map (follow off, zoom kept)
+    pub fn centre_on(&mut self, id: i32, x: f64, y: f64) {
+        self.selected = Some(id);
+        self.camera.follow = false;
+        self.camera.centre = Some((x, y));
     }
 
     /// the topic of the base map layer
@@ -334,7 +355,7 @@ impl App {
         self.frame = Some(Frame { bounds, rect, robot: model.robot.map(|r| (r.0, r.1)) });
         let (vp, _) = self.viewport().expect("frame just set");
         let grid_bounds = model.bounds(self.map_topic(model).as_deref());
-        scene::draw(ctx, model, &self.layers, &mut self.cache, &vp, grid_bounds)?;
+        scene::draw(ctx, model, &self.layers, &mut self.cache, &vp, grid_bounds, now, self.selected)?;
         tb4_draw::paint_prims(ctx, &self.tool_prims(&vp))?;
         if let Some((a, b)) = self.measure {
             let (d, ang) = ((b.0 - a.0).hypot(b.1 - a.1), (b.1 - a.1).atan2(b.0 - a.0).to_degrees());
@@ -560,7 +581,11 @@ pub(crate) mod tests {
         assert!(near(at(&px, 3.9, 0.5), pal::FRONTIER, 12));
         assert!(near(at(&px, 2.6, 2.4), pal::VIEW, 12));
         assert!(near(at(&px, 0.0, 2.0), pal::TARGET_CONFIRMED, 12));
-        assert!(near(at(&px, 2.5, -0.5), pal::TARGET_TENTATIVE, 12));
+        // a candidate is a hollow amber ring (7 px): amber on the ring, not in the middle
+        let (cx, cy) = vp.to_screen(2.5, -0.5);
+        let ring = px[cy as usize * w as usize + (cx + 7.0) as usize];
+        assert!(near(ring, pal::TARGET_TENTATIVE, 30), "candidate ring {:?}", rgb(ring));
+        assert!(!near(at(&px, 2.5, -0.5), pal::TARGET_TENTATIVE, 40), "hollow");
         let g = rgb(at(&px, -0.5, 0.0));
         assert!(g[0] > 200 && g[2] > 150 && g[1] < 190, "graph {g:?}");
         // robot faces north: its x axis (red) points up, the y axis (green) to the left
@@ -574,10 +599,19 @@ pub(crate) mod tests {
         let px = render(&mut app, &m, w, h);
         let disc = at(&px, 1.4, 0.6);
         assert!(!near(disc, pal::FREE, 8) && near(disc, pal::FREE, 120), "faint disc {:?}", rgb(disc));
-        // key 9 (local cost) hides it
-        app.key(KeyCode::Key9, Modifiers::default());
+        // turned off again, it is gone
+        app.layers.toggle(Layer::LocalCost);
         let px = render(&mut app, &m, w, h);
         assert!(near(at(&px, 1.4, 0.6), pal::FREE, 2));
+        // keys 7 and 8 toggle the confirmed targets and the candidates, 9 the global costmap
+        app.key(KeyCode::Key7, Modifiers::default());
+        app.key(KeyCode::Key8, Modifiers::default());
+        assert!(!app.shown(Layer::Confirmed) && !app.shown(Layer::Candidates));
+        app.key(KeyCode::Key7, Modifiers::default());
+        app.key(KeyCode::Key8, Modifiers::default());
+        app.key(KeyCode::Key9, Modifiers::default());
+        assert!(app.shown(Layer::GlobalCost));
+        app.key(KeyCode::Key9, Modifiers::default());
 
         // camera overlay shows the image over the map
         m.put("/team7/aruco/debug", Feed::Image(CameraFrame { width: 4, height: 3, rgba: [10, 200, 30, 255].repeat(12), seq: 1, at: Instant::now() }), Instant::now());

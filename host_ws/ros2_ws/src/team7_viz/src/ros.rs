@@ -14,6 +14,7 @@ use futures::future::AbortHandle;
 use futures::stream::{Stream, StreamExt};
 use futures::task::LocalSpawnExt;
 use r2r::QosProfile;
+use r2r::aruco_opencv_msgs::msg::ArucoDetection;
 use r2r::qos::{DurabilityPolicy, ReliabilityPolicy};
 use r2r::geometry_msgs::msg::{PoseStamped, Transform};
 use r2r::nav_msgs::msg::{OccupancyGrid, Odometry, Path};
@@ -24,7 +25,7 @@ use r2r::visualization_msgs::msg::{Marker, MarkerArray};
 use tb4_core::nalgebra::{Point3, Quaternion, Translation3, UnitQuaternion};
 use tb4_core::{GridMeta, Isometry3, Pose2, Stamp, TfBuffer};
 
-use crate::model::{CameraFrame, Feed, GraphTopic, GridLayer, MapData, Mk, Model, MsgKind, ShapeKind, Slot, Topic};
+use crate::model::{CameraFrame, Feed, GraphTopic, GridLayer, MapData, Mk, Model, MsgKind, Ray, ShapeKind, Slot, Topic};
 
 pub const MAP_FRAME: &str = "map";
 pub const BASE_FRAME: &str = "base_link";
@@ -212,6 +213,18 @@ impl Tf {
     fn points_at(&self, frame: &str, stamp: Stamp, pts: impl Iterator<Item = (f64, f64)>) -> Result<Vec<(f64, f64)>, String> {
         let t = self.to_map_at(frame, stamp)?;
         Ok(pts.map(|(x, y)| t * Point3::new(x, y, 0.0)).map(|p| (p.x, p.y)).collect())
+    }
+
+    /// detections in a camera frame (optical: z ahead) -> map rays: camera origin to the marker
+    fn rays_at(&self, frame: &str, stamp: Stamp, hits: impl Iterator<Item = (i32, [f64; 3])>, at: Instant) -> Result<Vec<Ray>, String> {
+        let t = self.to_map_at(frame, stamp)?;
+        let o = t * Point3::origin();
+        Ok(hits
+            .map(|(id, p)| {
+                let q = t * Point3::new(p[0], p[1], p[2]);
+                Ray { id, from: (o.x, o.y), to: (q.x, q.y), at }
+            })
+            .collect())
     }
 
     #[cfg(test)]
@@ -545,6 +558,21 @@ fn subscribe_feed(node: &mut r2r::Node, pool: &LocalPool, ctx: &Rc<Ctx>, topic: 
                 });
             })
         }
+        MsgKind::Detections => {
+            let s = node.subscribe::<ArucoDetection>(topic, viewer_qos(5))?;
+            spawn_abortable(pool, s, ctx, move |c, msg: ArucoDetection| {
+                c.update(|m, tf| {
+                    let now = Instant::now();
+                    m.count(&t);
+                    let h = &msg.header;
+                    let hits = msg.markers.iter().map(|k| (i32::from(k.marker_id), [k.pose.position.x, k.pose.position.y, k.pose.position.z]));
+                    match tf.rays_at(&h.frame_id, Stamp::from_ros(h.stamp.sec, h.stamp.nanosec), hits, now) {
+                        Ok(r) => m.add_rays(&t, r, now),
+                        Err(e) => m.tf_problem = Some((e, now)),
+                    }
+                });
+            })
+        }
     })
 }
 
@@ -675,6 +703,22 @@ mod tests {
         assert_eq!(image_rgba(&mono).unwrap().2, vec![9, 9, 9, 255]);
         let short = Image { width: 4, height: 4, step: 12, encoding: "rgb8".into(), data: vec![0; 10], ..Image::default() };
         assert!(image_rgba(&short).is_none());
+    }
+
+    #[test]
+    fn detections_in_the_optical_frame_become_map_rays() {
+        let mut tf = Tf::new();
+        tf.insert("map", "base_link", Stamp(1), t(1.0, std::f64::consts::FRAC_PI_2), false);
+        // the usual optical frame: z ahead (base x), x right (base -y), y down (base -z)
+        let optical = UnitQuaternion::from_euler_angles(-std::f64::consts::FRAC_PI_2, 0.0, -std::f64::consts::FRAC_PI_2);
+        tf.insert("base_link", "oakd_rgb_camera_optical_frame", Stamp(0), Isometry3::from_parts(Translation3::new(0.1, 0.0, 0.2), optical), true);
+        let at = Instant::now();
+        let r = tf.rays_at("oakd_rgb_camera_optical_frame", Stamp::LATEST, [(5, [0.0, 0.0, 2.0])].into_iter(), at).unwrap();
+        // the robot at (1, 0) faces +y: the camera is 0.1 m ahead, a marker 2 m ahead of it
+        assert_eq!(r[0].id, 5);
+        assert!((r[0].from.0 - 1.0).abs() < 1e-9 && (r[0].from.1 - 0.1).abs() < 1e-9, "{:?}", r[0].from);
+        assert!((r[0].to.0 - 1.0).abs() < 1e-9 && (r[0].to.1 - 2.1).abs() < 1e-9, "{:?}", r[0].to);
+        assert!(tf.rays_at("nowhere", Stamp::LATEST, std::iter::empty(), at).is_err());
     }
 
     #[test]

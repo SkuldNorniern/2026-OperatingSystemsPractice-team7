@@ -7,6 +7,7 @@
 //! e.g. two paths, or `/scan` and a filtered scan.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use aurea::AureaResult;
 use aurea::render::{DrawingContext, Font, Image, Point};
@@ -26,7 +27,12 @@ pub enum Layer {
     Trajectory,
     Frontiers,
     Goal,
-    Targets,
+    /// ArUco ids seen but not confirmed
+    Candidates,
+    /// confirmed targets only
+    Confirmed,
+    /// raw detections of the current camera frame
+    Detections,
     Views,
     SlamGraph,
     Robot,
@@ -58,17 +64,20 @@ const fn info(layer: Layer, key: &'static str, name: &'static str, legend: &'sta
 /// default costmap opacity: readable over the map, walls stay on top
 pub const COST_OPACITY: f32 = 0.35;
 
-/// all base layers in panel order; the first nine toggle with keys 1-9. Costmaps start off.
-pub const LAYERS: [LayerInfo; 14] = [
+/// all base layers in panel order; the first nine toggle with keys 1-9. Costmaps and the raw
+/// detections start off.
+pub const LAYERS: [LayerInfo; 16] = [
     info(Layer::Map, "map", "Map", "free, wall, unknown", true, None, Some(Slot::Map), Some(MsgKind::Grid)),
     info(Layer::Scan, "scan", "Scan", "laser points", true, None, Some(Slot::Scan), Some(MsgKind::Scan)),
     info(Layer::Path, "plan", "Plan", "global path", true, None, Some(Slot::Plan), Some(MsgKind::Path)),
     info(Layer::Trajectory, "local_plan", "Local plan", "MPPI / controller path", true, None, Some(Slot::Trajectory), Some(MsgKind::Path)),
     info(Layer::Frontiers, "frontiers", "Frontiers", "exploration goals", true, None, Some(Slot::Frontiers), Some(MsgKind::Markers)),
     info(Layer::Goal, "goal", "Goal", "active goal", true, None, Some(Slot::Goal), Some(MsgKind::Pose)),
-    info(Layer::Targets, "targets", "Targets", "tentative / confirmed", true, None, Some(Slot::Targets), Some(MsgKind::Markers)),
+    info(Layer::Confirmed, "confirmed", "Confirmed", "confirmed targets", true, Some(1.0), Some(Slot::Targets), Some(MsgKind::Markers)),
+    info(Layer::Candidates, "candidates", "Candidates", "ArUco ids seen, not confirmed", true, Some(1.0), Some(Slot::Targets), Some(MsgKind::Markers)),
     info(Layer::GlobalCost, "global_cost", "Global costmap", "low .. high cost", false, Some(COST_OPACITY), Some(Slot::GlobalCost), Some(MsgKind::Grid)),
     info(Layer::LocalCost, "local_cost", "Local cost", "around the robot", false, Some(COST_OPACITY), Some(Slot::LocalCost), Some(MsgKind::Grid)),
+    info(Layer::Detections, "detections", "ArUco detections", "camera hits now", false, None, Some(Slot::Detections), Some(MsgKind::Detections)),
     info(Layer::Robot, "robot", "Robot", "pose, x/y axes", true, None, None, None),
     info(Layer::Views, "camera_views", "Camera views", "planned view poses", true, None, Some(Slot::Views), Some(MsgKind::Markers)),
     info(Layer::SlamGraph, "slam_graph", "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph), Some(MsgKind::Markers)),
@@ -84,6 +93,20 @@ const EXTRA_COLORS: [Rgba; 4] = [[0, 200, 230, 255], [255, 150, 40, 255], [180, 
 
 pub fn info_of(l: Layer) -> &'static LayerInfo {
     LAYERS.iter().find(|i| i.layer == l).expect("every layer is listed")
+}
+
+/// costmaps get an opacity slider row; the other layers with an opacity a small button that
+/// steps through `OPACITY_STEPS`, so the list stays short
+pub fn has_slider(l: Layer) -> bool {
+    matches!(l, Layer::GlobalCost | Layer::LocalCost)
+}
+
+pub const OPACITY_STEPS: [f32; 3] = [1.0, 0.6, 0.3];
+
+/// the step after `o`
+pub fn next_opacity(o: f32) -> f32 {
+    let i = OPACITY_STEPS.iter().position(|s| (s - o).abs() < 0.05).map_or(0, |i| (i + 1) % OPACITY_STEPS.len());
+    OPACITY_STEPS[i]
 }
 
 pub fn index(l: Layer) -> usize {
@@ -273,7 +296,7 @@ fn grid_lines(bounds: [f64; 4], vp: &Viewport) -> Vec<Prim> {
 }
 
 /// the drawing order of the kinds over the map images
-const ORDER: [Layer; 11] = [
+const ORDER: [Layer; 13] = [
     Layer::Trail,
     Layer::SlamGraph,
     Layer::Path,
@@ -281,14 +304,45 @@ const ORDER: [Layer; 11] = [
     Layer::Frontiers,
     Layer::Views,
     Layer::Goal,
-    Layer::Targets,
+    Layer::Detections,
+    Layer::Candidates,
+    Layer::Confirmed,
     Layer::Scan,
     Layer::Robot,
     Layer::Map,
 ];
 
-/// everything over the map images, in drawing order
-pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
+/// `c` with its alpha scaled by `o`
+fn faded(c: Rgba, o: f32) -> Rgba {
+    [c[0], c[1], c[2], (f32::from(c[3]) * o.clamp(0.0, 1.0)).round() as u8]
+}
+
+/// a candidate: hollow amber ring and "id?"; the selected one larger, with its failing rules
+fn candidate_prims(p: (f32, f32), tg: &model::Target, selected: bool, o: f32) -> Vec<Prim> {
+    let c = faded(pal::TARGET_TENTATIVE, o);
+    let r = if selected { 10.0 } else { 7.0 };
+    let mut out = vec![
+        Prim::Circle { c: p, r: r + 1.5, fill: None, stroke: Some((faded(pal::ROBOT_EDGE, o), 1.5)) },
+        Prim::Circle { c: p, r, fill: None, stroke: Some((c, 2.5)) },
+    ];
+    out.extend(prim::outlined_text((p.0 + r + 3.0, p.1 - r + 2.0), &format!("{}?", tg.id), c, 12.0));
+    if selected && !tg.reasons.is_empty() {
+        out.extend(prim::outlined_text((p.0 + r + 3.0, p.1 + r + 10.0), &tg.reasons.join(", "), faded(pal::TEXT, o), 11.0));
+    }
+    out
+}
+
+/// a confirmed target: solid green, id and position
+fn confirmed_prims(p: (f32, f32), tg: &model::Target, selected: bool, o: f32) -> Vec<Prim> {
+    let c = faded(pal::TARGET_CONFIRMED, o);
+    let r = if selected { 9.0 } else { 7.0 };
+    let mut out = vec![Prim::Circle { c: p, r, fill: Some(c), stroke: Some((faded(pal::ROBOT_EDGE, o), 1.5)) }];
+    out.extend(prim::outlined_text((p.0 + r + 3.0, p.1 - r - 2.0), &format!("ID {} ({:.2}, {:.2})", tg.id, tg.x, tg.y), c, 13.0));
+    out
+}
+
+/// everything over the map images, in drawing order. `selected`: the target id picked in the dock
+pub fn prims(model: &Model, layers: &Layers, vp: &Viewport, now: Instant, selected: Option<i32>) -> Vec<Prim> {
     let at = |&(x, y): &(f64, f64)| vp.to_screen(x, y);
     let mut out = Vec::new();
     for kind in ORDER {
@@ -326,10 +380,36 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
                         out.extend(prim::goal(at(&g)));
                     }
                 }
-                Layer::Targets => {
-                    for tg in model::targets_of(model.markers(t)) {
-                        let (c, label) = if tg.confirmed { (pal::TARGET_CONFIRMED, format!("ID {}", tg.id)) } else { (pal::TARGET_TENTATIVE, format!("ID {}?", tg.id)) };
-                        out.extend(prim::target(at(&(tg.x, tg.y)), 6.0, &label, c));
+                Layer::Candidates => {
+                    for tg in model::candidates(&model::targets_of(model.markers(t))).iter().rev() {
+                        out.extend(candidate_prims(at(&(tg.x, tg.y)), tg, selected == Some(tg.id), s.opacity));
+                    }
+                }
+                Layer::Confirmed => {
+                    for tg in model::confirmed(&model::targets_of(model.markers(t))) {
+                        out.extend(confirmed_prims(at(&(tg.x, tg.y)), &tg, selected == Some(tg.id), s.opacity));
+                    }
+                }
+                Layer::Detections => {
+                    let rays = model.rays(t);
+                    for (k, r) in rays.iter().enumerate() {
+                        // the line back to the camera only for the newest hit of an id
+                        let newest = !rays[k + 1..].iter().any(|o| o.id == r.id);
+                        let age = now.saturating_duration_since(r.at).as_secs_f32() / model::RAY_FOR.as_secs_f32();
+                        if age >= 1.0 {
+                            continue;
+                        }
+                        let c = faded(pal::DETECTION, 1.0 - age * 0.8);
+                        // a tick along the bearing, ending at the estimated marker position
+                        let (a, b) = (at(&r.from), at(&r.to));
+                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                        let l = dx.hypot(dy).max(1e-3);
+                        let tick = 18.0f32.min(l);
+                        out.push(Prim::Line { a: (b.0 - dx / l * tick, b.1 - dy / l * tick), b, color: c, width: 2.0, dashed: false });
+                        if newest {
+                            out.push(Prim::Line { a, b, color: faded(c, 0.5), width: 1.0, dashed: true });
+                            out.extend(prim::outlined_text((b.0 + 4.0, b.1 + 12.0), &r.id.to_string(), c, 11.0));
+                        }
                     }
                 }
                 Layer::Scan => {
@@ -362,7 +442,8 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport) -> Vec<Prim> {
 }
 
 /// one frame of the map view in `ctx` (the whole context is the view)
-pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache: &mut Cache, vp: &Viewport, grid_bounds: [f64; 4]) -> AureaResult<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache: &mut Cache, vp: &Viewport, grid_bounds: [f64; 4], now: Instant, selected: Option<i32>) -> AureaResult<()> {
     let place = |g: &GridLayer| g.grid.as_ref().map(|m| grid_layer(m, vp));
     // maps: images now, their walls again after the costmaps and the grid
     let mut walls = Vec::new();
@@ -387,7 +468,7 @@ pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache:
     for (w, l) in &walls {
         tb4_draw::draw_map(ctx, w, l)?;
     }
-    tb4_draw::paint_prims(ctx, &prims(model, layers, vp))
+    tb4_draw::paint_prims(ctx, &prims(model, layers, vp, now, selected))
 }
 
 /// scale bar bottom left and, when the view is turned, a north arrow top right
@@ -423,9 +504,11 @@ pub fn symbol(l: Layer, c: (f32, f32)) -> Vec<Prim> {
         Layer::Frontiers => vec![prim::dot(c, 4.0, pal::FRONTIER)],
         Layer::Views => vec![square(0.0, pal::VIEW)],
         Layer::Goal => prim::goal(c).to_vec(),
-        Layer::Targets => vec![
-            Prim::Circle { c: (x - 6.0, y), r: 4.5, fill: Some(pal::TARGET_TENTATIVE), stroke: Some((pal::ROBOT_EDGE, 1.0)) },
-            Prim::Circle { c: (x + 6.0, y), r: 4.5, fill: Some(pal::TARGET_CONFIRMED), stroke: Some((pal::ROBOT_EDGE, 1.0)) },
+        Layer::Candidates => vec![Prim::Circle { c, r: 5.5, fill: None, stroke: Some((pal::TARGET_TENTATIVE, 2.0)) }],
+        Layer::Confirmed => vec![Prim::Circle { c, r: 5.5, fill: Some(pal::TARGET_CONFIRMED), stroke: Some((pal::ROBOT_EDGE, 1.0)) }],
+        Layer::Detections => vec![
+            Prim::Line { a: (x - 10.0, y + 4.0), b: (x + 6.0, y - 2.0), color: pal::DETECTION, width: 1.0, dashed: true },
+            Prim::Line { a: (x + 1.0, y), b: (x + 9.0, y - 3.0), color: pal::DETECTION, width: 2.0, dashed: false },
         ],
         Layer::SlamGraph => vec![
             Prim::Line { a: (x - 9.0, y + 3.0), b: (x + 9.0, y - 3.0), color: pal::SLAM_GRAPH, width: 1.0, dashed: false },
@@ -496,6 +579,52 @@ mod tests {
         // a pinned topic missing from the graph is still offered, marked
         let gone = topic_choices(&m, MsgKind::Path, &Binding::Pinned("/old_path".into()), None, now);
         assert!(gone.labels[gone.selected].contains("no publisher"));
+    }
+
+    #[test]
+    fn candidates_and_confirmed_are_separate_layers() {
+        let mut m = scene();
+        let mut app = fixed();
+        let (w, h) = (900u32, 600u32);
+        render(&mut app, &m, w, h);
+        let (vp, _) = app.viewport().unwrap();
+        let px_at = |px: &[u32], x: f64, y: f64, dx: f32| {
+            let (sx, sy) = vp.to_screen(x, y);
+            px[sy as usize * w as usize + (sx + dx) as usize]
+        };
+        // scene(): 7 confirmed at (0, 2), 3 a candidate at (2.5, -0.5)
+        let px = render(&mut app, &m, w, h);
+        assert!(near(px_at(&px, 0.0, 2.0, 0.0), pal::TARGET_CONFIRMED, 20));
+        assert!(near(px_at(&px, 2.5, -0.5, 7.0), pal::TARGET_TENTATIVE, 30));
+        // candidates off: the confirmed one stays
+        app.layers.toggle(Layer::Candidates);
+        let px = render(&mut app, &m, w, h);
+        assert!(!near(px_at(&px, 2.5, -0.5, 7.0), pal::TARGET_TENTATIVE, 60));
+        assert!(near(px_at(&px, 0.0, 2.0, 0.0), pal::TARGET_CONFIRMED, 20));
+        // confirmed off, candidates on at 30 %: a fainter ring, no green
+        app.layers.toggle(Layer::Candidates);
+        app.layers.toggle(Layer::Confirmed);
+        let ci = index(Layer::Candidates);
+        app.layers.list[ci].opacity = next_opacity(next_opacity(1.0));
+        assert_eq!(app.layers.list[ci].opacity, 0.3);
+        let px = render(&mut app, &m, w, h);
+        assert!(!near(px_at(&px, 0.0, 2.0, 0.0), pal::TARGET_CONFIRMED, 60));
+        let ring = px_at(&px, 2.5, -0.5, 7.0);
+        assert!(!near(ring, pal::TARGET_TENTATIVE, 30) && rgb(ring)[0] > rgb(ring)[2], "faint ring {:?}", rgb(ring));
+        assert_eq!(next_opacity(0.3), 1.0);
+
+        // raw detections: off by default; on, a fresh tick shows at the marker, an old one not
+        assert!(!app.layers.shown(Layer::Detections));
+        app.layers.toggle(Layer::Detections);
+        let now = Instant::now();
+        m.graph = graph(&[("/aruco_detections", "aruco_opencv_msgs/msg/ArucoDetection", 1)]);
+        m.add_rays("/aruco_detections", vec![model::Ray { id: 9, from: (0.5, 0.5), to: (2.0, 0.5), at: now }], now);
+        let px = render(&mut app, &m, w, h);
+        assert!(near(px_at(&px, 2.0, 0.5, -3.0), pal::DETECTION, 40), "tick {:?}", rgb(px_at(&px, 2.0, 0.5, -3.0)));
+        let later = now + model::RAY_FOR + std::time::Duration::from_millis(10);
+        m.add_rays("/aruco_detections", vec![], later);
+        let px = render(&mut app, &m, w, h);
+        assert!(!near(px_at(&px, 2.0, 0.5, -3.0), pal::DETECTION, 40));
     }
 
     #[test]

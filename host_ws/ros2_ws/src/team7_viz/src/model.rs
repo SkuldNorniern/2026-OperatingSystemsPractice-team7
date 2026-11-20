@@ -1,7 +1,7 @@
 //! What the viewer knows about the run, all in the map frame. Filled by the ROS thread (`ros`),
 //! read by the window (`app`, `gui`). No ROS types here, so it is tested and drawn without a ROS graph.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use tb4_core::GridMeta;
@@ -75,6 +75,8 @@ pub enum Slot {
     Targets,
     SlamGraph,
     Camera,
+    /// the ArUco detector's raw hits (the current camera frame)
+    Detections,
     /// the NavigateToPose action server for the 2D Goal tool
     NavAction,
 }
@@ -95,6 +97,7 @@ impl Slot {
             Slot::Targets => &["/team7/targets"],
             Slot::SlamGraph => &["/team7/slam/graph", "/slam_toolbox/graph_visualization"],
             Slot::Camera => &["/team7/aruco/debug", "/aruco_tracker/debug"],
+            Slot::Detections => &["/aruco_detections"],
             Slot::NavAction => &["/team7/navigate_to_pose", "/navigate_to_pose"],
         }
     }
@@ -129,7 +132,7 @@ impl Topic {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub id: i32,
     pub x: f64,
@@ -137,7 +140,37 @@ pub struct Target {
     pub confirmed: bool,
     /// views so far, from the tentative label ("ID 3? 2v")
     pub views: Option<u32>,
+    /// rules a candidate still fails, from its label after " | " ("wall 1/3", "angle 4/11 deg")
+    pub reasons: Vec<String>,
 }
+
+impl Target {
+    /// one rule left: about to confirm
+    pub fn close(&self) -> bool {
+        !self.confirmed && self.reasons.len() == 1
+    }
+}
+
+/// what the viewer saw of a target id over the run: the most views it had as a candidate, and
+/// when it was first seen confirmed
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Seen {
+    pub views: Option<u32>,
+    pub confirmed_at: Option<Instant>,
+}
+
+/// one detection from the camera, in the map frame: the camera position and where the marker is
+/// estimated, for a short bearing tick
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ray {
+    pub id: i32,
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    pub at: Instant,
+}
+
+/// a detection tick is drawn this long, fading
+pub const RAY_FOR: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapData {
@@ -199,6 +232,7 @@ pub enum MsgKind {
     Markers,
     Pose,
     Image,
+    Detections,
 }
 
 impl MsgKind {
@@ -211,6 +245,7 @@ impl MsgKind {
             MsgKind::Markers => "visualization_msgs/msg/MarkerArray",
             MsgKind::Pose => "geometry_msgs/msg/PoseStamped",
             MsgKind::Image => "sensor_msgs/msg/Image",
+            MsgKind::Detections => "aruco_opencv_msgs/msg/ArucoDetection",
         }
     }
 }
@@ -245,6 +280,8 @@ pub enum Feed {
     Markers(Vec<Mk>),
     Pose(Option<(f64, f64)>),
     Image(CameraFrame),
+    /// detection ticks of the last `RAY_FOR`
+    Rays(Vec<Ray>),
 }
 
 /// everything drawn, in the map frame. Data is kept per topic, so a layer can switch topics
@@ -283,6 +320,8 @@ pub struct Model {
     pub camera_topic: Option<String>,
     /// the camera topic's last frames, oldest first, so a burst is still shown frame by frame
     pub camera_queue: VecDeque<CameraFrame>,
+    /// per target id: most views as a candidate, when it was confirmed (`note_targets`)
+    pub target_log: BTreeMap<i32, Seen>,
 }
 
 impl Model {
@@ -341,6 +380,38 @@ impl Model {
         match self.feeds.get(topic) {
             Some(Feed::Pose(p)) => *p,
             _ => None,
+        }
+    }
+
+    pub fn rays(&self, topic: &str) -> &[Ray] {
+        match self.feeds.get(topic) {
+            Some(Feed::Rays(r)) => r,
+            _ => &[],
+        }
+    }
+
+    /// add the detections of one camera frame, dropping ticks older than `RAY_FOR`
+    pub fn add_rays(&mut self, topic: &str, rays: Vec<Ray>, now: Instant) {
+        if let Feed::Rays(v) = self.feed_mut(topic, now, || Feed::Rays(Vec::new())) {
+            v.retain(|r| now.saturating_duration_since(r.at) < RAY_FOR);
+            v.extend(rays);
+        }
+    }
+
+    /// remember the targets as they are now: a candidate's views, and the moment an id is first
+    /// seen confirmed. Ids no longer published are forgotten (a replay restarted, a target lost).
+    pub fn note_targets(&mut self, targets: &[Target], now: Instant) {
+        self.target_log.retain(|id, _| targets.iter().any(|t| t.id == *id));
+        for t in targets {
+            let s = self.target_log.entry(t.id).or_insert(Seen { views: None, confirmed_at: None });
+            if t.confirmed {
+                s.confirmed_at.get_or_insert(now);
+            } else {
+                s.confirmed_at = None;
+                if t.views.is_some() {
+                    s.views = s.views.max(t.views);
+                }
+            }
         }
     }
 
@@ -515,9 +586,13 @@ pub fn view_points(mks: &[Mk]) -> Vec<(f64, f64)> {
     mks.iter().filter(|m| m.ns == "camera_views").flat_map(|m| m.pts.iter().copied()).collect()
 }
 
-/// views from a tentative label "ID 3? 2v", also with the failing rules after " | "
-fn label_views(text: &str) -> Option<u32> {
-    text.split(" | ").next()?.split_whitespace().last()?.strip_suffix('v')?.parse().ok()
+/// views and failing rules from a tentative label: "ID 3? 2v", or with the rules after " | "
+/// ("ID 3? 5v | wall 1/3, angle 4/11 deg")
+pub fn parse_label(text: &str) -> (Option<u32>, Vec<String>) {
+    let (head, rules) = text.split_once(" | ").unwrap_or((text, ""));
+    let views = head.split_whitespace().last().and_then(|w| w.strip_suffix('v')).and_then(|v| v.parse().ok());
+    let reasons = rules.split(", ").map(str::trim).filter(|r| !r.is_empty()).map(str::to_owned).collect();
+    (views, reasons)
 }
 
 /// marker_mapper's targets: spheres give the position, tentative labels the view count
@@ -530,16 +605,29 @@ pub fn targets_of(mks: &[Mk]) -> Vec<Target> {
                 "target_tentative" => false,
                 _ => return None,
             };
-            Some(Target { id: m.id, x: m.pos.0, y: m.pos.1, confirmed, views: None })
+            Some(Target { id: m.id, x: m.pos.0, y: m.pos.1, confirmed, views: None, reasons: Vec::new() })
         })
         .collect();
     for m in mks.iter().filter(|m| m.ns == "target_tentative_label") {
         if let Some(t) = out.iter_mut().find(|t| t.id == m.id && !t.confirmed) {
-            t.views = label_views(&m.text);
+            (t.views, t.reasons) = parse_label(&m.text);
         }
     }
     out.sort_by_key(|t| t.id);
     out
+}
+
+/// the candidates (seen, not confirmed), closest to confirming first: fewest rules left (a label
+/// without rules, from an older mapper, last), then most views, then id
+pub fn candidates(targets: &[Target]) -> Vec<Target> {
+    let mut v: Vec<Target> = targets.iter().filter(|t| !t.confirmed).cloned().collect();
+    v.sort_by_key(|t| (if t.reasons.is_empty() { usize::MAX } else { t.reasons.len() }, std::cmp::Reverse(t.views), t.id));
+    v
+}
+
+/// the confirmed targets, by id
+pub fn confirmed(targets: &[Target]) -> Vec<Target> {
+    targets.iter().filter(|t| t.confirmed).cloned().collect()
 }
 
 fn mmss(d: Duration) -> String {
@@ -642,7 +730,88 @@ pub(crate) mod tests {
             mk("target_tentative", 3, (-1.0, 0.5), vec![], ""),
             mk("target_tentative_label", 3, (-1.0, 0.5), vec![], "ID 3? 2v"),
         ]);
-        assert_eq!(t, vec![Target { id: 3, x: -1.0, y: 0.5, confirmed: false, views: Some(2) }, Target { id: 7, x: 1.0, y: 2.0, confirmed: true, views: None }]);
+        assert_eq!(
+            t,
+            vec![
+                Target { id: 3, x: -1.0, y: 0.5, confirmed: false, views: Some(2), reasons: vec![] },
+                Target { id: 7, x: 1.0, y: 2.0, confirmed: true, views: None, reasons: vec![] }
+            ]
+        );
+    }
+
+    #[test]
+    fn labels_parse_with_and_without_reasons() {
+        assert_eq!(parse_label("ID 3? 2v"), (Some(2), vec![]));
+        assert_eq!(parse_label("ID 3? 5v | wall 1/3, angle 4/11 deg"), (Some(5), vec!["wall 1/3".to_owned(), "angle 4/11 deg".to_owned()]));
+        let all = "ID 12? 1v | views 1/5, wall 0/3, size unknown, angle 0/11 deg, rays disagree, spread 31 cm, views disagree";
+        let (v, r) = parse_label(all);
+        assert_eq!(v, Some(1));
+        assert_eq!(r.len(), 7);
+        assert_eq!(r[5], "spread 31 cm");
+        // a confirmed label has no view count
+        assert_eq!(parse_label("ID 3 (1.20, -0.50)"), (None, vec![]));
+        assert_eq!(parse_label("ID 3? 4v | "), (Some(4), vec![]));
+    }
+
+    fn tentative(id: i32, at: (f64, f64), label: &str) -> [Mk; 2] {
+        [mk("target_tentative", id, at, vec![], ""), mk("target_tentative_label", id, at, vec![], label)]
+    }
+
+    #[test]
+    fn candidates_and_confirmed_split_and_an_id_moves_over() {
+        let t0 = Instant::now();
+        let mut mks: Vec<Mk> = Vec::new();
+        mks.extend(tentative(3, (1.0, 1.0), "ID 3? 5v | angle 4/11 deg"));
+        mks.extend(tentative(4, (2.0, 1.0), "ID 4? 2v | views 2/5, wall 0/3"));
+        mks.extend(tentative(5, (3.0, 1.0), "ID 5? 7v | wall 1/3, spread 20 cm"));
+        mks.extend(tentative(6, (4.0, 1.0), "ID 6? 9v"));
+        mks.push(mk("target_confirmed", 7, (0.5, 2.0), vec![], ""));
+        mks.push(mk("target_confirmed_label", 7, (0.5, 2.0), vec![], "ID 7 (0.50, 2.00)"));
+        let all = targets_of(&mks);
+        let c = candidates(&all);
+        // one rule left first, then fewer rules / more views, rule-less (old mapper) last
+        assert_eq!(c.iter().map(|t| t.id).collect::<Vec<_>>(), vec![3, 5, 4, 6]);
+        assert!(c[0].close() && !c[1].close());
+        assert_eq!(confirmed(&all).iter().map(|t| t.id).collect::<Vec<_>>(), vec![7]);
+        let mut m = Model::default();
+        m.note_targets(&all, t0);
+        assert_eq!(m.target_log[&3], Seen { views: Some(5), confirmed_at: None });
+        assert!(m.target_log[&7].confirmed_at == Some(t0));
+
+        // id 3 gets its last view: it leaves the candidates and joins the confirmed, with its time
+        // and the views it had
+        let t1 = t0 + Duration::from_secs(4);
+        mks.retain(|k| k.id != 3);
+        mks.push(mk("target_confirmed", 3, (1.02, 0.98), vec![], ""));
+        let all = targets_of(&mks);
+        assert_eq!(candidates(&all).iter().map(|t| t.id).collect::<Vec<_>>(), vec![5, 4, 6]);
+        assert_eq!(confirmed(&all).iter().map(|t| t.id).collect::<Vec<_>>(), vec![3, 7]);
+        m.note_targets(&all, t1);
+        assert_eq!(m.target_log[&3], Seen { views: Some(5), confirmed_at: Some(t1) });
+        // a later frame keeps the first time
+        m.note_targets(&all, t1 + Duration::from_secs(1));
+        assert_eq!(m.target_log[&3].confirmed_at, Some(t1));
+        assert_eq!(m.target_log[&7].confirmed_at, Some(t0));
+        // a lost target goes back to candidate; an id no longer published is forgotten
+        mks.retain(|k| k.id != 7 && k.id != 6);
+        mks.extend(tentative(7, (0.5, 2.0), "ID 7? 8v | spread 12 cm"));
+        let all = targets_of(&mks);
+        m.note_targets(&all, t1 + Duration::from_secs(2));
+        assert_eq!(m.target_log[&7].confirmed_at, None);
+        assert!(!m.target_log.contains_key(&6));
+    }
+
+    #[test]
+    fn detection_ticks_fade_out() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        let ray = |id, at| Ray { id, from: (0.0, 0.0), to: (1.0, 0.0), at };
+        m.add_rays("/aruco_detections", vec![ray(3, t0)], t0);
+        m.add_rays("/aruco_detections", vec![ray(4, t0 + Duration::from_millis(100))], t0 + Duration::from_millis(100));
+        assert_eq!(m.rays("/aruco_detections").len(), 2);
+        let later = t0 + RAY_FOR + Duration::from_millis(50);
+        m.add_rays("/aruco_detections", vec![], later);
+        assert_eq!(m.rays("/aruco_detections").iter().map(|r| r.id).collect::<Vec<_>>(), vec![4]);
     }
 
     #[test]

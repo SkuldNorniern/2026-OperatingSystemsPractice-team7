@@ -11,7 +11,7 @@ use aurea::menu::MenuItem;
 use aurea::prelude::*;
 use aurea::render::{CpuRasterizer, Renderer, request_canvas_redraw};
 use team7_viz::app::{Action, App, Button as MouseKey, Tool};
-use team7_viz::chrome::Chrome;
+use team7_viz::chrome::{Chrome, HEALTH};
 use team7_viz::model::Model;
 use team7_viz::profile::{self, Profiles};
 use team7_viz::{outputs, ros, shots};
@@ -314,7 +314,7 @@ fn main() -> AureaResult<()> {
     let c = chrome.clone();
     view.add_item("Health details (H)", move || {
         let mut c = c.borrow_mut();
-        c.sections[3] = !c.sections[3];
+        c.sections[HEALTH] = !c.sections[HEALTH];
         redraw();
     })?;
     let mut tools_menu = bar.add_submenu("Tools")?;

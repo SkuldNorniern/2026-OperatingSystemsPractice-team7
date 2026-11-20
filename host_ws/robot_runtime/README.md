@@ -13,15 +13,13 @@ git fetch origin rust_base:refs/remotes/origin/rust_base
 git worktree add --detach ../2026-OperatingSystemsPractice-team7-rust_base origin/rust_base
 ```
 
-`mapping_algo_sj` 저장소 루트에서 다음 명령을 실행합니다. 방과 마커의 크기 및 ID는 실제 값으로 바꾸세요.
+Ubuntu 호스트에서 `bash host_ws/scripts/build_robot.sh`로 V1 라이브러리를 한 번 빌드한 뒤 `mapping_algo_sj` 저장소 루트에서 실행합니다.
 
 ```bash
-bash host_ws/scripts/build_robot.sh  # 이 Ubuntu 호스트에서 최초 한 번
-bash host_ws/scripts/run_rust_base_v1.sh --execute \
-  --room-width 19.85 --room-height 11.05 --marker-size 0.10 --marker-ids 8 19 29
+bash host_ws/scripts/run_rust_base_v1.sh
 ```
 
-`--execute`는 센서·지도·TF·Nav2와 `velocity_guard`를 확인한 뒤 같은 스택에서 주행을 시작합니다. 기본 30초(`--timeout`) 안에 연결이 준비되지 않으면 주행 없이 종료합니다. 연결만 확인하려면 `--check`를 실행하세요. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞추세요. V1은 자동 언도킹과 odom 초기화를 건너뜁니다. 화면 없는 Ubuntu에서는 `--no-rviz`를 붙이세요. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
+인자 없이 실행하면 스크립트의 설정을 사용합니다. 방 크기는 19.85 × 11.05 m, 마커 한 변은 0.10 m, 마커 ID는 8·19·29입니다. 실제 값이 다르면 스크립트 상단의 값을 바꾸세요. 실행기는 센서·지도·TF·Nav2와 `velocity_guard`를 확인한 뒤 같은 스택에서 주행을 시작합니다. 기본 30초 안에 연결이 준비되지 않으면 주행 없이 종료합니다. 연결만 확인하려면 `--check`를 실행하세요. 명령줄에서 설정을 직접 지정할 때는 `--execute`와 방·마커 설정을 함께 전달합니다. RViz를 끄려면 그 명령에 `--no-rviz`를 추가하세요. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞추세요. V1은 자동 언도킹과 odom 초기화를 건너뜁니다. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
 
 ## 독립 실행
 

@@ -1,13 +1,77 @@
 """Run the upstream rust_base demo with the V1 mission as its Nav2 client."""
 import argparse
+import fcntl
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from run_robot import ROOT, load_config, parser as mission_parser
+
+DEMO = Path('host_ws/scripts/run_demo.sh')
+WORKSPACE = Path('host_ws/ros2_ws')
+RUST_BASE_REF = 'refs/remotes/origin/rust_base'
+
+
+def has_rust_base_source(checkout):
+    launch = checkout / WORKSPACE / 'src/team7_bringup/launch/team7.launch.py'
+    return (checkout / DEMO).is_file() and launch.is_file()
+
+
+def has_rust_base_build(checkout):
+    install = checkout / WORKSPACE / 'install'
+    guard = Path('lib/team7_nodes/velocity_guard')
+    return (install / 'setup.bash').is_file() and any(
+        (prefix / guard).is_file() for prefix in (install / 'team7_nodes', install)
+    )
+
+
+def prepare_rust_base(root, override):
+    if override is not None:
+        checkout = override.expanduser().resolve()
+    else:
+        default = root.with_name(root.name + '-rust_base')
+        worktrees = subprocess.check_output(
+            ['git', 'worktree', 'list', '--porcelain', '-z'], cwd=root, text=True,
+        )
+        candidates = [default, root.parent / 'rust_base']
+        candidates.extend(Path(field.removeprefix('worktree '))
+                          for field in worktrees.split('\0') if field.startswith('worktree '))
+        for prefix in filter(None, os.environ.get('AMENT_PREFIX_PATH', '').split(os.pathsep)):
+            path = Path(prefix)
+            install = path if path.name == 'install' else path.parent
+            if install.parts[-3:] == ('host_ws', 'ros2_ws', 'install'):
+                candidates.append(install.parents[2])
+        candidates.extend(path for path in root.parent.iterdir()
+                          if root.name in path.name or 'rust_base' in path.name)
+        sources = [path for path in dict.fromkeys(candidates) if has_rust_base_source(path)]
+        fallback = sources[0] if sources else default
+        checkout = next((path for path in sources if has_rust_base_build(path)), fallback)
+
+    has_source = has_rust_base_source(checkout)
+    if not has_source and (override is not None or checkout.exists() or checkout.is_symlink()):
+        raise ValueError(f'{checkout} does not contain the rust_base demo. Set TEAM7_RUST_BASE to its checkout path.')
+    if has_source and has_rust_base_build(checkout):
+        return checkout
+    if shutil.which('colcon') is None:
+        raise ValueError('colcon is needed to build rust_base. See the Ubuntu setup in host_ws/robot_runtime/README.md.')
+
+    if not has_source:
+        local_ref = subprocess.run(['git', 'show-ref', '--verify', '--quiet', RUST_BASE_REF], cwd=root)
+        if local_ref.returncode != 0:
+            subprocess.run(['git', 'fetch', 'origin', f'refs/heads/rust_base:{RUST_BASE_REF}'], cwd=root, check=True)
+        subprocess.run(['git', 'worktree', 'add', '--detach', str(checkout), RUST_BASE_REF], cwd=root, check=True)
+
+    print(f'Building the rust_base ROS workspace at {checkout / WORKSPACE}', flush=True)
+    subprocess.run(['colcon', 'build', '--symlink-install', '--packages-select', 'team7_nodes', 'team7_bringup'],
+                   cwd=checkout / WORKSPACE, check=True)
+    if not has_rust_base_build(checkout):
+        raise ValueError(f'Build at {checkout / WORKSPACE} did not produce a ROS setup and velocity_guard.')
+    return checkout
 
 
 def stop(process):
@@ -27,7 +91,7 @@ def stop(process):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, add_help=False)
-    ap.add_argument('--rust-base', type=Path, default=ROOT.with_name(ROOT.name + '-rust_base'))
+    ap.add_argument('--rust-base', type=Path, help='Use this rust_base checkout (overrides TEAM7_RUST_BASE)')
     ap.add_argument('--no-prepare', action='store_true', help='Compatibility option. V1 always skips upstream robot preparation.')
     ap.add_argument('--no-record', action='store_true', help='Skip upstream rosbag recording')
     ap.add_argument('--no-rviz', action='store_true', help='Run without RViz')
@@ -39,13 +103,19 @@ def main():
     robot_parser = mission_parser()
     args = robot_parser.parse_args(mission_args)
     cfg = load_config(robot_parser, args)
-    checkout = stack_args.rust_base.expanduser().resolve()
-    demo = checkout / 'host_ws/scripts/run_demo.sh'
-    install = checkout / 'host_ws/ros2_ws/install/setup.bash'
-    if not demo.is_file() or not install.is_file():
-        ap.error(f'Expected a built rust_base checkout at {checkout}. See host_ws/robot_runtime/README.md or pass --rust-base.')
-    if not (ROOT / 'target/release/libtb4_aruco_gazebo.so').is_file() and args.execute:
-        ap.error('Build V1 on this host first with host_ws/scripts/build_robot.sh.')
+    checkout_env = os.environ.get('TEAM7_RUST_BASE')
+    override = stack_args.rust_base or (Path(checkout_env) if checkout_env else None)
+    lock_dir = Path(os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir())
+    try:
+        with (lock_dir / f'team7_v1_build_{os.getuid()}.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            checkout = prepare_rust_base(ROOT, override)
+            if args.execute and not (ROOT / 'target/release/libtb4_aruco_gazebo.so').is_file():
+                subprocess.run(['bash', str(ROOT / 'host_ws/scripts/build_robot.sh')], cwd=ROOT, check=True)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        ap.exit(2, f'Could not prepare the robot workspace: {exc}\nSee host_ws/robot_runtime/README.md.\n')
+    demo = checkout / DEMO
+    install = checkout / WORKSPACE / 'install/setup.bash'
     # Validate dependencies before starting the upstream demo.
     import action_msgs.msg, cv2, nav2_msgs.action, nav2_msgs.msg, numpy, rclpy, tf2_ros, visualization_msgs.msg
     if args.execute:

@@ -6,18 +6,13 @@
 
 RViz의 **V1 ArUco Targets**는 `/team7/v1/targets`를 읽습니다. 지도에서 첫 관측은 주황색, 두 프레임에서 위치가 일치한 마커는 초록색, 방문을 마친 마커는 파란색으로 표시합니다. RViz를 따로 열면 Fixed Frame을 `map`으로 두고 **MarkerArray**를 추가한 뒤 `/team7/v1/targets`와 **Transient Local**을 선택하세요. 데모가 시작할 때 해당 실행 폴더에 RViz와 감속 설정을 생성합니다.
 
-이미 빌드한 `rust_base` 작업공간이 있으면 `--rust-base /경로/기존-체크아웃`으로 지정하세요. 없으면 Ubuntu에서 저장소 루트 기준으로 아래처럼 별도 작업 트리를 만든 후, 그 작업 트리의 `host_ws/README.md`에 따라 ROS 작업공간을 한 번 빌드합니다.
-
-```bash
-git fetch origin rust_base:refs/remotes/origin/rust_base
-git worktree add --detach ../2026-OperatingSystemsPractice-team7-rust_base origin/rust_base
-```
-
-Ubuntu 호스트에서 `bash host_ws/scripts/build_robot.sh`로 V1 라이브러리를 한 번 빌드한 뒤 `mapping_algo_sj` 저장소 루트에서 실행합니다.
+ROS 2 Jazzy와 `rust_base` 빌드 의존성이 설치된 Ubuntu 호스트의 `mapping_algo_sj` 저장소 루트에서 실행합니다.
 
 ```bash
 bash host_ws/scripts/run_rust_base_v1.sh
 ```
+
+실행기는 이름이 비슷한 옆 폴더, 이 저장소에 등록된 Git 작업 트리, 현재 불러온 ROS 작업공간에서 빌드된 `rust_base`를 찾습니다. 기존 체크아웃이 따로 있으면 그 작업공간의 `install/setup.bash`를 불러오거나, `TEAM7_RUST_BASE`에 체크아웃 경로를 설정하세요. 체크아웃이 없으면 옆에 `<저장소 이름>-rust_base` 작업 트리를 만들고, 필요한 경우 `colcon`으로 `team7_nodes`와 `team7_bringup`을 빌드합니다. V1 Rust 라이브러리도 처음 필요할 때 빌드합니다. 빌드 도구와 ROS 패키지는 `rust_base` 브랜치의 `host_ws/README.md`에 나온 Ubuntu 준비 절차에 따라 설치합니다. V1에는 아래에 정리된 Python 패키지도 필요합니다.
 
 인자 없이 실행하면 스크립트의 설정을 사용합니다. 방 크기는 19.85 × 11.05 m, 마커 한 변은 0.10 m, 마커 ID는 8·19·29입니다. 실제 값이 다르면 스크립트 상단의 값을 바꾸세요. 실행기는 센서·지도·TF·Nav2와 `velocity_guard`를 확인한 뒤 같은 스택에서 주행을 시작합니다. 기본 30초 안에 연결이 준비되지 않으면 주행 없이 종료합니다. 연결만 확인하려면 `--check`를 실행하세요. 명령줄에서 설정을 직접 지정할 때는 `--execute`와 방·마커 설정을 함께 전달합니다. RViz를 끄려면 그 명령에 `--no-rviz`를 추가하세요. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞추세요. V1은 자동 언도킹과 odom 초기화를 건너뜁니다. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
 

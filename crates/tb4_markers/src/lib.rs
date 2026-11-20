@@ -280,6 +280,9 @@ pub struct TrackParams {
     pub pnp_sigma: f64,
     /// edge hit before any scale is learned: ray/pnp must be within this factor
     pub edge_ratio_gate: f64,
+    /// m, an edge hit this close to where earlier bearings cross is on the marker's face whatever
+    /// the pnp range says, and teaches the scale (spec: marker sizes differ, boxes have only edges)
+    pub edge_triangulation_gap: f64,
 }
 
 impl Default for TrackParams {
@@ -303,6 +306,7 @@ impl Default for TrackParams {
             wall_sigma: 0.03,
             pnp_sigma: 0.08,
             edge_ratio_gate: 1.5,
+            edge_triangulation_gap: 0.15,
         }
     }
 }
@@ -388,8 +392,17 @@ impl Tracker {
             }
         });
         let ratio = hit.map(|h| h.0 / pnp).filter(|r| *r <= p.range_ratio_gate && *r >= 1.0 / p.range_ratio_gate);
-        // only clean wall hits teach the scale
-        if let Some(r) = ratio.filter(|_| hit.is_some_and(|h| h.2 == Hit::Clean)) {
+        // edge hit where earlier bearings from other places cross: the marker is on this face, so a
+        // marker of another size on a box can still learn its scale (else it never gets a wall view)
+        let tri_agrees = hit.is_some_and(|h| {
+            h.2 == Hit::Edge
+                && self.estimates.get(&o.id).and_then(|v| triangulate(v)).is_some_and(|t| {
+                    t.spread >= tp.min_triangulation_spread.max(0.1)
+                        && (t.x - o.camera.0 - dx * h.0).hypot(t.y - o.camera.1 - dy * h.0) <= tp.edge_triangulation_gap
+                })
+        });
+        // clean wall hits and triangulated edge hits teach the scale
+        if let Some(r) = ratio.filter(|_| hit.is_some_and(|h| h.2 == Hit::Clean) || tri_agrees) {
             let v = self.scales.entry(o.id).or_default();
             v.push(r);
             if v.len() > self.params.max_history {
@@ -406,6 +419,7 @@ impl Tracker {
         // marker size close to configured one
         let hit = hit.filter(|h| {
             h.2 != Hit::Edge
+                || (tri_agrees && ratio.is_some())
                 || ratio.is_some_and(|q| match learned.or_else(|| self.any_scale()) {
                     Some(k) => (q / k - 1.0).abs() <= tp.scale_tolerance,
                     None => (1.0 / tp.edge_ratio_gate..=tp.edge_ratio_gate).contains(&q),
@@ -1201,6 +1215,23 @@ mod tests {
         let tg = t.target(3).unwrap();
         assert!(tg.confirmed, "{tg:?}");
         assert!((tg.x - 1.825).abs() < 0.03 && (tg.y - 0.45).abs() < 0.03, "{tg:?}");
+    }
+
+    #[test]
+    fn bigger_marker_on_a_box_face_confirms_once_bearings_cross() {
+        // marker printed 2x marker_size on a box face: pnp says half the range, so the edge gate
+        // alone drops every lidar hit and the scale is never learned. Driving sideways, the bearings
+        // cross at the face, the hits count and the size is learned
+        let g = box_map();
+        let p = LocateParams::default();
+        let mut t = Tracker::new(TrackParams { require_scale_all: true, ..Default::default() });
+        for k in 0..20 {
+            t.observe(Some(&g), &view_of(0.45, 0.5, -0.6 + 0.06 * k as f64), &p);
+        }
+        let tg = t.target(3).unwrap();
+        assert!(tg.confirmed, "{tg:?} {:?}", t.pending(3));
+        assert!((tg.x - 1.8).abs() < 0.05 && (tg.y - 0.45).abs() < 0.05, "{tg:?}");
+        assert!(t.scale(3).is_some_and(|k| (k - 2.0).abs() < 0.2), "{:?}", t.scale(3));
     }
 
     #[test]

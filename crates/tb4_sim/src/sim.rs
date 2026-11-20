@@ -197,8 +197,17 @@ impl SimConfig {
             "look_around_turns" => e.look_around_turns = x as u32,
             "camera_coverage" if x == 0.0 => e.coverage = None,
             "camera_coverage" => {}
-            "vx_max" => self.nav.mppi.vx_max = x,
-            "wz_max" => self.nav.mppi.wz_max = x,
+            // like the real chain: navigator, velocity_smoother and velocity_guard move together
+            "vx_max" => {
+                self.nav.mppi.vx_max = x;
+                self.chain.smoother.max_v = x;
+                self.chain.guard.max_forward = x;
+            }
+            "wz_max" => {
+                self.nav.mppi.wz_max = x;
+                self.chain.smoother.max_w = x;
+                self.chain.guard.max_turn = x;
+            }
             "path_switch_ratio" => self.nav.path_switch_ratio = x,
             "plan_with_scan" => self.nav.plan_with_scan = x != 0.0,
             "slow_on_tentative" => self.slow.enabled = x != 0.0,

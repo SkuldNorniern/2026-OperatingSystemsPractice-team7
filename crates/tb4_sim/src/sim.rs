@@ -159,7 +159,8 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 35] = [
+pub const SET_NAMES: [&str; 36] = [
+    "min_triangulation_spread",
     "min_free_fraction",
     "require_scale_all",
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "blacklist_max_duration", "turn_weight", "distance_weight",
@@ -217,6 +218,7 @@ impl SimConfig {
             "pnp_sigma" => self.vision.pnp_sigma = x,
             "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
             "require_scale_all" => self.track.require_scale_all = x != 0.0,
+            "min_triangulation_spread" => self.track.min_triangulation_spread = x,
             "min_free_fraction" => e.explore.min_free_fraction = x,
             "approach_markers" if x == 0.0 => e.approach = None,
             "approach_markers" => {

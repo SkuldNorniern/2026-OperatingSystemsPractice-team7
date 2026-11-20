@@ -20,7 +20,7 @@ pub struct SmootherParams {
 
 impl Default for SmootherParams {
     fn default() -> Self {
-        Self { max_v: 0.18, min_v: 0.0, max_w: 0.5, accel_v: 0.3, decel_v: 0.5, accel_w: 0.6, decel_w: 0.8, velocity_timeout: 1.0 }
+        Self { max_v: 0.26, min_v: 0.0, max_w: 0.7, accel_v: 0.3, decel_v: 0.5, accel_w: 0.6, decel_w: 0.8, velocity_timeout: 1.0 }
     }
 }
 
@@ -49,7 +49,7 @@ pub struct GuardParams {
 
 impl Default for GuardParams {
     fn default() -> Self {
-        Self { max_forward: 0.18, max_turn: 0.5, command_timeout: 0.5 }
+        Self { max_forward: 0.26, max_turn: 0.7, command_timeout: 0.5 }
     }
 }
 

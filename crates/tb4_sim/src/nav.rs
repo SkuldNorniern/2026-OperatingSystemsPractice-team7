@@ -48,8 +48,8 @@ impl NavParams {
                 samples: 1000,
                 horizon: 40,
                 threads: 4,
-                vx_max: 0.18,
-                wz_max: 0.5,
+                vx_max: 0.26,
+                wz_max: 0.7,
                 goal_tolerance_xy: 0.15,
                 goal_tolerance_yaw: 0.3,
                 ..MppiParams::default()

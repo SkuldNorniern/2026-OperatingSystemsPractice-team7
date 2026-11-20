@@ -30,6 +30,49 @@ pub struct DriveTracker {
     pub end_jump: Vec<f64>,
     /// same, time-aligned: this solve's pose at t+(H-1)dt vs the previous solve's at the same time (m)
     pub end_jitter: Vec<f64>,
+    /// moving below AT_CAP * cap, per cause (s), sampled per navigator tick
+    pub slow: std::collections::BTreeMap<&'static str, f64>,
+}
+
+/// what the sim knows at a navigator tick, to name why the robot moves below the cap
+#[derive(Debug, Clone, Copy)]
+pub struct SlowInput {
+    /// measured base speed, navigator command
+    pub v: f64,
+    pub nav_cmd: (f64, f64),
+    pub cap: f64,
+    pub rotating: bool,
+    /// /speed_limit active (marker_mapper slow_on_tentative)
+    pub limited: bool,
+    /// collision monitor scale
+    pub monitor: f64,
+    pub goal_dist: f64,
+    /// obstacle field clearance at the robot, and robot_radius + inflation of MPPI
+    pub clearance: f64,
+    pub obstacle_band: f64,
+}
+
+impl SlowInput {
+    /// first matching cause, in this order
+    pub fn cause(&self) -> &'static str {
+        if self.rotating {
+            "rotate mode"
+        } else if self.limited {
+            "marker speed limit"
+        } else if self.monitor < 1.0 {
+            "collision monitor"
+        } else if self.nav_cmd.0 >= AT_CAP * self.cap {
+            "ramp (command at cap)"
+        } else if self.goal_dist < 0.6 {
+            "goal approach"
+        } else if self.clearance < self.obstacle_band {
+            "obstacle cost band"
+        } else if self.nav_cmd.1.abs() > 0.35 {
+            "curve (|w| > 0.35)"
+        } else {
+            "other"
+        }
+    }
 }
 
 impl DriveTracker {
@@ -47,6 +90,13 @@ impl DriveTracker {
                 self.stop_turns += 1;
             }
             self.last_moving = Some(motion);
+        }
+    }
+
+    /// one navigator tick of `dt` with a goal active
+    pub fn on_slow(&mut self, dt: f64, s: &SlowInput) {
+        if s.v.abs() >= STILL_V && s.v.abs() < AT_CAP * s.cap {
+            *self.slow.entry(s.cause()).or_default() += dt;
         }
     }
 
@@ -95,6 +145,7 @@ pub struct DriveSummary {
     /// p95 of the trajectory endpoint movement per solve, raw and time-aligned (m)
     pub end_jump_p95: f64,
     pub end_jitter_p95: f64,
+    pub slow: std::collections::BTreeMap<&'static str, f64>,
 }
 
 impl DriveTracker {
@@ -109,6 +160,7 @@ impl DriveTracker {
             cmd_dv_p95: quantile(&self.dv, 0.95),
             end_jump_p95: quantile(&self.end_jump, 0.95),
             end_jitter_p95: quantile(&self.end_jitter, 0.95),
+            slow: self.slow.clone(),
         }
     }
 }

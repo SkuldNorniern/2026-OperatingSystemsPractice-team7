@@ -63,6 +63,6 @@ fn usage(msg: &str) -> ! {
         eprintln!("{msg}");
     }
     eprintln!("usage: run [--world studio|studio_glass|small] [--seconds 600] [--seed 1] [--perfect-pose] [--json FILE] [--log] [--ascii] [--set name=value]");
-    eprintln!("--set names: {}", SET_NAMES.join(" "));
+    eprintln!("--set names: {} mppi.<MppiParams field>", SET_NAMES.join(" "));
     std::process::exit(2)
 }

@@ -175,6 +175,10 @@ impl SimConfig {
     pub fn set(&mut self, kv: &str) -> Result<(), String> {
         let (k, v) = kv.split_once('=').ok_or(format!("--set {kv}: want name=value"))?;
         let x: f64 = v.parse().map_err(|_| format!("--set {kv}: not a number"))?;
+        // any MppiParams field, e.g. mppi.temperature=0.3 (vx_max / wz_max below also move the chain)
+        if let Some(f) = k.strip_prefix("mppi.") {
+            return self.nav.mppi.set(f, x).map_err(|e| format!("--set {kv}: {e}"));
+        }
         let e = &mut self.explorer;
         match k {
             "goal_timeout" => e.goal_timeout = x,
@@ -715,6 +719,21 @@ impl Sim {
         let goal = self.nav.goal().map(|g| (g.x, g.y));
         let key = crate::drive::path_key(self.nav.path(), goal);
         self.drive.on_nav(out.cmd.filter(|_| goal.is_some()), self.nav.state == NavState::Rotating, self.cfg.nav_period, self.nav.trajectory(), key);
+        if let Some(g) = goal {
+            let mp = &self.nav.p.mppi;
+            let slow = crate::drive::SlowInput {
+                v: self.robot.v,
+                nav_cmd: self.nav_cmd,
+                cap: mp.vx_max,
+                rotating: self.nav.state == NavState::Rotating,
+                limited: self.nav.speed_limit.1 > 0.0,
+                monitor: self.chain.monitor_ratio,
+                goal_dist: (g.0 - est.x).hypot(g.1 - est.y),
+                clearance: self.nav.obstacles().map_or(f64::INFINITY, |df| df.at(est.x, est.y) as f64),
+                obstacle_band: mp.robot_radius + mp.inflation,
+            };
+            self.drive.on_slow(self.cfg.nav_period, &slow);
+        }
         if let Some(f) = out.finished {
             self.nav_finished(f);
         }

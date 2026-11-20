@@ -88,6 +88,7 @@ pub fn team7_explorer_params() -> ExplorerParams {
     let cov = CoverageParams { half_fov: 0.52, range: 1.5, max_incidence: 1.3, standoff: 1.0, max_cluster_cells: 32, ..Default::default() };
     ExplorerParams {
         approach_budget: 0.0,
+        idle_fallback: false,
         goal_timeout: 120.0,
         progress_timeout: 15.0,
         progress_epsilon: 0.1,
@@ -110,6 +111,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
             goal_max_unknown: 0.15,
             revisit_radius: 0.0,
             revisit_penalty: 0.0,
+            gain_weight: 0.0,
+            gain_radius: 2.0,
                 min_free_fraction: 0.5,
         },
         coverage: Some(cov),
@@ -162,14 +165,14 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 42] = [
+pub const SET_NAMES: [&str; 45] = [
     "min_triangulation_spread",
     "min_free_fraction",
     "require_scale_all",
     "max_consistency", "scale_tolerance", "scale_min_samples",
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "blacklist_max_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
-    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "revisit_radius", "revisit_penalty", "approach_budget", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
+    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "revisit_radius", "revisit_penalty", "approach_budget", "gain_weight", "gain_radius", "idle_fallback", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
     "approach_markers", "approach_standoff", "approach_spread_deg", "approach_timeout",
 ];
@@ -204,6 +207,9 @@ impl SimConfig {
             "min_unknown_area" => e.explore.min_unknown_area = x,
             "revisit_radius" => e.explore.revisit_radius = x,
             "approach_budget" => e.approach_budget = x,
+            "gain_weight" => e.explore.gain_weight = x,
+            "gain_radius" => e.explore.gain_radius = x,
+            "idle_fallback" => e.idle_fallback = x != 0.0,
             "revisit_penalty" => e.explore.revisit_penalty = x,
             "min_frontier_cells" => e.explore.min_frontier_cells = x as usize,
             "look_around_turns" => e.look_around_turns = x as u32,

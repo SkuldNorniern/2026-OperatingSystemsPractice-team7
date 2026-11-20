@@ -88,6 +88,9 @@ pub struct MarkerRecord {
     pub id: u32,
     pub size: f64,
     pub first_readable: Option<f64>,
+    /// first time the explorer's camera coverage counted the marker's wall cell as seen; before
+    /// `first_readable` (or with it never read) the coverage claimed a wall the camera never read
+    pub coverage_seen: Option<f64>,
     pub first_within_2m: Option<f64>,
     /// camera frames the marker was readable in
     pub readable_frames: u64,
@@ -228,10 +231,10 @@ impl Metrics {
         let zones: Vec<String> = self.bumps_by_zone.iter().map(|(k, v)| format!("{k} {v}")).collect();
         let _ = writeln!(w, "collisions {}  bumps {} [{}]  rear contacts {}",
             self.collisions, self.bumps, zones.join(", "), self.rear_contacts);
-        let _ = writeln!(w, "markers:  id   size  readable  within 2 m  views  5 views  max px  closest");
+        let _ = writeln!(w, "markers:  id   size  readable  cov seen  within 2 m  views  5 views  max px  closest");
         for m in &self.markers {
-            let _ = writeln!(w, "        {:>4} {:5.2} {:>9} {:>11} {:>6} {:>8} {:7.1} {:8.2}",
-                m.id, m.size, opt(m.first_readable), opt(m.first_within_2m), m.views, opt(m.views5_at), m.max_side_px, m.closest);
+            let _ = writeln!(w, "        {:>4} {:5.2} {:>9} {:>9} {:>11} {:>6} {:>8} {:7.1} {:8.2}",
+                m.id, m.size, opt(m.first_readable), opt(m.coverage_seen), opt(m.first_within_2m), m.views, opt(m.views5_at), m.max_side_px, m.closest);
         }
         let _ = writeln!(w, "all markers readable at {} s, all within 2 m at {} s", opt(self.all_readable_at), opt(self.all_within_2m_at));
         let cm = |e: Option<f64>| e.map_or("-".into(), |e| format!("{:.1}", 100.0 * e));
@@ -290,8 +293,8 @@ impl Metrics {
         let _ = writeln!(w, "  \"rear_contacts\": {},", self.rear_contacts);
         let record = |m: &MarkerRecord| {
             let closest = if m.closest.is_finite() { format!("{:.3}", m.closest) } else { "null".into() };
-            format!("{{\"id\": {}, \"size\": {:.3}, \"first_readable\": {}, \"first_within_2m\": {}, \"readable_frames\": {}, \"views\": {}, \"views5_at\": {}, \"max_side_px\": {:.2}, \"closest_m\": {closest}, \"detections\": {}, \"first_tentative\": {}, \"first_confirmed\": {}, \"err_confirmed_m\": {}, \"err_end_m\": {}, \"confirmed_end\": {}, \"tracker_views\": {}}}",
-                m.id, m.size, json_opt(m.first_readable), json_opt(m.first_within_2m), m.readable_frames, m.views,
+            format!("{{\"id\": {}, \"size\": {:.3}, \"first_readable\": {}, \"coverage_seen\": {}, \"first_within_2m\": {}, \"readable_frames\": {}, \"views\": {}, \"views5_at\": {}, \"max_side_px\": {:.2}, \"closest_m\": {closest}, \"detections\": {}, \"first_tentative\": {}, \"first_confirmed\": {}, \"err_confirmed_m\": {}, \"err_end_m\": {}, \"confirmed_end\": {}, \"tracker_views\": {}}}",
+                m.id, m.size, json_opt(m.first_readable), json_opt(m.coverage_seen), json_opt(m.first_within_2m), m.readable_frames, m.views,
                 json_opt(m.views5_at), m.max_side_px, m.detections, json_opt(m.first_tentative), json_opt(m.first_confirmed),
                 json_opt(m.err_confirmed), json_opt(m.err_end), m.confirmed_end, m.tracker_views)
         };

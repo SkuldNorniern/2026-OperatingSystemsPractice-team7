@@ -470,6 +470,24 @@ impl Sim {
             let est = self.estimate();
             if let Some(m) = self.map.as_ref() {
                 self.explorer.update_coverage(m, (est.x, est.y, est.yaw));
+                // marker face cell (just behind the face) in the map frame: did coverage count it?
+                for (i, mk) in self.cfg.world.markers.iter().enumerate() {
+                    if self.m.markers[i].coverage_seen.is_some() {
+                        continue;
+                    }
+                    // the SLAM wall can sit a cell off the true face: any seen cell within 0.1 m counts
+                    let p = relative(self.cfg.world.start, Pose2::new(mk.pos.0, mk.pos.1, 0.0));
+                    let Some(c) = m.world_to_cell(p.x, p.y) else { continue };
+                    let near_seen = (-2i64..=2).any(|dy| {
+                        (-2i64..=2).any(|dx| {
+                            m.cell_checked(c.x as i64 + dx, c.y as i64 + dy)
+                                .is_some_and(|n| self.explorer.coverage().is_seen(m, n))
+                        })
+                    });
+                    if near_seen {
+                        self.m.markers[i].coverage_seen = Some(t);
+                    }
+                }
             }
         }
         if Self::due(&mut self.next_explore, t, self.cfg.explorer_period) {

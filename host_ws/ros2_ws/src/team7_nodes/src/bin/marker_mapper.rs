@@ -24,6 +24,9 @@ struct State {
     locate: LocateParams,
     map_frame: String,
     ignore_ids: Vec<i64>,
+    /// chair-barcode ids (ARUCO_ORIGINAL 0, 341, 682, 1023): never approached on sight, they only confirm
+    /// from a wall with a learned size
+    approach_ignore: Vec<i64>,
     csv_path: PathBuf,
     last_csv: String,
     out_dir: PathBuf,
@@ -32,6 +35,8 @@ struct State {
     slow_until: Option<Instant>,
     /// every detection in map frame, for replaying tracker offline (tb4_markers example replay)
     obs_log: Option<std::io::BufWriter<std::fs::File>>,
+    /// per observation: what the tracker made of it (estimate source, scale, consistency, confirmation)
+    track_log: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             locate,
             map_frame: p.string("map_frame", "map"),
             ignore_ids: p.i64_list("ignore_ids"),
+            approach_ignore: p.i64_list("approach_ignore_ids"),
             csv_path: out_dir.join(p.string("csv_name", "targets.csv")),
             last_csv: String::new(),
             out_dir: out_dir.clone(),
@@ -96,6 +102,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::create_dir_all(&out_dir).ok()?;
                 let mut f = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
                 writeln!(f, "stamp,id,cam_x,cam_y,cam_z,bear_x,bear_y,bear_z,pnp_range").ok()?;
+                Some(f)
+            }).flatten(),
+            track_log: p.bool("tracker_log", true).then(|| {
+                let path = out_dir.join("tracker_log.csv");
+                std::fs::create_dir_all(&out_dir).ok()?;
+                let mut f = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
+                writeln!(f, "stamp,id,est_x,est_y,source,pnp_range,views,ray_views,pnp_views,scaled_views,scale,consistency,sigma,confirmed").ok()?;
                 Some(f)
             }).flatten(),
         };
@@ -190,8 +203,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = writeln!(f, "{:.3},{id},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4}", t_img.0 as f64 * 1e-9,
                     origin.x, origin.y, origin.z, b.x, b.y, b.z, range);
             }
-            if let Some(e) = st.tracker.observe(st.grid.as_ref(), &obs, &st.locate) {
+            let est = st.tracker.observe(st.grid.as_ref(), &obs, &st.locate);
+            if let Some(e) = est.as_ref() {
                 st.stats[(e.source != Source::Raycast) as usize] += 1;
+            }
+            if let Some(f) = st.track_log.as_mut() {
+                let [ray, pnp, scaled] = st.tracker.sources(id);
+                let fused = tb4_markers::fuse(st.tracker.estimates(id));
+                let t = st.tracker.target(id);
+                let src = match est.as_ref().map(|e| e.source) {
+                    Some(Source::Raycast) => "ray",
+                    Some(Source::PnpRange) => "pnp",
+                    Some(Source::ScaledPnp) => "scaled",
+                    None => "none",
+                };
+                let _ = writeln!(f, "{:.3},{id},{:.3},{:.3},{src},{:.3},{},{ray},{pnp},{scaled},{},{:.2},{:.3},{}",
+                    t_img.0 as f64 * 1e-9,
+                    t.as_ref().map_or(0.0, |t| t.x), t.as_ref().map_or(0.0, |t| t.y),
+                    range,
+                    t.as_ref().map_or(0, |t| t.views),
+                    st.tracker.scale(id).map_or("na".to_owned(), |v| format!("{v:.3}")),
+                    fused.consistency, fused.sigma,
+                    t.as_ref().is_some_and(|t| t.confirmed));
             }
         }
         let targets = s.tracker.targets();
@@ -220,13 +253,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(f) = s.obs_log.as_mut() {
             let _ = f.flush();
         }
+        if let Some(f) = s.track_log.as_mut() {
+            let _ = f.flush();
+        }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets, |id| s.tracker.pending(id)));
         // marker id = aruco id, so the explorer keys approaches by id: without ids a jumping
         // estimate looked like a confirmation and the same chair label was approached 3 times
         let approach = MarkerArray {
             markers: targets
                 .iter()
-                .filter(|t| !t.confirmed && t.views >= 2)
+                .filter(|t| !t.confirmed && t.views >= 2 && !s.approach_ignore.contains(&t.id))
                 .filter_map(|t| {
                     let yaw = s.tracker.facing(t.id, s.grid.as_ref(), s.locate.occupied_threshold)?;
                     let mut m = team7_nodes::viz::base(&s.map_frame, "tentative", t.id as i32, team7_nodes::viz::SPHERE);

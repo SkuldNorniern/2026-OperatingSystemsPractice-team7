@@ -87,7 +87,7 @@ impl Default for ExplorerParams {
             preempt_distance: 0.5,
             switch_cooldown: 20.0,
             approach: Some(ApproachParams::default()),
-            idle_fallback: true,
+            idle_fallback: false,
         }
     }
 }
@@ -949,7 +949,7 @@ mod tests {
     fn idle_fallback_sends_goal_when_only_candidate_has_one_strike() {
         let g = one_frontier_map();
         let robot = Pose2::new(0.5, 0.5, 0.0);
-        let p = ExplorerParams { look_around_turns: 0, ..params() };
+        let p = ExplorerParams { look_around_turns: 0, idle_fallback: true, ..params() };
         let goal = find_frontiers(&g, (robot.x, robot.y), &p.explore)[0].goal;
         let mut e = ExplorerPolicy::new(p.clone(), 0.0);
         e.ban(goal, 0.0);

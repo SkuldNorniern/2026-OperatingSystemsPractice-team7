@@ -13,16 +13,15 @@ git fetch origin rust_base:refs/remotes/origin/rust_base
 git worktree add --detach ../2026-OperatingSystemsPractice-team7-rust_base origin/rust_base
 ```
 
-`mapping_algo_sj` 저장소 루트에서 다음 명령을 실행합니다. 방 실측 크기와 마커 한 변 길이는 실제 값으로 바꾸세요.
+`mapping_algo_sj` 저장소 루트에서 다음 명령을 실행합니다. 방과 마커의 크기 및 ID는 실제 값으로 바꾸세요.
 
 ```bash
 bash host_ws/scripts/build_robot.sh  # 이 Ubuntu 호스트에서 최초 한 번
-bash host_ws/scripts/run_rust_base_v1.sh --check
 bash host_ws/scripts/run_rust_base_v1.sh --execute \
   --room-width 19.85 --room-height 11.05 --marker-size 0.10 --marker-ids 8 19 29
 ```
 
-`--check`는 데모 스택을 시작한 뒤 센서·지도·TF·Nav2 연결을 확인하고 종료합니다. V1은 시작할 때 자동 언도킹과 odom 초기화를 건너뜁니다. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞춘 뒤 `--execute`를 실행하세요. 화면 없는 Ubuntu에서는 `--no-rviz`를 붙이세요. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
+`--execute`는 센서·지도·TF·Nav2와 `velocity_guard`를 확인한 뒤 같은 스택에서 주행을 시작합니다. 기본 30초(`--timeout`) 안에 연결이 준비되지 않으면 주행 없이 종료합니다. 연결만 확인하려면 `--check`를 실행하세요. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞추세요. V1은 자동 언도킹과 odom 초기화를 건너뜁니다. 화면 없는 Ubuntu에서는 `--no-rviz`를 붙이세요. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
 
 ## 독립 실행
 
@@ -91,4 +90,4 @@ bash host_ws/scripts/run_robot.sh --with-slam --execute \
 - 다른 `/cmd_vel` publisher가 있으면 명령 출력을 정지합니다. Nav2/teleop과 이 미션을 동시에 제어기로 실행하지 마세요. 하드웨어의 기존 bumper/cliff 동작은 유지됩니다.
 - V1은 사각형 방 크기를 알고 있고 SLAM 좌표축과 방 벽이 평행하다는 가정입니다. 초기 로봇 방향을 벽과 맞춰야 합니다.
 - 이 실행기는 기존 Python A*와 속도 제어를 실물 입력에 연결한 버전입니다. Nav2/MPPI의 전체 주행 스택을 사용하는 것이 아닙니다. 마커 정면 위치 추정이 흔들리거나 목표가 장애물 확장 영역에 걸리는 기존 한계는 남아 있습니다.
-- 개발 Mac에서는 메시지 변환·정지 조건·기존 시뮬레이션 회귀를 검사했습니다. **ROS 2 런타임 연결과 실제 TurtleBot4 주행은 아직 검증하지 않았습니다.** 먼저 `--check`로 실제 입력과 프레임을 확인해야 합니다.
+- 개발 Mac에서는 메시지 변환·정지 조건·기존 시뮬레이션 회귀를 검사했습니다. **ROS 2 런타임 연결과 실제 TurtleBot4 주행은 아직 검증하지 않았습니다.** 연결만 확인하려면 `--check`를 사용하세요.

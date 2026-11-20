@@ -46,6 +46,21 @@ def load_config(ap, args):
     if any(not(0<float(s)<2) for s in [*cfg.get('marker_sizes',{}).values(),*([cfg['default_marker_size']] if cfg.get('default_marker_size') else [])]):ap.error('Invalid physical marker size')
     return cfg
 
+def wait_for_inputs(adapter, args, mission=None):
+    deadline = time.monotonic() + args.timeout
+    while (mission is None or mission.running) and time.monotonic() < deadline:
+        if adapter.ready():
+            inputs = ['scan', 'odom', 'camera', 'camera_info', 'map', 'TF']
+            if args.nav2:
+                inputs += ['Nav2', 'velocity_guard']
+            print(json.dumps({'ready': True, 'motion_enabled': mission is not None,
+                              'inputs': inputs, 'version': args.version}), flush=True)
+            return True
+        time.sleep(.1)
+    print(json.dumps({'ready': False, 'motion_enabled': False,
+                      'errors': adapter.errors.copy(), 'received': list(adapter.gate.fresh)}), flush=True)
+    return False
+
 def main():
     ap=parser();args=ap.parse_args();cfg=load_config(ap,args)
     try:
@@ -59,16 +74,20 @@ def main():
     adapter=ROSAdapter(args)
     try:
         if not args.execute:
-            adapter.start(None);deadline=time.monotonic()+args.timeout
-            while time.monotonic()<deadline:
-                if adapter.ready():
-                    print(json.dumps({'ready':True,'motion_enabled':False,'inputs':['scan','odom','camera','camera_info','map','TF'],'version':args.version}));return 0
-                time.sleep(.1)
-            print(json.dumps({'ready':False,'motion_enabled':False,'errors':adapter.errors,'received':list(adapter.gate.fresh)}));return 2
+            adapter.start(None)
+            return 0 if wait_for_inputs(adapter, args) else 2
         mission=Mission(args,transport=adapter)
         signal.signal(signal.SIGINT,lambda *_:setattr(mission,'running',False))
         signal.signal(signal.SIGTERM,lambda *_:setattr(mission,'running',False))
+        if wait_for_inputs(adapter, args, mission):
+            mission.start_wall = time.monotonic()
+        elif mission.running:
+            mission.status = 'startup_timeout'
+            mission.running = False
+            mission.event('startup_timeout')
         mission.run()
+        if mission.status == 'interrupted':
+            return 130
         return 0 if mission.status=='completed' else 2
     finally:
         adapter.close()

@@ -48,6 +48,11 @@ pub struct MppiParams {
     pub w_deadband: f64,
     pub goal_tolerance_xy: f64,
     pub goal_tolerance_yaw: f64,
+    /// cost penalty for a sample whose mean |v| lies in (0, deadband_v); 0 = off.
+    /// Unlike `v_deadband`, which zeroes the output command, this only steers the choice of samples.
+    pub deadband_v: f64,
+    /// as `deadband_v`, for mean |w|; 0 = off
+    pub deadband_w: f64,
 }
 
 impl Default for MppiParams {
@@ -95,6 +100,8 @@ impl Default for MppiParams {
             w_deadband: 0.01,
             goal_tolerance_xy: 0.10,
             goal_tolerance_yaw: 0.15,
+            deadband_v: 0.0,
+            deadband_w: 0.0,
         }
     }
 }
@@ -127,6 +134,9 @@ impl MppiParams {
             "temperature" => &mut self.temperature,
             "noise_v" => &mut self.noise_v,
             "noise_w" => &mut self.noise_w,
+            "vx_min" => &mut self.vx_min,
+            "deadband_v" => &mut self.deadband_v,
+            "deadband_w" => &mut self.deadband_w,
             "ax_max" => &mut self.ax_max,
             "aw_max" => &mut self.aw_max,
             "robot_radius" => &mut self.robot_radius,
@@ -170,5 +180,48 @@ mod tests {
         p.set("smoothing", 0.0).unwrap();
         assert_eq!((p.temperature, p.samples, p.smoothing), (0.4, 500, false));
         assert!(p.set("nope", 1.0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    fn get(p: &MppiParams, name: &str) -> f64 {
+        match name {
+            "noise_v" => p.noise_v,
+            "noise_w" => p.noise_w,
+            "temperature" => p.temperature,
+            "vx_min" => p.vx_min,
+            "rotate_in_place_angle" => p.rotate_in_place_angle,
+            "rotate_exit_angle" => p.rotate_exit_angle,
+            "deadband_v" => p.deadband_v,
+            "deadband_w" => p.deadband_w,
+            _ => panic!("no getter for {name}"),
+        }
+    }
+
+    #[test]
+    fn stabilisation_knobs_round_trip_by_name() {
+        let names = [
+            "noise_v",
+            "noise_w",
+            "temperature",
+            "vx_min",
+            "rotate_in_place_angle",
+            "rotate_exit_angle",
+            "deadband_v",
+            "deadband_w",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let mut p = MppiParams::default();
+            let x = 0.01 * (i as f64 + 1.0) * if i == 3 { -1.0 } else { 1.0 };
+            p.set(name, x).unwrap();
+            assert_eq!(get(&p, name), x, "{name}");
+            // no other knob moved
+            for other in names.iter().filter(|n| *n != name) {
+                assert_eq!(get(&p, other), get(&MppiParams::default(), other), "{name} leaked into {other}");
+            }
+        }
     }
 }

@@ -7,6 +7,14 @@ use crate::params::MppiParams;
 use crate::path::RefPath;
 use crate::rng::Rng;
 
+/// cost added to a sample whose mean speed is inside a deadband band (see `MppiParams::deadband_v`)
+const DEADBAND_COST: f64 = 1.0;
+
+/// `DEADBAND_COST` when the mean magnitude lies in (0, band); 0 when the band is off (band <= 0)
+fn deadband_penalty(mean_abs: f64, band: f64) -> f64 {
+    if band > 0.0 && mean_abs > 0.0 && mean_abs < band { DEADBAND_COST } else { 0.0 }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Command {
     pub v: f64,
@@ -96,6 +104,7 @@ impl Ctx<'_> {
         let mut pose = self.start.pose;
         let (mut pd, mut ang, mut gd, mut gh, mut obs, mut smooth, mut twirl, mut back) =
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut vabs, mut wabs) = (0.0, 0.0);
         let mut collided = false;
         for t in 0..out.len() {
             let mut want = self.u[t];
@@ -111,6 +120,8 @@ impl Ctx<'_> {
             let (dv, dw) = ((c.v - prev.v) * inv_dv, (c.w - prev.w) * inv_dw);
             smooth += dv * dv + dw * dw;
             twirl += c.w.abs();
+            vabs += c.v.abs();
+            wabs += c.w.abs();
             back += (-c.v).max(0.0);
             prev = c;
 
@@ -162,7 +173,9 @@ impl Ctx<'_> {
             + p.smoothness_weight * smooth
             + p.twirl_weight * twirl
             + p.prefer_forward_weight * back;
-        (stage / out.len() as f64 + p.path_follow_weight * follow, false)
+        let n = out.len() as f64;
+        let dead = deadband_penalty(vabs / n, p.deadband_v) + deadband_penalty(wabs / n, p.deadband_w);
+        (stage / n + p.path_follow_weight * follow + dead, false)
     }
 
     fn run(&self, first: usize, ctrl: &mut [Control], costs: &mut [f64], collided: &mut [bool]) {
@@ -509,5 +522,102 @@ fn savgol(u: &mut [Control], first: Control) {
             w += c * e.w;
         }
         *out = Control::new(v, w);
+    }
+}
+
+#[cfg(test)]
+mod deadband_tests {
+    use super::*;
+
+    fn cost_of(p: &MppiParams, path: &RefPath, v: f64, w: f64) -> f64 {
+        let u = vec![Control::new(v, w); p.horizon];
+        let mut out = vec![Control::ZERO; p.horizon];
+        let ctx = Ctx {
+            p,
+            path,
+            u: &u,
+            start: RobotState { pose: Pose2::new(0.0, 0.0, 0.0), v: 0.0, w: 0.0 },
+            v_lo: 0.0,
+            v_hi: p.vx_max,
+            step: 0,
+            iter: 0,
+            lo: 0,
+            hi: path.pts.len(),
+            follow: (0.7, 0.0),
+            path_active: true,
+            s_follow: 0.7,
+            goal: (3.0, 0.0),
+            goal_yaw: 0.0,
+            goal_active: false,
+            heading_active: false,
+            angle_active: false,
+            collide_r: p.robot_radius,
+            df: None,
+        };
+        // sample 0 is the unperturbed warm start, so the cost is deterministic
+        let (cost, collided) = ctx.sample(0, &mut out);
+        assert!(!collided);
+        cost
+    }
+
+    fn straight_path(p: &MppiParams) -> RefPath {
+        RefPath::new(&[(0.0, 0.0), (3.0, 0.0)], p.path_resolution, p.heading_lookahead)
+    }
+
+    /// costs recorded from the code before the deadband terms existed (defaults, sample 0)
+    #[test]
+    fn deadband_off_leaves_cost_unchanged() {
+        let p = MppiParams::default();
+        assert_eq!((p.deadband_v, p.deadband_w), (0.0, 0.0));
+        let path = straight_path(&p);
+        let baseline = [
+            ((0.05, 0.0), 3.657500000000),
+            ((0.2, 0.0), 1.972000000000),
+            ((0.0, 0.05), 4.203232421875),
+            ((0.0, 0.3), 4.228067187500),
+            ((0.1, 0.02), 3.082409072537),
+        ];
+        for ((v, w), want) in baseline {
+            let got = cost_of(&p, &path, v, w);
+            assert!((got - want).abs() < 1e-9, "v={v} w={w}: got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn slow_sample_penalised_only_when_band_on() {
+        let base = MppiParams::default();
+        let path = straight_path(&base);
+        let off_slow = cost_of(&base, &path, 0.05, 0.0);
+        let off_fast = cost_of(&base, &path, 0.2, 0.0);
+
+        let on = MppiParams { deadband_v: 0.1, ..base.clone() };
+        let on_slow = cost_of(&on, &path, 0.05, 0.0);
+        let on_fast = cost_of(&on, &path, 0.2, 0.0);
+
+        // the band adds exactly the constant to the slow sample and nothing to the fast one
+        assert!((on_slow - off_slow - DEADBAND_COST).abs() < 1e-12);
+        assert_eq!(on_fast, off_fast);
+        assert!(on_slow > on_fast);
+    }
+
+    #[test]
+    fn zero_speed_is_outside_the_band() {
+        let base = MppiParams::default();
+        let path = straight_path(&base);
+        let on = MppiParams { deadband_v: 0.1, deadband_w: 0.1, ..base.clone() };
+        assert_eq!(cost_of(&on, &path, 0.0, 0.0), cost_of(&base, &path, 0.0, 0.0));
+    }
+
+    #[test]
+    fn slow_turn_penalised_only_when_angular_band_on() {
+        let base = MppiParams::default();
+        let path = straight_path(&base);
+        let off = cost_of(&base, &path, 0.0, 0.05);
+        let on = MppiParams { deadband_w: 0.1, ..base.clone() };
+        let got = cost_of(&on, &path, 0.0, 0.05);
+        assert!((got - off - DEADBAND_COST).abs() < 1e-12);
+        // linear band does not touch a pure turn
+        let lin = MppiParams { deadband_v: 0.1, ..base.clone() };
+        assert_eq!(cost_of(&lin, &path, 0.0, 0.05), off);
     }
 }

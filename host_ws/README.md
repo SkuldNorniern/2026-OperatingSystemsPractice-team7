@@ -260,8 +260,9 @@ The window, top to bottom:
   right the detected stack (team7, stock or mixed), READ-ONLY or GOALS ON, and Panel (the dock).
 - header strip, always visible: mission clock (counts down from 10:00 at the first RUNNING on
   `/team7/mission_state`; shows the time used once DONE or when the data stops; "not started"
-  before), the first three targets (green confirmed, amber tentative, with position and views), and
-  one status light. When no scan, odom or tf has come for 3 s it turns into one red banner:
+  before), three slots for confirmed targets only (green, with position), a count chip for the
+  candidates ("4 candidates", hover lists them with their rules), and one status light. A candidate
+  never takes a slot, so it is not taken for a found target. When no scan, odom or tf has come for 3 s it turns into one red banner:
   "no data for N - replay ended or robot off".
 - dock (drag its edge to resize, `D` or Panel to hide it). Sections open and close by their title;
   drag the line between two open sections to share the height differently (each keeps at least two
@@ -272,12 +273,19 @@ The window, top to bottom:
     topic, whichever is published; picking a topic pins it and resubscribes at once. An amber dot
     marks a pinned topic with no publisher. "+ add layer" adds a second Scan, Plan, Local plan, Map
     or Local cost layer in its own colour (x removes it). Layers whose topics nobody publishes are
-    listed as "Not published". Costmaps get an opacity slider when on.
+    listed as "Not published". Costmaps get an opacity slider when on; Candidates and Confirmed an
+    opacity button (100, 60, 30 %).
   - Camera: `/team7/aruco/debug` or `/aruco_tracker/debug` (or the topic picked in its own picker),
     scaled to the dock; grey and marked "stale" when older than 3 s; click it (or `C`) for the big
     view over the map.
-  - Targets: all targets (id, x, y, state with view count), the last 2D goal result, the run folder
-    and whether `targets.csv` and `map.pgm` are written.
+  - Candidates (N): every ArUco id the mapper has seen and not confirmed, closest to confirming
+    first, with its views and the rules it still fails as chips (from the label after " | ":
+    views n/N, wall n/N, size unknown/mismatch, angle a/b deg, rays disagree, one angle, spread N cm,
+    views disagree). One rule left: highlighted and marked "close".
+  - Confirmed (N/3): id, x, y, the views it had as a candidate, and when it was confirmed (mission
+    time, or how long ago); then the last 2D goal result, the run folder and whether `targets.csv`
+    and `map.pgm` are written. A click on a Candidates or Confirmed row centres the map on it (follow
+    turns off) and selects it: drawn larger, a candidate with its rules next to it.
   - Health (folded): rates against what the robot normally gives, TF age, scan delay.
 - map, and a status bar (sim or wall time, cursor position, ROS_DOMAIN_ID, frame; the right side
   shows the full text of what the pointer is over, a message, or the mouse and key hints).
@@ -296,9 +304,11 @@ text shows in the status bar on hover; the status bar drops its low-priority fie
 | Local plan [4] | `/team7/mppi/trajectory` | `/local_plan` | magenta line | on |
 | Frontiers [5] | `/team7/frontiers` | `/explore/frontiers` | blue dots | on |
 | Goal [6] | `/team7/goal` | `/goal_pose` | yellow ring with cross | on |
-| Targets [7] | `/team7/targets` | `/team7/targets` | amber `ID n?`, green `ID n` | on |
-| Global costmap [8] | `/global_costmap/costmap` | same | blue .. red, cyan inscribed, purple lethal | off |
-| Local cost [9] | `/team7/mppi/local_cost` | `/local_costmap/costmap` | same ramp | off |
+| Confirmed [7] | `/team7/targets` | `/team7/targets` | solid green disc, `ID n (x, y)` | on |
+| Candidates [8] | `/team7/targets` | `/team7/targets` | hollow amber ring, `n?` | on |
+| Global costmap [9] | `/global_costmap/costmap` | same | blue .. red, cyan inscribed, purple lethal | off |
+| Local cost | `/team7/mppi/local_cost` | `/local_costmap/costmap` | same ramp | off |
+| ArUco detections | `/aruco_detections` | - | light blue tick at each hit of the last 1.5 s, id | off |
 | Robot | TF map -> base_link | same | white disc, red x and green y axes | on |
 | Camera views | `/team7/frontiers` | - | orange squares | on |
 | SLAM graph | `/team7/slam/graph` | `/slam_toolbox/graph_visualization` | thin edges, small nodes | on |
@@ -307,6 +317,12 @@ text shows in the status bar on hover; the status bar drops its low-priority fie
 
 Walls stay readable: the occupied cells of `/map` are drawn again over the costmaps and the grid,
 and the scan and robot come last. Costmaps start at opacity 0.35.
+
+ArUco detections are the detector's raw hits (camera frame, through TF at the message stamp): a short
+tick ends at the estimated marker position and a dashed line goes back to the camera for the newest
+hit of each id. They show a code the camera reads that never reaches the mapper. Hovering a target
+on the map puts its id and rules in the status bar. A profile from before the split keeps its other
+settings; its old Targets entry and 4-section dock are ignored.
 
 Mouse and keys: left drag pans (Interact) or uses the tool, middle drag pans, right drag rotates,
 wheel zooms at the pointer. `F` follow robot, `0`/`R` fit the map and north up, `[` `]` rotate 15 deg,

@@ -20,6 +20,7 @@
   <depend>action_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>aruco_opencv_msgs</depend>
+  <depend>irobot_create_msgs</depend>
   <exec_depend>nav2_map_server</exec_depend>
 
   <export>

@@ -12,13 +12,30 @@ use r2r::sensor_msgs::msg::LaserScan;
 use r2r::{ActionClient, ActionClientGoal, ActionServerGoal, GoalStatus, QosProfile, log_info, log_warn};
 use tb4_control::{Mppi, MppiParams, RobotState};
 use tb4_core::{DistanceField, Grid, Pose2, Stamp, TfBuffer};
-use tb4_planning::{CSpace, CSpaceParams, Planner, PlannerParams, remaining_free};
+use tb4_planning::{CSpace, CSpaceParams, IrParams, Planner, PlannerParams, VirtualObstacles, VirtualParams, bump_zone_angle, ir_points, remaining_free};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener};
 
 type Nav = NavigateToPose::Action;
 /// NavigateToPose behavior_tree value for a goal without a final heading
 const XY_ONLY: &str = "xy_only";
 type Follow = FollowPath::Action;
+/// irobot_create_msgs HazardDetection.type value for a bumper contact (BACKUP_LIMIT=0, BUMP=1, CLIFF=2, ...)
+const BUMP_TYPE: u8 = 1;
+/// irobot_create_msgs HazardDetection.type for a cliff sensor reading
+const CLIFF_TYPE: u8 = 2;
+
+/// Direction of a cliff sensor from the robot's forward axis (rad). Cliff sensors are at the front only
+/// (Create 3 docs); the frame names are cliff_front_left, cliff_front_right, cliff_side_left, cliff_side_right.
+fn cliff_zone_angle(frame_id: &str) -> Option<f64> {
+    let deg = match frame_id.trim_start_matches('/') {
+        "cliff_front_left" => 30.0,
+        "cliff_front_right" => -30.0,
+        "cliff_side_left" => 75.0,
+        "cliff_side_right" => -75.0,
+        _ => return None,
+    };
+    Some(f64::to_radians(deg))
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
@@ -61,6 +78,16 @@ struct State {
     last_obstacles: Instant,
     last_global: Instant,
     scan_points: Vec<(f64, f64)>,
+    /// bump marks the lidar cannot see (glass, low objects), stamped into the obstacle grid
+    bumps: VirtualObstacles,
+    /// IR proximity marks: short life, so a hand that leaves the sensor's view does not leave a ghost wall
+    ir_marks: VirtualObstacles,
+    /// count of marks last used for the planner grid; a change rebuilds the CSpace
+    marks_seen: u64,
+    /// cliff marks are off by default: a cliff is a drop and its arc sits inside the footprint
+    cliff_on: bool,
+    /// latest scan stamp (s): the clock for mark ageing, so replays and the robot agree
+    now: f64,
     v: f64,
     w: f64,
     goal: Option<Goal>,
@@ -199,6 +226,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node = r2r::Node::create(ctx, "navigator", "")?;
     let log = node.logger().to_owned();
     let p = Params(&node);
+    // read before the node is borrowed mutably below (Params borrows it)
+    let ir_on = p.bool("ir_enabled", false);
+    let cliff_marks = p.bool("cliff_marks", false);
+    let ir_threshold = p.i64("ir_threshold", 1000) as i32;
+    let ir_range = p.f64("ir_range", 0.10);
 
     let mode = match p.string("mode", "mppi").as_str() {
         "nav2" | "nav2_controller" => Mode::Nav2Controller,
@@ -264,6 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_obstacles: Instant::now() - Duration::from_secs(10),
         last_global: Instant::now() - Duration::from_secs(10),
         scan_points: Vec::new(),
+        bumps: VirtualObstacles::new(VirtualParams::default()),
+        ir_marks: VirtualObstacles::new(VirtualParams { ttl: 2.0, ..VirtualParams::default() }),
+        marks_seen: 0,
+        cliff_on: cliff_marks,
+        now: 0.0,
         v: 0.0,
         w: 0.0,
         goal: None,
@@ -310,6 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c = cfg.clone();
     let scans = node.subscribe::<LaserScan>(&scan_topic, QosProfile::sensor_data())?;
     spawner.spawn_local(scans.for_each(move |m| {
+        st.borrow_mut().now = m.header.stamp.sec as f64 + m.header.stamp.nanosec as f64 * 1e-9;
         if c.use_scan_obstacles
             && let Ok(t) = tf_scan.borrow().lookup(&c.map_frame, &m.header.frame_id, team7_nodes::stamp(&m.header.stamp))
         {
@@ -324,6 +362,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pts.push((pt.x, pt.y));
             }
             st.borrow_mut().scan_points = pts;
+        }
+        futures::future::ready(())
+    }))?;
+
+    // Create 3 IR proximity sensors: a reading above the threshold puts an obstacle point just in front
+    // of that sensor (ir_points). Off by default: the intensity-to-distance numbers are not calibrated yet.
+    if ir_on {
+        let st = state.clone();
+        let tf_ir = tf.clone();
+        let (map_f, base_f) = (cfg.map_frame.clone(), cfg.base_frame.clone());
+        let ir_params = IrParams { threshold: ir_threshold, range: ir_range };
+        let ir = node.subscribe::<r2r::irobot_create_msgs::msg::IrIntensityVector>("/ir_intensity", QosProfile::sensor_data())?;
+        spawner.spawn_local(ir.for_each(move |m| {
+            let mut s = st.borrow_mut();
+            let now = s.now;
+            let readings: Vec<(String, i32)> = m.readings.iter().map(|r| (r.header.frame_id.clone(), r.value as i32)).collect();
+            let refs: Vec<(&str, i32)> = readings.iter().map(|(f, v)| (f.as_str(), *v)).collect();
+            if refs.is_empty() {
+                return futures::future::ready(());
+            }
+            if let Ok(t) = tf_ir.borrow().lookup(&map_f, &base_f, Stamp::LATEST) {
+                let pose = Pose2::from_isometry(&t);
+                for (x, y) in ir_points(pose, &refs, &ir_params) {
+                    s.ir_marks.add_point(x, y, now);
+                }
+            }
+            futures::future::ready(())
+        }))?;
+    }
+
+    // Create 3 bumper contacts: each BUMP detection marks a short arc where the bumper touched, at the
+    // robot's pose at that moment. Stamped into the obstacle grid below; ages out after the TTL.
+    let st = state.clone();
+    let tf_bump = tf.clone();
+    let (map_f, base_f) = (cfg.map_frame.clone(), cfg.base_frame.clone());
+    let log_bump = log.clone();
+    let hazards = node.subscribe::<r2r::irobot_create_msgs::msg::HazardDetectionVector>("/hazard_detection", QosProfile::default())?;
+    spawner.spawn_local(hazards.for_each(move |m| {
+        let mut s = st.borrow_mut();
+        let bump_now = s.now;
+        // no scan stamp yet means no clock: the mark would be seen at time 0 and dropped at once
+        if bump_now <= 0.0 {
+            return futures::future::ready(());
+        }
+
+        for d in &m.detections {
+            // bumper contact or cliff sensor: both mark a no-go arc in the grid the planner uses
+            let angle = match d.type_ {
+                BUMP_TYPE => bump_zone_angle(&d.header.frame_id),
+                CLIFF_TYPE if s.cliff_on => cliff_zone_angle(&d.header.frame_id),
+                _ => None,
+            };
+            let Some(angle) = angle else { continue };
+            if let Ok(t) = tf_bump.borrow().lookup(&map_f, &base_f, Stamp::LATEST) {
+                let pose = Pose2::from_isometry(&t);
+                let added = s.bumps.add_bump(pose, angle, bump_now);
+                log_info!(&log_bump, "bump {} at ({:.2}, {:.2}), {} mark points", d.header.frame_id, pose.x, pose.y, added);
+            }
         }
         futures::future::ready(())
     }))?;
@@ -450,14 +546,24 @@ fn tick(
         s.timing_logged = Instant::now();
     }
 
-    if s.map_dirty
+    // marks age out in every mode, not only MPPI
+    let mark_now = s.now;
+    s.bumps.expire(mark_now);
+    s.ir_marks.expire(mark_now);
+    // the planner must see the same marks as MPPI, or the global path runs through a bumped zone
+    let marks = s.bumps.revision() + s.ir_marks.revision();
+    if (s.map_dirty || marks != s.marks_seen)
         && let Some(m) = s.map.as_ref()
     {
         let t = Instant::now();
-        let cs = CSpace::new(m, &cfg.cs);
+        let mut planner_grid = m.clone();
+        s.bumps.stamp(&mut planner_grid, 100);
+        s.ir_marks.stamp(&mut planner_grid, 100);
+        let cs = CSpace::new(&planner_grid, &cfg.cs);
         s.timing[1].add(t);
         s.cspace = Some(cs);
         s.map_dirty = false;
+        s.marks_seen = marks;
     }
     // built even without a goal, so the local MPPI layer is up from the start
     if cfg.mode == Mode::Mppi && s.last_obstacles.elapsed() >= cfg.obstacle_period {
@@ -465,6 +571,7 @@ fn tick(
         let global_due = s.last_global.elapsed() >= Duration::from_secs(1);
         let mut global_sent = false;
         let mut obs_time = None;
+        // bumper marks age out first (needs &mut), then go into the grid below
         if let Some(m) = s.map.as_ref() {
             let t_obs = Instant::now();
             let mut g = m.clone();
@@ -473,6 +580,9 @@ fn tick(
                     g.set(c, 100);
                 }
             }
+            // bumper marks: age out, then write into the grid the planner and MPPI use
+            s.bumps.stamp(&mut g, 100);
+            s.ir_marks.stamp(&mut g, 100);
             let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);
             obs_time = Some(t_obs.elapsed());            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
             // the costmap is big and only changes with the map: publish about once a second

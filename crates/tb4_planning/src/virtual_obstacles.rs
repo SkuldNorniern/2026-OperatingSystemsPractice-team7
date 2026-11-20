@@ -93,11 +93,14 @@ pub struct VirtualPoint {
 pub struct VirtualObstacles {
     pub params: VirtualParams,
     points: Vec<VirtualPoint>,
+    /// bumped on every change to the point set (add, evict, expire), so a cache can tell
+    /// "same count, different marks" apart from "nothing changed"
+    revision: u64,
 }
 
 impl VirtualObstacles {
     pub fn new(params: VirtualParams) -> Self {
-        Self { params, points: Vec::new() }
+        Self { params, points: Vec::new(), revision: 0 }
     }
 
     pub fn points(&self) -> &[VirtualPoint] {
@@ -123,10 +126,12 @@ impl VirtualObstacles {
     pub fn add_point(&mut self, x: f64, y: f64, now: f64) {
         let m2 = self.params.merge_dist * self.params.merge_dist;
         if let Some(q) = self.points.iter_mut().find(|q| (q.x - x).powi(2) + (q.y - y).powi(2) <= m2) {
+            // a refresh moves no geometry: no new revision
             q.seen = now;
             return;
         }
         self.points.push(VirtualPoint { x, y, seen: now });
+        self.revision += 1;
         if self.points.len() > self.params.max_points {
             // oldest first
             let oldest = (0..self.points.len()).min_by(|&a, &b| self.points[a].seen.total_cmp(&self.points[b].seen)).unwrap();
@@ -134,10 +139,19 @@ impl VirtualObstacles {
         }
     }
 
+    /// Changes each time the point set changes (an add, an eviction or an expiry).
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Drop points older than `ttl`.
     pub fn expire(&mut self, now: f64) {
         let ttl = self.params.ttl;
+        let before = self.points.len();
         self.points.retain(|q| now - q.seen <= ttl);
+        if self.points.len() != before {
+            self.revision += 1;
+        }
     }
 
     /// Write the points into `grid` as occupied (`value`), e.g. a copy of the SLAM map before the

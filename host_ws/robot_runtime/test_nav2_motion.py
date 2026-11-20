@@ -4,7 +4,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 
-from nav2_motion import Nav2Motion
+from nav2_motion import Nav2GoalError, Nav2Motion
 
 
 class GoalHandle:
@@ -75,5 +75,5 @@ class MotionTests(unittest.TestCase):
     def test_rejection_is_not_reported_as_arrival(self):
         self.motion._request('waypoint', self.nav, 'go', 30)
         self.nav.requests[-1][1].set_result(SimpleNamespace(accepted=False))
-        with self.assertRaisesRegex(RuntimeError, 'did not succeed'):
+        with self.assertRaisesRegex(Nav2GoalError, 'rejected'):
             self.motion._request('waypoint', self.nav, 'go', 30)

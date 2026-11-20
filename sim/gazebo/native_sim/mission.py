@@ -18,7 +18,7 @@ class Grid:
     def __init__(self):
         self.res=.1;self.origin=(-25.,-25.);self.n=600
         self.log=np.zeros((self.n,self.n),np.float32)
-    def cell(self,x,y):return (int((x-self.origin[0])/self.res),int((y-self.origin[1])/self.res))
+    def cell(self,x,y):return (math.floor((x-self.origin[0])/self.res),math.floor((y-self.origin[1])/self.res))
     def xy(self,c):return (self.origin[0]+(c[0]+.5)*self.res,self.origin[1]+(c[1]+.5)*self.res)
     def update(self,scan,pose):
         x,y,a=pose; start=self.cell(x,y)
@@ -37,6 +37,35 @@ class Grid:
         np.clip(self.log,-4,4,out=self.log)
     def blocked(self):
         return cv2.dilate((self.log>1).astype(np.uint8),np.ones((9,9),np.uint8)).astype(bool)
+    def reachable_goal(self, start, goal):
+        """Pick the destination or a closer waypoint in connected, observed free space."""
+        sx, sy = self.cell(*start)
+        gx, gy = self.cell(*goal)
+        if not (0 <= sx < self.n and 0 <= sy < self.n):
+            return None
+        free = (self.log < -.4) & ~self.blocked()
+        if not free[sy, sx]:
+            return None
+        reachable = free.astype(np.uint8)
+        cv2.floodFill(reachable, None, (sx, sy), 2, flags=4)
+        if 0 <= gx < self.n and 0 <= gy < self.n and reachable[gy, gx] == 2:
+            return goal
+
+        # Leave space for the robot footprint at an intermediate waypoint.
+        radius = math.ceil(.20 / self.res)
+        footprint = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+        safe = cv2.erode((reachable == 2).astype(np.uint8), footprint,
+                         borderType=cv2.BORDER_CONSTANT, borderValue=0)
+        rows, cols = np.nonzero(safe)
+        if not len(rows):
+            return None
+        xs, ys = self.xy((cols, rows))
+        distances = np.hypot(xs - goal[0], ys - goal[1])
+        index = int(np.argmin(distances))
+        if distances[index] > math.dist(start, goal) - .40:
+            return None
+        return float(xs[index]), float(ys[index])
+
     def plan(self,start,goal,bounds,known_only=False):
         a,b=self.cell(*start),self.cell(*goal);occ=self.blocked()
         if known_only:occ |= self.log>=-.4
@@ -204,7 +233,8 @@ class Mission:
             for j in order[:15]:
                 if counts[j]<5:continue
                 val=values[j]*.1
-                if abs(val-p[axis])<1:continue
+                if not .20 < abs(val-p[axis]) < size:continue
+                if np.ptp(pts[bins == values[j], 1-axis]) < .75:continue
                 lo=val if val<p[axis] else val-size
                 pairs.append((counts[j],lo,lo+size))
             if not pairs:return False
@@ -270,7 +300,12 @@ class Mission:
         if self.begin_marker_visits():
             return
         if self.state=='WAIT_SENSORS':
-            if not self.initialize(scan,p):self.command();return
+            if not self.initialize(scan,p):
+                self.command()
+                if now-self.wait_print > 5:
+                    self.event('waiting_for_room', reason='Need lidar returns from walls on both room axes')
+                    self.wait_print = now
+                return
         if self.last_pose:
             delta=math.hypot(p[0]-self.last_pose[0],p[1]-self.last_pose[1])
             self.total_distance+=delta;self.total_rotation+=abs(wrap(p[2]-self.last_pose[2]))
@@ -333,8 +368,9 @@ class Mission:
                     self.status='time_limit';self.event('sim_time_limit');break
                 if self.args.max_seconds and time.monotonic()-self.start_wall>self.args.max_seconds:
                     self.status='time_limit';self.event('time_limit');break
-        except Exception:
+        except Exception as error:
             self.status='error'
+            self.event('mission_error', state=self.state, goal=self.goal, error=str(error))
             raise
         finally:
             if not self.running and self.status=='running':self.status='interrupted'

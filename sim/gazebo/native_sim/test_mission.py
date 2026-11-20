@@ -10,14 +10,27 @@ class MissionTests(unittest.TestCase):
         m=Mission.__new__(Mission);m.cfg={'room_width':19.85,'room_height':11.05,'wall_standoff':.8,'scan_every_m':5.,'marker_sizes':{'8':.25,'19':.2,'29':.28},'marker_standoff':.8}
         m.pose=(-5.,0.,0.);m.markers={};m.visited=set();m.visit_ids=None;m.expected_targets=3;m.command=lambda *a:None;m.events=[];m.event=lambda e,**kw:m.events.append((e,kw));m.grid=Grid();m.path=[]
         return m
+    def rectangle_scan(self, pose):
+        scan = LaserScan(range_min=.1, range_max=12, angle_min=-math.pi, angle_step=2*math.pi/360)
+        x, y, yaw = pose
+        for index in range(360):
+            angle = yaw + scan.angle_min + index * scan.angle_step
+            dx, dy = math.cos(angle), math.sin(angle)
+            wall_x = 10 if dx > 0 else -10
+            wall_y = 5.5 if dy > 0 else -5.5
+            scan.ranges.append(min(scan.range_max, (wall_x-x)/dx if dx else math.inf,
+                                   (wall_y-y)/dy if dy else math.inf))
+        return scan
     def test_nearest_wall_and_four_distinct_corners(self):
-        m=self.stub();s=LaserScan();s.range_min=.1;s.range_max=12;s.angle_min=-math.pi;s.angle_step=2*math.pi/360
-        for i in range(360):
-            a=s.angle_min+i*s.angle_step;cx,cy=math.cos(a),math.sin(a)
-            rays=[(10+5)/cx if cx>0 else (-10+5)/cx if cx<0 else 1e6,5.5/cy if cy>0 else -5.5/cy if cy<0 else 1e6]
-            s.ranges.append(min(12,*rays))
-        self.assertTrue(m.initialize(s,m.pose));self.assertLess(m.goal[0],-9)
+        m=self.stub()
+        self.assertTrue(m.initialize(self.rectangle_scan(m.pose),m.pose));self.assertLess(m.goal[0],-9)
         self.assertEqual(len(set(m.route[:4])),4);self.assertEqual(m.route[-1],m.goal)
+    def test_near_visible_wall_is_used_to_estimate_room(self):
+        mission = self.stub()
+        mission.pose = (-9.4, 0.0, 0.0)
+        self.assertTrue(mission.initialize(self.rectangle_scan(mission.pose), mission.pose))
+        self.assertAlmostEqual(mission.bounds[0], -10.0)
+        self.assertAlmostEqual(mission.goal[0], -9.2)
     def test_scan_trigger_and_full_turn_across_yaw_wrap(self):
         m=self.stub();m.distance=5.01;m.begin_spin('PATROL')
         self.assertEqual(m.state,'SCAN_360');self.assertEqual(m.distance,0)

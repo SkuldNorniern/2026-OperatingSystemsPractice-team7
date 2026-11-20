@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from run_robot import ROOT, load_config, parser as mission_parser
@@ -89,6 +90,33 @@ def stop(process):
             continue
 
 
+def start_logged(command, cwd, log_path):
+    log = log_path.open('w', encoding='utf-8')
+    try:
+        process = subprocess.Popen(command, cwd=cwd, start_new_session=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, errors='replace')
+    except OSError:
+        log.close()
+        raise
+
+    def relay():
+        with log, process.stdout:
+            terminal = True
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                if terminal:
+                    try:
+                        print(line, end='', flush=True)
+                    except OSError:
+                        terminal = False
+
+    thread = threading.Thread(target=relay, daemon=True)
+    thread.start()
+    return process, thread
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, add_help=False)
     ap.add_argument('--rust-base', type=Path, help='Use this rust_base checkout (overrides TEAM7_RUST_BASE)')
@@ -100,6 +128,8 @@ def main():
         mission_parser().print_help()
         return 0
     stack_args, mission_args = ap.parse_known_args()
+    # Nav2's first transform is allowed up to 60 seconds during bringup.
+    mission_args = ['--timeout', '75', *mission_args]
     robot_parser = mission_parser()
     args = robot_parser.parse_args(mission_args)
     cfg = load_config(robot_parser, args)
@@ -164,6 +194,7 @@ exec "$@"
 """
     command = ['bash', '-ec', bootstrap, 'team7-bringup', str(install), str(overlay), str(share), *command]
     stack = mission = None
+    log_threads = []
     # Stop the mission (and cancel its goal) before stopping the safety stack.
     def interrupted(_sig, _frame):
         raise KeyboardInterrupt
@@ -171,7 +202,8 @@ exec "$@"
     signal.signal(signal.SIGTERM, interrupted)
     try:
         print(f'Run outputs: {folder}', flush=True)
-        stack = subprocess.Popen(command, cwd=checkout, start_new_session=True)
+        stack, stack_log = start_logged(command, checkout, folder / 'stack.log')
+        log_threads.append(stack_log)
         # run_demo.sh opens console.log in the launch pipeline after preparation.
         deadline = time.monotonic() + 120
         while not (stack_output / 'console.log').is_file():
@@ -182,7 +214,8 @@ exec "$@"
                 print('Timed out waiting for rust_base to start its ROS launch', file=sys.stderr)
                 return 1
             time.sleep(.2)
-        mission = subprocess.Popen(v1, cwd=ROOT, start_new_session=True)
+        mission, mission_log = start_logged(v1, ROOT, folder / 'mission.log')
+        log_threads.append(mission_log)
         while mission.poll() is None:
             if stack.poll() is not None:
                 print(f'rust_base demo stopped with status {stack.returncode}', file=sys.stderr)
@@ -194,6 +227,11 @@ exec "$@"
     finally:
         stop(mission)
         stop(stack)
+        for thread in log_threads:
+            thread.join(timeout=2)
+        if mission is not None:
+            print(f'V1 exited with status {mission.returncode}. Mission log: {folder / "mission.log"}', flush=True)
+        print(f'Stack log: {folder / "stack.log"}', flush=True)
 
 
 if __name__ == '__main__':

@@ -2,10 +2,12 @@
 import math,sys,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import cv2,numpy as np
+from nav2_motion import Nav2GoalError
 from ros_transport import ROSAdapter
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'sim/gazebo/native_sim'))
+from mission import Grid
 
 class InputTests(unittest.TestCase):
     def adapter(self):
@@ -46,6 +48,48 @@ class InputTests(unittest.TestCase):
             adapter.update_marker_speed_limit(now)
         self.assertEqual([(m.percentage, m.speed_limit) for m in messages],
                          [(True, 65.0), (True, 65.0), (True, 0.0)])
+
+    def test_navigation_uses_known_space_until_the_map_reaches_the_corner(self):
+        adapter = self.adapter()
+        adapter.ready = lambda: True
+        adapter.motion = Mock()
+        adapter.motion.navigate.side_effect = [False, True, True]
+        grid = Grid()
+        grid.origin = (0.0, 0.0)
+        grid.log[0:20, 0:20] = -4
+        grid.log[5:15, 47:55] = -4  # A disconnected patch around the destination.
+        adapter.mission = NS(grid=grid, event=Mock())
+        pose = (1.0, 1.0, 0.0)
+        goal = (5.0, 1.0)
+
+        self.assertFalse(adapter.navigate(goal, pose))
+        intermediate, _ = adapter.motion.navigate.call_args.args
+        self.assertTrue(1.4 < intermediate[0] < 2.0)
+        grid.log[5:15, 19:48] = -4
+        self.assertFalse(adapter.navigate(goal, pose))
+        self.assertEqual(adapter.motion.navigate.call_args.args[0], intermediate)
+        self.assertTrue(adapter.navigate(goal, (*intermediate, 0.0)))
+        self.assertEqual(adapter.motion.navigate.call_args.args[0], goal)
+
+    def test_navigation_waits_for_known_space_and_retries_rejected_goals(self):
+        adapter = self.adapter()
+        adapter.ready = lambda: True
+        adapter.motion = Mock()
+        grid = Mock()
+        grid.reachable_goal.side_effect = [None, (2.0, 1.0), (2.0, 1.0)]
+        adapter.mission = NS(grid=grid, event=Mock())
+        adapter.motion.navigate.side_effect = [Nav2GoalError('first costmap'), True]
+        goal = (2.0, 1.0)
+        pose = (1.0, 1.0, 0.0)
+        with patch('ros_transport.time.monotonic', side_effect=[10, 11, 12, 13]):
+            self.assertFalse(adapter.navigate(goal, pose))
+            adapter.motion.navigate.assert_not_called()
+            self.assertFalse(adapter.navigate(goal, pose))
+            self.assertFalse(adapter.navigate(goal, pose))
+            self.assertTrue(adapter.navigate(goal, pose))
+        self.assertEqual(adapter.motion.navigate.call_count, 2)
+        self.assertEqual([call.args[0] for call in adapter.mission.event.call_args_list],
+                         ['waiting_for_known_map', 'nav_goal_retry'])
     def test_camera_passes_real_calibration_and_tf(self):
         a=self.adapter();frame='camera_optical'
         a.info=NS(width=64,height=48,header=self.header(frame),k=[100.,0,32,0,100,24,0,0,1],d=[0.,0.,0.,0.,0.])

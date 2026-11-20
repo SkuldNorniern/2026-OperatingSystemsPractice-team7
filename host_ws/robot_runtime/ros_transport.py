@@ -3,6 +3,7 @@ import math,threading,time
 from types import SimpleNamespace as NS
 import cv2,numpy as np
 from control import CommandGate,transform_matrix
+from nav2_motion import Nav2GoalError, Nav2Motion
 
 MARKER_TOPIC = '/team7/v1/targets'
 MARKER_SLOW_PERCENT = 65.0
@@ -16,6 +17,9 @@ class ROSAdapter:
         self.speed_limit_pub = None
         self.slow_until = self.last_speed_limit = 0.0
         self.marker_slow_active = False
+        self.nav_destination = self.nav_step = None
+        self.next_nav_check = self.next_nav_notice = 0.0
+        self.nav_failures = 0
     def start(self,mission):
         import rclpy
         from rclpy.node import Node
@@ -29,7 +33,6 @@ class ROSAdapter:
         self.rclpy=rclpy;self.mission=mission;self.node=Node('team7_robot_mission')
         self.tf=Buffer();self.listener=TransformListener(self.tf,self.node)
         if getattr(self.args,'nav2',False):
-            from nav2_motion import Nav2Motion
             self.motion=Nav2Motion(self.node,self.args.map_frame)
         self.Twist=Twist;self.TwistStamped=TwistStamped
         self.pub=self.node.create_publisher(TwistStamped if self.args.cmd_type=='stamped' else Twist,self.args.cmd_topic,10) if self.args.execute and self.motion is None else None
@@ -227,9 +230,48 @@ class ROSAdapter:
         if self.motion is None:
             self.gate.propose(v,w)
         else:
+            self.nav_step = None
             self.motion.cancel()
     def navigate(self,goal,pose):
-        return self.ready() and self.motion.navigate(goal,pose)
+        if not self.ready():
+            return False
+        if goal != self.nav_destination:
+            self.nav_destination = goal
+            self.nav_step = None
+            self.next_nav_check = self.next_nav_notice = 0.0
+            self.nav_failures = 0
+
+        now = time.monotonic()
+        if self.nav_step is None:
+            if now < self.next_nav_check:
+                return False
+            self.next_nav_check = now + 1.0
+            self.nav_step = self.mission.grid.reachable_goal(pose[:2], goal)
+            if self.nav_step is None:
+                if now >= self.next_nav_notice:
+                    self.mission.event('waiting_for_known_map', goal=goal)
+                    self.next_nav_notice = now + 5.0
+                return False
+            if self.nav_step != goal:
+                self.mission.event('known_map_step', goal=goal, waypoint=self.nav_step)
+
+        try:
+            reached = self.motion.navigate(self.nav_step, pose)
+        except Nav2GoalError as error:
+            self.nav_failures += 1
+            if self.nav_failures > 2:
+                raise
+            self.mission.event('nav_goal_retry', goal=self.nav_step, retry=self.nav_failures, error=str(error))
+            self.nav_step = None
+            self.next_nav_check = now + 2.0
+            return False
+        if not reached:
+            return False
+        complete = self.nav_step == goal
+        self.nav_step = None
+        self.next_nav_check = 0.0
+        self.nav_failures = 0
+        return complete
     def turn(self,angle,purpose):
         return self.ready() and self.motion.turn(angle,purpose)
     def close(self):

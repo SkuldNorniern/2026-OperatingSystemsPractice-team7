@@ -86,6 +86,7 @@ def main():
             mission.running = False
             mission.event('startup_timeout')
         mission.run()
+        print(f'V1 mission status: {mission.status}. Results: {mission.out}', flush=True)
         if mission.status == 'interrupted':
             return 130
         return 0 if mission.status=='completed' else 2

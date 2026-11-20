@@ -4,6 +4,10 @@ import threading
 import time
 
 
+class Nav2GoalError(RuntimeError):
+    """Nav2 rejected or aborted a goal."""
+
+
 class Nav2Motion:
     def __init__(self, node, map_frame):
         from action_msgs.msg import GoalStatus
@@ -61,7 +65,8 @@ class Nav2Motion:
                     self._reset()
                     if response is None or response.status != self.succeeded:
                         detail = getattr(getattr(response, 'result', None), 'error_msg', '')
-                        raise RuntimeError(f'Nav2 action did not succeed: {key} {detail}')
+                        status = 'rejected' if response is None else response.status
+                        raise Nav2GoalError(f'Nav2 action failed ({status}): {key} {detail}')
                     return True
                 self._reset()
             if client.server_is_ready():

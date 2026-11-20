@@ -39,6 +39,7 @@ marker_mapper:
     wall_sigma: 0.03          # m, map wall position error
     pnp_sigma: 0.08           # pnp range error after scale learned, fraction
     edge_ratio_gate: 1.5      # ray hit near end of a surface (box face) needs ray/pnp within this factor until scale is learned
+    edge_triangulation_gap: 0.15  # m, edge hit where earlier bearings cross is on the face: teaches the scale (spec: marker sizes differ)
     ignore_ids: [-1]
     slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
     slow_percent: 60.0

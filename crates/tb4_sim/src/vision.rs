@@ -66,6 +66,7 @@ pub fn team7_track_params() -> TrackParams {
         wall_sigma: 0.03,
         pnp_sigma: 0.08,
         edge_ratio_gate: 1.5,
+        edge_triangulation_gap: 0.15,
     }
 }
 

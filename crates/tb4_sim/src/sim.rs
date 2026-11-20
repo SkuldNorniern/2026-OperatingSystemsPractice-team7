@@ -327,6 +327,7 @@ pub struct Sim {
     m: Metrics,
     stalls: StallTracker,
     area_next: usize,
+    drive: crate::drive::DriveTracker,
     log: Vec<(f64, String)>,
     pub keep_log: bool,
     wall: Instant,
@@ -378,6 +379,7 @@ impl Sim {
             m,
             stalls: StallTracker::default(),
             area_next: 0,
+            drive: Default::default(),
             log: Vec::new(),
             keep_log: false,
             wall: Instant::now(),
@@ -710,6 +712,9 @@ impl Sim {
             self.nav_cmd = (v, w);
             self.chain.command(v, w, t);
         }
+        let goal = self.nav.goal().map(|g| (g.x, g.y));
+        let key = crate::drive::path_key(self.nav.path(), goal);
+        self.drive.on_nav(out.cmd.filter(|_| goal.is_some()), self.nav.state == NavState::Rotating, self.cfg.nav_period, self.nav.trajectory(), key);
         if let Some(f) = out.finished {
             self.nav_finished(f);
         }
@@ -780,6 +785,7 @@ impl Sim {
         let (v, w) = (self.robot.v, self.robot.w);
         self.m.distance += (after.x - before.x).hypot(after.y - before.y);
         let motion = classify(v, w);
+        self.drive.on_physics(dt, v, motion, (after.x - before.x).hypot(after.y - before.y), self.nav.p.mppi.vx_max);
         match motion {
             Motion::Driving => self.m.time_driving += dt,
             Motion::Turning => self.m.time_turning += dt,
@@ -809,6 +815,7 @@ impl Sim {
         stalls.close(self.t);
         m.stalls = stalls.episodes;
         m.duration = self.t;
+        m.drive = self.drive.summary();
         m.wall_time = self.wall.elapsed().as_secs_f64();
         m.final_area = self.map.as_ref().map_or(0.0, |g| free_area(g, 50));
         m.explorer = self.explorer.stats().clone();

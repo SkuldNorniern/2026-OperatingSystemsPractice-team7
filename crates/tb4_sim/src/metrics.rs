@@ -160,6 +160,7 @@ pub struct Metrics {
     /// pose estimate error at the end: (m, rad)
     pub final_pose_error: (f64, f64),
     pub max_pose_error: f64,
+    pub drive: crate::drive::DriveSummary,
 }
 
 fn opt(t: Option<f64>) -> String {
@@ -215,6 +216,10 @@ impl Metrics {
         let _ = writeln!(w, "  final   {:6.1}", self.final_area);
         let _ = writeln!(w, "distance {:.1} m  driving {:.0} s  turning in place {:.0} s  still {:.0} s  no goal {:.0} s",
             self.distance, self.time_driving, self.time_turning, self.time_still, self.time_no_goal);
+        let d = &self.drive;
+        let _ = writeln!(w, "moving speed {:.3} m/s, at >= 80 % of cap {:.0} %  stop-to-turn {}  rotate mode {} x {:.0} s  cmd |dw| p95 {:.3}  |dv| p95 {:.3}  traj end jump p95 {:.1} cm, jitter p95 {:.1} cm",
+            d.moving_speed, 100.0 * d.at_cap_share, d.stop_turns, d.rotate_entries, d.time_rotate_mode, d.cmd_dw_p95, d.cmd_dv_p95,
+            100.0 * d.end_jump_p95, 100.0 * d.end_jitter_p95);
         let _ = writeln!(w, "still with a goal {:.0} s, of that stalls (> {STALL_MIN:.0} s) {} episodes, {:.0} s",
             self.time_still_with_goal, self.stalls.len(), self.stall_time());
         for (c, (n, t)) in self.stall_causes() {
@@ -265,6 +270,9 @@ impl Metrics {
         let _ = writeln!(w, "  \"time_still_s\": {:.3},", self.time_still);
         let _ = writeln!(w, "  \"time_no_goal_s\": {:.3},", self.time_no_goal);
         let _ = writeln!(w, "  \"time_still_with_goal_s\": {:.3},", self.time_still_with_goal);
+        let d = &self.drive;
+        let _ = writeln!(w, "  \"drive\": {{\"moving_speed\": {:.4}, \"at_cap_share\": {:.4}, \"stop_turns\": {}, \"rotate_entries\": {}, \"time_rotate_mode_s\": {:.3}, \"cmd_dw_p95\": {:.4}, \"cmd_dv_p95\": {:.4}, \"traj_end_jump_p95_m\": {:.4}, \"traj_end_jitter_p95_m\": {:.4}}},",
+            d.moving_speed, d.at_cap_share, d.stop_turns, d.rotate_entries, d.time_rotate_mode, d.cmd_dw_p95, d.cmd_dv_p95, d.end_jump_p95, d.end_jitter_p95);
         let area: Vec<String> = self.area.iter().map(|(t, a)| format!("{{\"t\": {t:.1}, \"m2\": {a:.3}}}")).collect();
         let _ = writeln!(w, "  \"mapped_area\": [{}],", area.join(", "));
         let _ = writeln!(w, "  \"final_area_m2\": {:.3},", self.final_area);

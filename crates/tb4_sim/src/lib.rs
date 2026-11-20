@@ -7,6 +7,7 @@
 //! Everything runs on a simulated clock. `Sim::state` gives a snapshot for a later viewer.
 
 pub mod chain;
+pub mod drive;
 pub mod metrics;
 pub mod nav;
 pub mod robot;

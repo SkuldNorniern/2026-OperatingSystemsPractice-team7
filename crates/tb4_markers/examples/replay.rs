@@ -80,7 +80,40 @@ fn main() {
         println!("dbg id {} ang {:.1} pnp {:.2} hit {:?} flat {:?} wall {:?}", o.id, ang.to_degrees(), o.pnp_range * h,
             hit.map(|h| (h.range * 1000.0).round() / 1000.0), flat, wall);
     }
-    let mut tr = Tracker::new(TrackParams::default());
+    // TRACK=robot: the marker_mapper values from team7.yaml (the robot's config); default: TrackParams::default()
+    let tp = if std::env::var("TRACK").as_deref() == Ok("robot") {
+        TrackParams {
+            min_views: 5,
+            min_wall_views: 3,
+            min_wall_fraction: 0.25,
+            min_triangulation_spread: 0.2,
+            max_triangulation_gap: 0.3,
+            strict_ids: vec![0, 341, 682, 1023],
+            require_scale_all: true,
+            max_spread: 0.08,
+            max_consistency: 12.0,
+            scale_tolerance: 0.4,
+            scale_min_samples: 2,
+            min_view_move: 0.05,
+            min_view_turn: 0.05,
+            ..TrackParams::default()
+        }
+    } else {
+        TrackParams::default()
+    };
+    // one-off overrides for testing: TP_<field>=value (floats; min_views/min_wall_views are usize)
+    let mut tp = tp;
+    let env = |k: &str| std::env::var(format!("TP_{k}")).ok();
+    if let Some(v) = env("max_consistency").and_then(|v| v.parse().ok()) { tp.max_consistency = v; }
+    if let Some(v) = env("scale_tolerance").and_then(|v| v.parse().ok()) { tp.scale_tolerance = v; }
+    if let Some(v) = env("max_spread").and_then(|v| v.parse().ok()) { tp.max_spread = v; }
+    if let Some(v) = env("min_wall_views").and_then(|v| v.parse().ok()) { tp.min_wall_views = v; }
+    if let Some(v) = env("min_wall_fraction").and_then(|v| v.parse().ok()) { tp.min_wall_fraction = v; }
+    if let Some(v) = env("min_views").and_then(|v| v.parse().ok()) { tp.min_views = v; }
+    if let Some(v) = env("scale_min_samples").and_then(|v| v.parse().ok()) { tp.scale_min_samples = v; }
+    if let Some(v) = env("require_scale_all").and_then(|v| v.parse::<i32>().ok()) { tp.require_scale_all = v != 0; }
+    if let Some(v) = env("strict_ids").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<i64>>()) { tp.strict_ids = v; }
+    let mut tr = Tracker::new(tp);
     let mut first_confirm: BTreeMap<i64, usize> = BTreeMap::new();
     let mut per_id: BTreeMap<i64, usize> = BTreeMap::new();
     for (k, o) in obs.iter().enumerate() {

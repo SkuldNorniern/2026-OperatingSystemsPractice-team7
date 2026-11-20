@@ -500,6 +500,52 @@ impl Tracker {
         })
     }
 
+    /// Rules target `id` still fails, short and in rule order ("views 3/5", "wall 1/3", ...).
+    /// Empty when confirmed or unknown. Shown with candidates so a real marker that never
+    /// confirms can be told apart from a rejected decoy.
+    pub fn pending(&self, id: i64) -> Vec<String> {
+        let Some(v) = self.estimates.get(&id) else { return Vec::new() };
+        if self.target(id).is_some_and(|t| t.confirmed) {
+            return Vec::new();
+        }
+        let p = &self.params;
+        let f = fuse(v);
+        let n = v.len();
+        let wall = v.iter().filter(|e| e.source == Source::Raycast).count();
+        let need_wall = p.min_wall_views.max((p.min_wall_fraction * n as f64).ceil() as usize);
+        let mut out = Vec::new();
+        if n < p.min_views {
+            out.push(format!("views {n}/{}", p.min_views));
+        }
+        if wall < need_wall {
+            out.push(format!("wall {wall}/{need_wall}"));
+        }
+        if p.strict_ids.contains(&id) && self.scale(id).is_none() {
+            out.push("size unknown".to_owned());
+        } else if p.require_scale_all && !self.scale_consistent(id) {
+            out.push(if self.scale(id).is_some() { "size mismatch" } else { "size unknown" }.to_owned());
+        }
+        if p.min_triangulation_spread > 0.0 {
+            match triangulate(v) {
+                Some(t) if t.spread < p.min_triangulation_spread => out.push(format!(
+                    "angle {:.0}/{:.0} deg",
+                    t.spread.to_degrees(),
+                    p.min_triangulation_spread.to_degrees()
+                )),
+                Some(t) if (t.x - f.x).hypot(t.y - f.y) > p.max_triangulation_gap => out.push("rays disagree".to_owned()),
+                None => out.push("one angle".to_owned()),
+                _ => {}
+            }
+        }
+        if f.sigma > p.max_spread {
+            out.push(format!("spread {:.0} cm", f.sigma * 100.0));
+        }
+        if f.consistency > p.max_consistency {
+            out.push("views disagree".to_owned());
+        }
+        out
+    }
+
     pub fn targets(&self) -> Vec<Target> {
         self.estimates.keys().filter_map(|&id| self.target(id)).collect()
     }
@@ -883,6 +929,30 @@ mod tests {
             t.add(1, &view_at((0.25 * k as f64, 0.6), m, 0.0, Source::Raycast));
         }
         assert!(t.target(1).unwrap().confirmed);
+    }
+
+    #[test]
+    fn pending_names_the_rules_a_candidate_still_fails() {
+        let m = (2.4, -1.3);
+        let mut t = Tracker::new(TrackParams::default());
+        assert!(t.pending(1).is_empty(), "unknown id");
+        t.add(1, &Estimate::point(2.4, -1.3, Source::PnpRange));
+        let p = t.pending(1);
+        assert!(p.iter().any(|r| r.starts_with("views 1/")), "{p:?}");
+        assert!(p.iter().any(|r| r.starts_with("wall 0/")), "{p:?}");
+        // wall-backed views from one spot: only the angle is missing
+        let mut t = Tracker::new(TrackParams::default());
+        for k in 0..7 {
+            t.add(1, &view_at((0.0, 0.02 * k as f64), m, 0.0, Source::Raycast));
+        }
+        let p = t.pending(1);
+        assert!(p.iter().any(|r| r.starts_with("angle ")), "{p:?}");
+        assert!(!p.iter().any(|r| r.starts_with("views") || r.starts_with("wall")), "{p:?}");
+        for k in 0..4 {
+            t.add(1, &view_at((0.25 * k as f64, 0.6), m, 0.0, Source::Raycast));
+        }
+        assert!(t.target(1).unwrap().confirmed);
+        assert!(t.pending(1).is_empty());
     }
 
     #[test]

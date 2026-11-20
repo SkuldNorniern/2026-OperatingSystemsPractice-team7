@@ -225,7 +225,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 0.7]   # team7: same as velocity_guard and navigator vx_max / wz_max
+    max_velocity: [0.30, 0.0, 0.7]   # team7: same as velocity_guard and navigator vx_max / wz_max
     min_velocity: [0.0, 0.0, -0.7] # team7: no backward movement
     max_accel: [0.3, 0.0, 0.6]
     max_decel: [-0.5, 0.0, -0.8]

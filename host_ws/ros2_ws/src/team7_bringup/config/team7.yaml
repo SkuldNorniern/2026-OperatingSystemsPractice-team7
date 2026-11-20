@@ -42,7 +42,7 @@ marker_mapper:
     edge_triangulation_gap: 0.15  # m, edge hit where earlier bearings cross is on the face: teaches the scale (spec: marker sizes differ)
     ignore_ids: [-1]
     slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
-    slow_percent: 60.0
+    slow_percent: 75.0
     slow_hold: 2.5
     image_time_offset: 0.0    # s, add to image stamp if camera stamps are late/early
 
@@ -102,7 +102,7 @@ velocity_guard:
   ros__parameters:
     input_topic: /cmd_vel_filtered
     output_topic: /cmd_vel
-    max_forward: 0.26        # m/s, Create 3 safe-mode limit is about 0.31
+    max_forward: 0.30        # m/s, Create 3 safe-mode limit is about 0.31 (0.306 with safety_override none)
     max_turn: 0.7
     command_timeout: 0.5
 
@@ -174,9 +174,9 @@ navigator:
     mppi_samples: 1000
     mppi_horizon: 40
     mppi_threads: 4
-    vx_max: 0.26             # same as velocity_guard and velocity_smoother. Sim (studio, 10 seeds): all 3 targets 9/10 at
-                             # median 348 s vs 7/10 at 401 s with 0.18; no collisions in either. marker_mapper slows to 60 %
-                             # near an unconfirmed marker
+    vx_max: 0.30             # same as velocity_guard and velocity_smoother. 0.26 was tuned in sim (studio, 10 seeds: 9/10 at
+                             # median 348 s vs 7/10 at 401 s with 0.18, no collisions). 0.30 is NOT sim-tested yet.
+                             # marker_mapper slows to 75 % near an unconfirmed marker
     wz_max: 0.7
     goal_tolerance_xy: 0.15
     goal_tolerance_yaw: 0.3

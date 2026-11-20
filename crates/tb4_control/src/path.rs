@@ -46,6 +46,15 @@ impl RefPath {
         self.s.last().copied().unwrap_or(0.0)
     }
 
+    /// keep the first `n` points
+    pub fn truncate(&mut self, n: usize) {
+        self.pts.truncate(n);
+        self.s.truncate(n);
+        self.ahead.truncate(n);
+        let last = n.saturating_sub(1);
+        self.ahead.iter_mut().for_each(|a| *a = (*a).min(last));
+    }
+
     /// first index with arc length >= s
     pub fn index_at(&self, s: f64) -> usize {
         self.s.partition_point(|&x| x < s).min(self.pts.len().saturating_sub(1))

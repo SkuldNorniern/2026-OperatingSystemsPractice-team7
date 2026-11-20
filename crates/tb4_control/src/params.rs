@@ -28,6 +28,10 @@ pub struct MppiParams {
     pub goal_heading_weight: f64,
     /// distance at which goal heading is scored before xy tolerance is reached; 0 = only after
     pub goal_heading_activate: f64,
+    /// a path end with less clearance than this (a frontier goal the map has since filled) is replaced by
+    /// the last path point that has it, at most `goal_backoff` back along the path; 0 = off
+    pub goal_clearance: f64,
+    pub goal_backoff: f64,
     pub obstacle_weight: f64,
     /// soft obstacle cost band beyond robot_radius
     pub inflation: f64,
@@ -75,6 +79,8 @@ impl Default for MppiParams {
             goal_activate_dist: 0.6,
             goal_heading_weight: 4.0,
             goal_heading_activate: 0.0,
+            goal_clearance: 0.33,
+            goal_backoff: 0.4,
             obstacle_weight: 6.0,
             inflation: 0.30,
             collision_cost: 1e6,
@@ -133,6 +139,8 @@ impl MppiParams {
             "goal_activate_dist" => &mut self.goal_activate_dist,
             "goal_heading_weight" => &mut self.goal_heading_weight,
             "goal_heading_activate" => &mut self.goal_heading_activate,
+            "goal_clearance" => &mut self.goal_clearance,
+            "goal_backoff" => &mut self.goal_backoff,
             "obstacle_weight" => &mut self.obstacle_weight,
             "inflation" => &mut self.inflation,
             "collision_cost" => &mut self.collision_cost,

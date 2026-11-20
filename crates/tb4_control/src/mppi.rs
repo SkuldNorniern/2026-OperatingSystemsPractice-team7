@@ -274,6 +274,24 @@ impl Mppi {
         j
     }
 
+    /// Frontier goals can end up inside a wall once it is mapped: MPPI then parks short of the goal
+    /// (and in the collision monitor's range) until the explorer gives up, 15-35 s in the sim. End the
+    /// path at the last point with `goal_clearance` instead, if there is one within `goal_backoff`.
+    fn trim_blocked_goal(&mut self, df: &DistanceField) {
+        let p = &self.params;
+        let path = &self.path;
+        let n = path.pts.len();
+        let free = |i: usize| df.at(path.pts[i].0, path.pts[i].1) as f64 >= p.goal_clearance;
+        if p.goal_backoff <= 0.0 || n < 2 || free(n - 1) {
+            return;
+        }
+        let s_min = path.length() - p.goal_backoff;
+        if let Some(i) = (0..n - 1).rev().take_while(|&i| path.s[i] >= s_min).find(|&i| free(i)) {
+            self.path.truncate(i + 1);
+            self.path_idx = self.path_idx.map(|j| j.min(i));
+        }
+    }
+
     fn halt(&mut self, cmd: Command) -> Command {
         self.u.fill(Control::ZERO);
         self.traj.clear();
@@ -283,6 +301,9 @@ impl Mppi {
     fn compute_inner(&mut self, state: &RobotState, df: Option<&DistanceField>) -> Command {
         if self.path.is_empty() {
             return self.halt(Command::stop(false, true, 0.0));
+        }
+        if let Some(df) = df {
+            self.trim_blocked_goal(df);
         }
         let pose = state.pose;
         let goal = *self.path.pts.last().unwrap();

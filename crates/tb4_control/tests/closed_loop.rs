@@ -140,6 +140,29 @@ fn avoids_obstacle_on_path() {
 }
 
 #[test]
+fn goal_inside_a_wall_is_reached_short_of_it() {
+    let p = params(2);
+    let meta = GridMeta { width: 80, height: 40, resolution: 0.05, origin_x: -1.0, origin_y: -1.0 };
+    let mut g = Grid::filled(meta, 0);
+    // wall at x in [1.5, 1.6]: the path ends 0.05 m into it
+    for cy in 0..40 {
+        for cx in 50..52 {
+            g.set(Cell { x: cx, y: cy }, 100);
+        }
+    }
+    let df = DistanceField::from_grid(&g, 65, false);
+    let mut m = Mppi::new(p.clone());
+    m.set_path(&[(0.0, 0.0), (1.55, 0.0)], None);
+    let start = state(0.0, 0.0, 0.0);
+    let r = run(&mut m, start, Some(&df), 300);
+    assert!(r.reached, "parked at {:?}", r.states.last().unwrap().pose);
+    let end = r.states.last().unwrap().pose;
+    assert!(end.x < 1.5 - p.robot_radius && end.x > 1.55 - p.goal_backoff - p.goal_tolerance_xy, "end {end:?}");
+    let last = *m.path_points().last().unwrap();
+    assert!(df.at(last.0, last.1) as f64 >= p.goal_clearance);
+}
+
+#[test]
 fn deterministic_across_threads() {
     let df = blocked_world();
     let path = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)];

@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(f) = s.obs_log.as_mut() {
             let _ = f.flush();
         }
-        let _ = pub_targets.publish(&markers(&s.map_frame, &targets));
+        let _ = pub_targets.publish(&markers(&s.map_frame, &targets, |id| s.tracker.pending(id)));
         // marker id = aruco id, so the explorer keys approaches by id: without ids a jumping
         // estimate looked like a confirmation and the same chair label was approached 3 times
         let approach = MarkerArray {
@@ -288,7 +288,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn markers(frame: &str, targets: &[Target]) -> MarkerArray {
+/// candidate labels: "ID 3? 5v | wall 1/3, angle 4/11 deg" (rules still failing after the bar)
+fn markers(frame: &str, targets: &[Target], pending: impl Fn(i64) -> Vec<String>) -> MarkerArray {
     let mut out = vec![viz::delete_all(frame)];
     for t in targets {
         let (ns, c) = if t.confirmed {
@@ -313,7 +314,12 @@ fn markers(frame: &str, targets: &[Target]) -> MarkerArray {
         txt.text = if t.confirmed {
             format!("ID {} ({:.2}, {:.2})", t.id, t.x, t.y)
         } else {
-            format!("ID {}? {}v", t.id, t.views)
+            let why = pending(t.id);
+            if why.is_empty() {
+                format!("ID {}? {}v", t.id, t.views)
+            } else {
+                format!("ID {}? {}v | {}", t.id, t.views, why.join(", "))
+            }
         };
         out.push(s);
         out.push(txt);

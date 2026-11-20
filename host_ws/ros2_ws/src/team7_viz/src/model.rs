@@ -515,9 +515,9 @@ pub fn view_points(mks: &[Mk]) -> Vec<(f64, f64)> {
     mks.iter().filter(|m| m.ns == "camera_views").flat_map(|m| m.pts.iter().copied()).collect()
 }
 
-/// views from a tentative label "ID 3? 2v"
+/// views from a tentative label "ID 3? 2v", also with the failing rules after " | "
 fn label_views(text: &str) -> Option<u32> {
-    text.split_whitespace().last()?.strip_suffix('v')?.parse().ok()
+    text.split(" | ").next()?.split_whitespace().last()?.strip_suffix('v')?.parse().ok()
 }
 
 /// marker_mapper's targets: spheres give the position, tentative labels the view count

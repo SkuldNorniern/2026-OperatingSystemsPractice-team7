@@ -11,6 +11,7 @@ def parser():
     mode=ap.add_mutually_exclusive_group();mode.add_argument('--execute',action='store_true');mode.add_argument('--check',action='store_true')
     ap.add_argument('--config',type=Path,default=Path(__file__).with_name('robot_config.json'))
     ap.add_argument('--marker-size',type=float,help='Actual outer black marker side length in metres (same size for all unspecified IDs)')
+    ap.add_argument('--marker-ids', type=int, nargs=3, metavar='ID', help='Only accept these three physical ArUco IDs')
     ap.add_argument('--dictionary',default=None)
     ap.add_argument('--room-width',type=float);ap.add_argument('--room-height',type=float)
     ap.add_argument('--scan-topic',default='/scan');ap.add_argument('--odom-topic',default='/odom');ap.add_argument('--map-topic',default='/map')
@@ -19,6 +20,7 @@ def parser():
     ap.add_argument('--optical-frame',default='')
     ap.add_argument('--map-frame',default='map');ap.add_argument('--base-frame',default='base_link')
     ap.add_argument('--nav2',action='store_true',help='Use the existing Nav2 actions for navigation and rotation')
+    ap.add_argument('--marker-slowdown', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--cmd-topic',default='/cmd_vel')
     ap.add_argument('--cmd-type',choices=['stamped','unstamped'],default='stamped' if os.environ.get('ROS_DISTRO','jazzy')=='jazzy' else 'unstamped')
     ap.add_argument('--timeout',type=float,default=30);ap.add_argument('--time-limit',type=float,default=600)
@@ -28,7 +30,14 @@ def parser():
 def load_config(ap, args):
     cfg=json.loads(args.config.read_text())
     if args.marker_size is not None:cfg['default_marker_size']=args.marker_size
+    if args.marker_ids is not None:
+        cfg['marker_ids'] = args.marker_ids
     if args.dictionary:cfg['dictionary']=args.dictionary
+    ids = cfg.get('marker_ids') or [int(key) for key in cfg.get('marker_sizes', {})]
+    if ids and (len(ids) != 3 or len(set(ids)) != 3 or any(not 0 <= i <= 32767 for i in ids)):
+        ap.error('Provide three distinct nonnegative marker IDs')
+    if args.execute and ids and not cfg.get('default_marker_size') and any(str(i) not in cfg['marker_sizes'] for i in ids):
+        ap.error('Each target ID needs a marker size, or set a common --marker-size')
     for name in ['room_width','room_height']:
         if getattr(args,name) is not None:cfg[name]=getattr(args,name)
     if args.execute:

@@ -1,13 +1,14 @@
 import math,threading,time,unittest
 from types import SimpleNamespace
 import cv2,numpy as np
-from mission import Grid,Mission,wrap
+from mission import Grid,Mission,overlaps_qr,wrap
+from rust_detector import RustDetector
 from gz.msgs10.laserscan_pb2 import LaserScan
 
 class MissionTests(unittest.TestCase):
     def stub(self):
         m=Mission.__new__(Mission);m.cfg={'room_width':19.85,'room_height':11.05,'wall_standoff':.8,'scan_every_m':5.,'marker_sizes':{'8':.25,'19':.2,'29':.28},'marker_standoff':.8}
-        m.pose=(-5.,0.,0.);m.markers={};m.visited=set();m.events=[];m.event=lambda e,**kw:m.events.append((e,kw));m.grid=Grid();m.path=[]
+        m.pose=(-5.,0.,0.);m.markers={};m.visited=set();m.visit_ids=None;m.expected_targets=3;m.command=lambda *a:None;m.events=[];m.event=lambda e,**kw:m.events.append((e,kw));m.grid=Grid();m.path=[]
         return m
     def test_nearest_wall_and_four_distinct_corners(self):
         m=self.stub();s=LaserScan();s.range_min=.1;s.range_max=12;s.angle_min=-math.pi;s.angle_step=2*math.pi/360
@@ -27,12 +28,38 @@ class MissionTests(unittest.TestCase):
     def test_nearest_unvisited_marker_and_front_standoff(self):
         m=self.stub();m.pose=(0,0,0)
         for mid,x in [('8',4),('19',2),('29',6)]:m.markers[mid]={'id':int(mid),'x':x,'y':0,'normal_x':-1,'normal_y':0,'observations':3}
+        m.visit_ids = list(m.markers)
         m.next_marker();self.assertEqual(m.target['id'],19);self.assertAlmostEqual(m.goal[0],1.2)
         m.visited.add('19');m.next_marker();self.assertEqual(m.target['id'],8)
     def test_astar_routes_around_obstacle(self):
         g=Grid();x,y=g.cell(1,0);g.log[y-5:y+6,x-2:x+3]=4
         path=g.plan((0,0),(2,0),(-4,4,-4,4));self.assertTrue(path)
         self.assertGreater(max(abs(y) for x,y in path),.6)
+    def test_third_confirmed_id_cancels_patrol_and_starts_visits(self):
+        m=self.stub();m.state='PATROL';m.pose=(0,0,0)
+        stops=[];m.command=lambda *a:stops.append(a)
+        for mid,x in [('8',4),('19',2),('29',6)]:
+            m.markers[mid]={'id':int(mid),'x':x,'y':0,'normal_x':-1,'normal_y':0,'observations':2}
+        m.markers['29']['observations']=1
+        self.assertFalse(m.begin_marker_visits());self.assertEqual(stops,[])
+        m.markers['29']['observations']=2
+        self.assertTrue(m.begin_marker_visits());self.assertEqual(stops,[()])
+        self.assertEqual(m.state,'VISIT_MARKER');self.assertEqual(m.target['id'],19)
+        self.assertFalse(m.begin_marker_visits())
+    def test_qr_is_not_an_aruco_and_only_overlapping_candidates_are_removed(self):
+        qr = cv2.QRCodeEncoder_create().encode('TurtleBot V1 QR test')
+        qr = cv2.resize(qr, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+        frame = cv2.copyMakeBorder(qr, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255)
+        found, decoded, points, _ = cv2.QRCodeDetector().detectAndDecodeMulti(frame)
+        self.assertTrue(found)
+        polygons = [cv2.convexHull(p) for value, p in zip(decoded, points) if value]
+        self.assertTrue(overlaps_qr(points[0], polygons))
+        self.assertFalse(overlaps_qr(points[0] + frame.shape[1], polygons))
+        detector = RustDetector()
+        try:
+            self.assertIsNone(detector.detectMarkers(frame)[1])
+        finally:
+            detector.close()
     def test_real_5x5_dictionary_recognizes_all_three(self):
         d=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50);det=cv2.aruco.ArucoDetector(d)
         for mid in [8,19,29]:

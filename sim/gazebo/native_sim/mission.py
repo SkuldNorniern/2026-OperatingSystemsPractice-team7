@@ -65,6 +65,19 @@ class Grid:
         cv2.imwrite(str(out/'map.pgm'),np.flipud(image))
         (out/'map.yaml').write_text(f'image: map.pgm\nresolution: {self.res}\norigin: [{self.origin[0]}, {self.origin[1]}, 0.0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
 
+def overlaps_qr(corners, qr_polygons):
+    """Disregard ArUco candidates inside a verified QR symbol."""
+    quad = np.ascontiguousarray(corners.reshape(4, 2), dtype=np.float32)
+    area = cv2.contourArea(quad)
+    if area <= 0:
+        return False
+    for polygon in qr_polygons:
+        overlap, _ = cv2.intersectConvexConvex(quad, polygon)
+        if overlap >= 0.5 * area:
+            return True
+    return False
+
+
 class Mission:
     def __init__(self,args,transport=None):
         self.version='v1'
@@ -76,7 +89,12 @@ class Mission:
         self.events=(self.out/'events.jsonl').open('w');self.lock=threading.Lock()
         self.pose=None;self.scan=None;self.image=None;self.odom_seen=0;self.scan_seen=0
         self.odom_t=0.;self.grid=Grid();self.markers={};self.visited=set();self.running=True
-        self.detector=RustDetector(self.cfg['dictionary'])
+        self.allowed_ids = {str(i) for i in self.cfg.get('marker_ids', []) or self.cfg['marker_sizes']}
+        self.detector=RustDetector(self.cfg['dictionary'], allow_correction=bool(self.allowed_ids))
+        self.qr_detector = cv2.QRCodeDetector()
+        self.expected_targets = self.cfg.get('expected_targets', len(self.cfg['marker_sizes']))
+        self.visit_ids = None
+        self.patrol_route = ()
         self.total_distance=0.;self.total_rotation=0.;self.first_sim_time=None
         if transport is None:
             from gazebo_transport import GazeboTransport
@@ -100,6 +118,11 @@ class Mission:
         with self.lock:self.image=(m,self.pose)
     def command(self,v=0,w=0):
         self.transport.publish(v,w)
+    def show_markers(self):
+        publish = getattr(self.transport, 'publish_markers', None)
+        if publish is not None:
+            publish(self.markers, self.visited)
+
     def save(self):
         self.grid.save(self.out)
         (self.out/'markers.json').write_text(json.dumps({'frame':self.frame,'dictionary':self.cfg['dictionary'],'markers':self.markers,'visited':sorted(self.visited)},indent=2))
@@ -114,9 +137,17 @@ class Mission:
         gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY)
         corners,ids,_=self.detector.detectMarkers(gray)
         if ids is None:return
+        # Finder-like squares alone can be false positives in a room with several
+        # ArUco tags. Mask only verified QR polygons; their payload is discarded.
+        has_qr, decoded, qr_corners, _ = self.qr_detector.detectAndDecodeMulti(gray)
+        qr_polygons = [cv2.convexHull(p) for value, p in zip(decoded, qr_corners) if value] if has_qr else []
+        updated = False
+        frame_ids = set()
         f=m.width/(2*math.tan(1.2/2));K=getattr(m,'intrinsics',np.array([[f,0,m.width/2],[0,f,m.height/2],[0,0,1]],np.float64))
         D=getattr(m,'distortion',None)
         for mid,c in zip(ids.flatten(),corners):
+            if (self.allowed_ids and str(mid) not in self.allowed_ids) or mid in frame_ids or overlaps_qr(c, qr_polygons):
+                continue
             size=self.cfg['marker_sizes'].get(str(mid),self.cfg.get('default_marker_size'))
             if size is None:continue
             edges=np.linalg.norm(np.roll(c.reshape(4,2),-1,axis=0)-c.reshape(4,2),axis=1)
@@ -146,7 +177,16 @@ class Mission:
                 count=old['observations']+1;weight=1/min(count,20)
                 mx=old['x']*(1-weight)+mx*weight;my=old['y']*(1-weight)+my*weight
             self.markers[str(mid)]={'id':int(mid),'x':mx,'y':my,'normal_x':float(nx),'normal_y':float(ny),'size_m':size,'observations':count}
-            if not old:self.event('marker_detected',id=int(mid),x=mx,y=my)
+            frame_ids.add(mid)
+            updated = True
+            if not old:
+                self.event('marker_detected',id=int(mid),x=mx,y=my)
+                slowdown = getattr(self.transport, 'request_marker_slowdown', None)
+                if slowdown is not None:
+                    slowdown()
+            if count == 2:self.event('marker_confirmed',id=int(mid),x=mx,y=my)
+        if updated:
+            self.show_markers()
             temporary=self.out/'markers.json.tmp'
             temporary.write_text(json.dumps({'frame':self.frame,'dictionary':self.cfg['dictionary'],'markers':self.markers,'visited':sorted(self.visited)},indent=2));temporary.replace(self.out/'markers.json')
         cv2.imwrite(str(self.out/'camera_latest.jpg'),cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR))
@@ -176,18 +216,43 @@ class Mission:
         # CCW perimeter starting with the next corner along the nearest side.
         first={0:1,1:2,2:3,3:0}[side]
         self.route=[corners[(first+i)%4] for i in range(4)]+[self.goal]
+        self.patrol_route = tuple(self.route)
         self.state='APPROACH_WALL';self.event('room_estimated',bounds=walls,first_goal=self.goal)
         return True
     def begin_spin(self,after):
         self.after_spin=after;self.state='SCAN_360';self.spin_total=0;self.last_yaw=self.pose[2]
         self.event('scan_begin',distance_m=self.distance);self.distance=0
+    def begin_marker_visits(self):
+        if self.visit_ids is not None:
+            return False
+        confirmed = [key for key, marker in self.markers.items() if marker['observations'] >= 2]
+        if len(confirmed) < self.expected_targets:
+            return False
+        self.visit_ids = confirmed[:self.expected_targets]
+        self.command()  # Cancel the current Nav2 action before the first visit.
+        self.event('marker_search_complete', ids=[int(key) for key in self.visit_ids])
+        self.next_marker()
+        return True
+
     def next_marker(self):
-        candidates=[m for key,m in self.markers.items() if key not in self.visited and m['observations']>=2]
+        candidates = [self.markers[key] for key in self.visit_ids if key not in self.visited]
         if not candidates:
-            self.state='DONE';self.status='completed' if len(self.visited)>=self.cfg.get('expected_targets',len(self.cfg['marker_sizes'])) else 'completed_with_missing_markers'
-            self.event('mission_finished',visited=sorted(self.visited),detected=list(self.markers),status=self.status);return
+            self.state = 'DONE'
+            self.status = 'completed'
+            self.event('mission_finished', visited=sorted(self.visited), detected=list(self.markers), status=self.status)
+            return
         m=min(candidates,key=lambda m:math.hypot(m['x']-self.pose[0],m['y']-self.pose[1]));self.target=m
-        d=self.cfg['marker_standoff'];self.goal=(m['x']+d*m['normal_x'],m['y']+d*m['normal_y'])
+        d = self.cfg['marker_standoff']
+        front_points = [(m['x'] + (d + extra) * m['normal_x'], m['y'] + (d + extra) * m['normal_y'])
+                        for extra in (0.0, 0.2, 0.4, 0.6)]
+        grid = self.grid
+        blocked = grid.blocked()
+        self.goal = front_points[0]
+        for point in front_points:
+            x, y = grid.cell(*point)
+            if 0 <= x < grid.n and 0 <= y < grid.n and not blocked[y, x]:
+                self.goal = point
+                break
         self.state='VISIT_MARKER';self.path=[];self.event('visit_begin',id=m['id'],goal=self.goal)
     def tick(self):
         now=time.monotonic()
@@ -202,6 +267,8 @@ class Mission:
         self.detect(pair)
         if not self.external_map and t-self.last_map>.15:self.grid.update(scan,p);self.last_map=t
         if t-self.last_save>5:self.save();self.last_save=t
+        if self.begin_marker_visits():
+            return
         if self.state=='WAIT_SENSORS':
             if not self.initialize(scan,p):self.command();return
         if self.last_pose:
@@ -214,15 +281,14 @@ class Mission:
             spin_finished = self.transport.turn(TAU, 'scan') if self.nav2 else self.spin_total>=TAU-.04
             if spin_finished:
                 self.command();self.state=self.after_spin;self.path=[];self.event('scan_finished',radians=self.spin_total)
-                if self.state=='SELECT_MARKER':self.next_marker()
             elif not self.nav2:self.command(0,.55)
             return
         if self.state=='DONE':self.command();return
         if self.state=='FACE_MARKER':
-            err=wrap(math.atan2(-self.target['normal_y'],-self.target['normal_x'])-p[2])
+            err=wrap(math.atan2(self.target['y']-p[1], self.target['x']-p[0])-p[2])
             aligned = self.transport.turn(err, 'face_marker') if self.nav2 and abs(err)>=.06 else abs(err)<.06
             if aligned:
-                self.command();self.visited.add(str(self.target['id']));self.event('marker_visited',id=self.target['id']);self.next_marker()
+                self.command();self.visited.add(str(self.target['id']));self.event('marker_visited',id=self.target['id']);self.show_markers();self.next_marker()
             elif not self.nav2:self.command(0,float(np.clip(1.5*err,-.5,.5)))
             return
         if self.state=='PATROL' and self.distance>=self.cfg['scan_every_m']:
@@ -235,7 +301,11 @@ class Mission:
             elif self.state=='PATROL':
                 self.event('waypoint_reached',goal=self.goal)
                 if self.route:self.goal=self.route.pop(0)
-                else:self.begin_spin('SELECT_MARKER')
+                else:
+                    self.route = list(self.patrol_route)
+                    self.goal = self.route.pop(0)
+                    self.event('patrol_lap_complete', confirmed=sum(m['observations'] >= 2 for m in self.markers.values()))
+                    self.begin_spin('PATROL')
             elif self.state=='VISIT_MARKER':self.state='FACE_MARKER'
             return
         if self.nav2:return

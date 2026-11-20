@@ -4,11 +4,18 @@ from types import SimpleNamespace as NS
 import cv2,numpy as np
 from control import CommandGate,transform_matrix
 
+MARKER_TOPIC = '/team7/v1/targets'
+MARKER_SLOW_PERCENT = 65.0
+MARKER_SLOW_HOLD = 2.5
+
 class ROSAdapter:
     def __init__(self,args):
         self.args=args;self.mission=None;self.gate=CommandGate();self.gate.execute=args.execute
         self.info=None;self.latest_scan=None;self.latest_pose=None;self.errors={};self.closed=False
         self.lock=threading.Lock();self.last_graph_check=0.;self.conflict=False;self.motion=None;self.nav2_ready=False
+        self.speed_limit_pub = None
+        self.slow_until = self.last_speed_limit = 0.0
+        self.marker_slow_active = False
     def start(self,mission):
         import rclpy
         from rclpy.node import Node
@@ -17,6 +24,7 @@ class ROSAdapter:
         from sensor_msgs.msg import LaserScan,CameraInfo,CompressedImage,Image
         from nav_msgs.msg import Odometry,OccupancyGrid
         from geometry_msgs.msg import Twist,TwistStamped
+        from visualization_msgs.msg import Marker, MarkerArray
         from tf2_ros import Buffer,TransformListener
         self.rclpy=rclpy;self.mission=mission;self.node=Node('team7_robot_mission')
         self.tf=Buffer();self.listener=TransformListener(self.tf,self.node)
@@ -31,10 +39,63 @@ class ROSAdapter:
         self.node.create_subscription(CompressedImage if self.args.image_topic.endswith('/compressed') else Image,self.args.image_topic,self.image_cb,qos_profile_sensor_data)
         map_qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.node.create_subscription(OccupancyGrid,self.args.map_topic,self.map_cb,map_qos)
+        if mission is not None:
+            self.Marker, self.MarkerArray = Marker, MarkerArray
+            self.marker_pub = self.node.create_publisher(MarkerArray, MARKER_TOPIC, map_qos)
+            self.publish_markers({}, set())
+            if self.motion is not None and self.args.marker_slowdown:
+                from nav2_msgs.msg import SpeedLimit
+                self.SpeedLimit = SpeedLimit
+                self.speed_limit_pub = self.node.create_publisher(SpeedLimit, '/speed_limit', 10)
         self.node.create_timer(.05,self.timer)
         self.executor=SingleThreadedExecutor();self.executor.add_node(self.node)
         self.thread=threading.Thread(target=self.executor.spin,daemon=True);self.thread.start()
     def error(self,key,exception):self.errors[key]=str(exception)
+    def publish_markers(self, markers, visited):
+        stamp = self.node.get_clock().now().to_msg()
+        clear = self.Marker()
+        clear.header.frame_id = self.args.map_frame
+        clear.header.stamp = stamp
+        clear.action = self.Marker.DELETEALL
+        result = [clear]
+        for key, target in markers.items():
+            confirmed = target['observations'] >= 2
+            color = (0.25, 0.65, 1.0) if key in visited else (
+                (0.15, 0.95, 0.30) if confirmed else (1.0, 0.70, 0.15))
+            for label in (False, True):
+                marker = self.Marker()
+                marker.header.frame_id = self.args.map_frame
+                marker.header.stamp = stamp
+                marker.ns = 'v1_labels' if label else 'v1_markers'
+                marker.id = target['id']
+                marker.action = self.Marker.ADD
+                marker.type = self.Marker.TEXT_VIEW_FACING if label else self.Marker.SPHERE
+                marker.pose.position.x = target['x']
+                marker.pose.position.y = target['y']
+                marker.pose.position.z = 0.32 if label else 0.12
+                marker.pose.orientation.w = 1.0
+                marker.scale.x = marker.scale.y = marker.scale.z = 0.20
+                marker.color.r, marker.color.g, marker.color.b = color
+                marker.color.a = 1.0
+                if label:
+                    marker.text = f"ArUco {target['id']}" + ('' if confirmed else ' ?')
+                result.append(marker)
+        self.marker_pub.publish(self.MarkerArray(markers=result))
+
+    def request_marker_slowdown(self):
+        if self.speed_limit_pub is not None:
+            self.slow_until = time.monotonic() + MARKER_SLOW_HOLD
+
+    def update_marker_speed_limit(self, now):
+        if self.speed_limit_pub is None:
+            return
+        active = not self.closed and now < self.slow_until
+        if active != self.marker_slow_active or (active and now - self.last_speed_limit >= 1.0):
+            limit = MARKER_SLOW_PERCENT if active else 0.0
+            message = self.SpeedLimit(percentage=True, speed_limit=limit)
+            self.speed_limit_pub.publish(message)
+            self.marker_slow_active, self.last_speed_limit = active, now
+
     def age(self,header):
         then=header.stamp.sec+header.stamp.nanosec*1e-9
         now=self.node.get_clock().now().nanoseconds*1e-9
@@ -152,6 +213,8 @@ class ROSAdapter:
         except Exception as e:self.gate.fresh.pop('tf',None);self.error('tf',e)
         if self.motion is not None and not self.ready():
             self.motion.cancel()
+        if not self.closed:
+            self.update_marker_speed_limit(time.monotonic())
         if self.pub:
             v,w=self.gate.output() if not self.conflict else (0.,0.)
             self.emit(v,w)
@@ -177,4 +240,5 @@ class ROSAdapter:
             for _ in range(3):self.emit(0.,0.);time.sleep(.05)
         if hasattr(self,'executor'):
             self.executor.shutdown(timeout_sec=2);self.thread.join(timeout=2)
+        self.update_marker_speed_limit(time.monotonic())
         if hasattr(self,'node'):self.node.destroy_node()

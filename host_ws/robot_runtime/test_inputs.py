@@ -2,6 +2,7 @@
 import math,sys,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest.mock import patch
 import cv2,numpy as np
 from ros_transport import ROSAdapter
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'sim/gazebo/native_sim'))
@@ -33,6 +34,18 @@ class InputTests(unittest.TestCase):
     def test_wrong_map_frame_is_rejected(self):
         a=self.adapter();a.map_cb(NS(header=self.header('wrong_frame')))
         self.assertNotIn('map',a.gate.fresh)
+    def test_validated_candidate_applies_and_clears_speed_limit(self):
+        adapter = self.adapter()
+        messages = []
+        adapter.SpeedLimit = NS
+        adapter.speed_limit_pub = NS(publish=messages.append)
+        adapter.update_marker_speed_limit(9.0)
+        with patch('ros_transport.time.monotonic', return_value=10.0):
+            adapter.request_marker_slowdown()
+        for now in (10.0, 10.5, 11.0, 12.5, 13.0):
+            adapter.update_marker_speed_limit(now)
+        self.assertEqual([(m.percentage, m.speed_limit) for m in messages],
+                         [(True, 65.0), (True, 65.0), (True, 0.0)])
     def test_camera_passes_real_calibration_and_tf(self):
         a=self.adapter();frame='camera_optical'
         a.info=NS(width=64,height=48,header=self.header(frame),k=[100.,0,32,0,100,24,0,0,1],d=[0.,0.,0.,0.,0.])

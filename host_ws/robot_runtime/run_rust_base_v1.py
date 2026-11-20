@@ -28,7 +28,7 @@ def stop(process):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, add_help=False)
     ap.add_argument('--rust-base', type=Path, default=ROOT.with_name(ROOT.name + '-rust_base'))
-    ap.add_argument('--no-prepare', action='store_true', help='Skip upstream undock and odometry reset')
+    ap.add_argument('--no-prepare', action='store_true', help='Compatibility option. V1 always skips upstream robot preparation.')
     ap.add_argument('--no-record', action='store_true', help='Skip upstream rosbag recording')
     ap.add_argument('--no-rviz', action='store_true', help='Run without RViz')
     if '-h' in sys.argv[1:] or '--help' in sys.argv[1:]:
@@ -46,17 +46,16 @@ def main():
         ap.error(f'Expected a built rust_base checkout at {checkout}. See host_ws/robot_runtime/README.md or pass --rust-base.')
     if not (ROOT / 'target/release/libtb4_aruco_gazebo.so').is_file() and args.execute:
         ap.error('Build V1 on this host first with host_ws/scripts/build_robot.sh.')
-    # Validate dependencies before the upstream demo can undock or reset odometry.
-    import action_msgs.msg, cv2, nav2_msgs.action, numpy, rclpy, tf2_ros
+    # Validate dependencies before starting the upstream demo.
+    import action_msgs.msg, cv2, nav2_msgs.action, nav2_msgs.msg, numpy, rclpy, tf2_ros, visualization_msgs.msg
     if args.execute:
         from rust_detector import RustDetector
         RustDetector(cfg['dictionary']).close()
 
     folder = args.output_dir.expanduser().resolve() / time.strftime('%Y%m%d-%H%M%S-rust-base-v1')
     folder.mkdir(parents=True)
-    command = ['bash', str(demo)]
-    if stack_args.no_prepare or not args.execute:
-        command.append('--no-prepare')
+    # Dock actions can move the base independently of the forward-only velocity guard.
+    command = ['bash', str(demo), '--no-prepare']
     stack_output = folder / 'rust_base'
     command += ['explorer:=none', 'mission:=false', 'nav:=nav2',
                 f'output_dir:={stack_output}',
@@ -66,7 +65,7 @@ def main():
     if args.marker_size is not None:
         command.append(f'marker_size:={args.marker_size}')
     v1 = [sys.executable, '-u', str(Path(__file__).with_name('run_robot.py')),
-          *mission_args, '--nav2', '--output-dir', str(folder / 'mission')]
+          *mission_args, '--nav2', '--marker-slowdown', '--output-dir', str(folder / 'mission')]
     # The original script configures wired DDS itself. Both processes must use it.
     addresses = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
                                capture_output=True, text=True, check=True).stdout
@@ -74,6 +73,26 @@ def main():
         os.environ['FASTRTPS_DEFAULT_PROFILES_FILE'] = str(
             checkout / 'host_ws/ros2_ws/src/team7_bringup/config/fastdds_wired.xml')
 
+    from bringup_config import prepare_bringup
+    overlay = folder / 'bringup_overlay'
+    share = prepare_bringup(
+        checkout / 'host_ws/ros2_ws/src/team7_bringup', overlay,
+        map_frame=args.map_frame, map_topic=args.map_topic,
+    )
+    # Source the original install before prepending the generated package share.
+    # Check precedence after a second source, as run_demo.sh sources it again.
+    bootstrap = """
+source "$1"
+export AMENT_PREFIX_PATH="$2${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
+source "$1"
+if [[ $(ros2 pkg prefix --share team7_bringup) != "$3" ]]; then
+    echo 'Could not load the generated team7_bringup configuration.' >&2
+    exit 2
+fi
+shift 3
+exec "$@"
+"""
+    command = ['bash', '-ec', bootstrap, 'team7-bringup', str(install), str(overlay), str(share), *command]
     stack = mission = None
     # Stop the mission (and cancel its goal) before stopping the safety stack.
     def interrupted(_sig, _frame):

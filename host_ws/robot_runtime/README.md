@@ -2,7 +2,9 @@
 
 ## 기존 rust_base 데모에서 V1 실행
 
-`host_ws/scripts/run_rust_base_v1.sh`는 기존 빌드의 `run_demo.sh`를 실행합니다. 기존 SLAM, Nav2, 충돌 감시, 속도 제한, RViz, rosbag을 사용합니다. 기존 탐색과 미션 종료 노드를 비활성화하고, V1이 `/navigate_to_pose`와 `/spin`으로 네 모서리 순회, 5 m마다 회전, 마커 정면 방문을 수행합니다. V1은 카메라 영상에서 Rust ArUco로 검출한 마커를 자체 결과에 기록합니다.
+`host_ws/scripts/run_rust_base_v1.sh`는 기존 빌드의 `run_demo.sh`를 실행합니다. V1은 기존 SLAM, Nav2, 충돌 감시와 rosbag을 사용하고 `/navigate_to_pose`와 `/spin`으로 이동·회전합니다. V1 필터를 통과한 마커를 처음 관측하면 2.5초간 Nav2 주행 속도를 일반 주행 속도의 65%로 제한합니다. 전진 상한은 0.18 m/s이고, `velocity_guard`가 후진 명령을 0으로 제한합니다.
+
+RViz의 **V1 ArUco Targets**는 `/team7/v1/targets`를 읽습니다. 지도에서 첫 관측은 주황색, 두 프레임에서 위치가 일치한 마커는 초록색, 방문을 마친 마커는 파란색으로 표시합니다. RViz를 따로 열면 Fixed Frame을 `map`으로 두고 **MarkerArray**를 추가한 뒤 `/team7/v1/targets`와 **Transient Local**을 선택하세요. 데모가 시작할 때 해당 실행 폴더에 RViz와 감속 설정을 생성합니다.
 
 이미 빌드한 `rust_base` 작업공간이 있으면 `--rust-base /경로/기존-체크아웃`으로 지정하세요. 없으면 Ubuntu에서 저장소 루트 기준으로 아래처럼 별도 작업 트리를 만든 후, 그 작업 트리의 `host_ws/README.md`에 따라 ROS 작업공간을 한 번 빌드합니다.
 
@@ -17,10 +19,10 @@ git worktree add --detach ../2026-OperatingSystemsPractice-team7-rust_base origi
 bash host_ws/scripts/build_robot.sh  # 이 Ubuntu 호스트에서 최초 한 번
 bash host_ws/scripts/run_rust_base_v1.sh --check
 bash host_ws/scripts/run_rust_base_v1.sh --execute \
-  --room-width 19.85 --room-height 11.05 --marker-size 0.10
+  --room-width 19.85 --room-height 11.05 --marker-size 0.10 --marker-ids 8 19 29
 ```
 
-`--check`는 데모 스택을 시작한 뒤 센서·지도·TF·Nav2 연결을 확인하고 종료합니다. `--execute`는 원래 데모처럼 필요시 언도킹하고 odom을 초기화합니다. 이미 시작 위치에 놓은 경우에는 `--no-prepare`를 붙여 이 단계를 건너뜁니다. 화면 없는 Ubuntu에서는 `--no-rviz`를 붙이세요. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
+`--check`는 데모 스택을 시작한 뒤 센서·지도·TF·Nav2 연결을 확인하고 종료합니다. V1은 시작할 때 자동 언도킹과 odom 초기화를 건너뜁니다. 도크에서 꺼낸 로봇을 시작 위치에 놓고 로봇 방향을 벽과 평행하게 맞춘 뒤 `--execute`를 실행하세요. 화면 없는 Ubuntu에서는 `--no-rviz`를 붙이세요. `Ctrl+C`를 누르면 V1 목표 취소를 요청한 뒤 데모를 종료합니다. 결과는 `~/team7_robot_runs/*-rust-base-v1/`의 `rust_base/`(rosbag과 데모 로그)와 `mission/`(V1 지도·마커·이벤트)에 저장됩니다. ROS 2 Jazzy와 실물 로봇을 통한 실행 검증은 아직 하지 않았습니다.
 
 ## 독립 실행
 
@@ -32,7 +34,7 @@ bash host_ws/scripts/run_rust_base_v1.sh --execute \
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-sudo apt install python3-numpy python3-opencv ros-jazzy-rclpy ros-jazzy-tf2-ros ros-jazzy-slam-toolbox
+sudo apt install python3-numpy python3-opencv python3-yaml ros-jazzy-rclpy ros-jazzy-tf2-ros ros-jazzy-slam-toolbox ros-jazzy-visualization-msgs
 # Rust 1.89 이상을 설치한 뒤 저장소 루트에서:
 bash host_ws/scripts/build_robot.sh
 ```
@@ -52,7 +54,9 @@ bash host_ws/scripts/run_robot.sh --with-slam --check
 
 ## 실제 알고리즘 실행
 
-아래 `0.10`은 **마커 검은 외곽 정사각형의 실제 한 변 길이(m)의 예시**입니다. 출력지 전체/흰 테두리 크기가 아닙니다. 실제 마커 사전과 크기를 맞추세요. ID마다 크기가 다르면 `robot_config.json`의 `marker_sizes`에 `{"8": 0.25, "19": 0.20, "29": 0.28}` 같은 형식으로 실제 값을 적습니다. 지정한 ID 이외에도 인식하려면 `--marker-size`를 공통 크기로 지정할 수 있습니다. 기본 사전은 5X5_50이고 `--dictionary DICT_6X6_250` 또는 `DICT_ARUCO_ORIGINAL`로 바꿀 수 있습니다.
+아래 `0.10`은 **마커 검은 외곽 정사각형의 실제 한 변 길이(m)의 예시**입니다. 출력지 전체/흰 테두리 크기가 아닙니다. 실제 마커 사전과 크기를 맞추세요. ID마다 크기가 다르면 `robot_config.json`의 `marker_sizes`에 `{"8": 0.25, "19": 0.20, "29": 0.28}` 같은 형식으로 실제 값을 적습니다. 설치된 세 ID를 `--marker-ids 8 19 29`처럼 지정해 다른 태그를 배제할 수 있습니다. ID를 지정하지 않고 `marker_sizes`에 세 크기를 설정하면 그 키를 허용 ID로 사용합니다. `--marker-size`만 지정하면 선택한 ArUco 사전의 유효 ID를 받습니다. V1은 영상에서 위치를 찾은 QR 심볼과 겹치는 후보를 제외합니다. 목표 ID가 지정된 경우에만 기존 Rust 검출기의 1비트 보정을 허용합니다.
+
+서로 다른 마커 세 개가 확인되면 순회 중인 목표를 취소하고, 현재 위치에서 가장 가까운 미방문 마커의 정면으로 이동합니다. 도착하면 마커 중심을 바라봅니다. 세 개를 확인하지 못하면 제한 시간 내에서 둘레 탐색을 계속합니다. 기본 사전은 5X5_50이고 `--dictionary DICT_6X6_250` 또는 `DICT_ARUCO_ORIGINAL`로 바꿀 수 있습니다.
 
 ```bash
 # V1: 실제 방의 내벽 사이 실측 가로/세로를 지정 (아래 치수도 예시)

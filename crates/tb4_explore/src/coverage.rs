@@ -105,8 +105,13 @@ impl Coverage {
                 let (hx, hy) = (hit.x + a.cos() * 1e-3, hit.y + a.sin() * 1e-3);
                 // A marker on the wall looks cos(incidence) narrower, like one range / cos further
                 // away; `range` is how far a marker can be read head-on, so compare that.
-                let cos_inc = wall_direction(g, (hx, hy), p.occupied_threshold)
-                    .map_or(1.0, |(wx, wy)| (a.cos() * wy - a.sin() * wx).abs());
+                // no wall direction yet (a few cells of a box face in an early map): do not assume
+                // head-on, a grazing pass would write the face off before the camera can read it
+                let Some(cos_inc) = wall_direction(g, (hx, hy), p.occupied_threshold)
+                    .map(|(wx, wy)| (a.cos() * wy - a.sin() * wx).abs())
+                else {
+                    continue;
+                };
                 #[cfg(test)]
                 let cos_inc = if p.plain_range { 1.0 } else { cos_inc };
                 if cos_inc < p.max_incidence.cos() || hit.range > p.range * cos_inc {
@@ -288,6 +293,26 @@ mod tests {
         assert!(cov.is_seen(&g, east));
         assert!(!cov.is_seen(&g, west));
         assert!(cov.seen_count() > 20);
+    }
+
+    #[test]
+    fn a_hit_without_a_wall_direction_is_not_seen() {
+        // two lone cells of a box face in an early map: no direction, so no incidence check. Counting
+        // them as head-on wrote a box face off before the camera could read its marker (sim, id 42)
+        let meta = GridMeta { width: 120, height: 80, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, 0);
+        let (a, b) = (g.world_to_cell(4.0, 2.0).unwrap(), g.world_to_cell(4.0, 2.05).unwrap());
+        g.set(a, 100);
+        g.set(b, 100);
+        let mut cov = Coverage::new();
+        cov.update(&g, (3.0, 2.0, 0.0), &CoverageParams { range: 4.0, ..Default::default() });
+        assert!(!cov.is_seen(&g, a) && !cov.is_seen(&g, b));
+        // once the face is mapped, the same view counts
+        for k in -6..=6 {
+            g.set(g.world_to_cell(4.0, 2.0 + 0.05 * k as f64).unwrap(), 100);
+        }
+        cov.update(&g, (3.0, 2.0, 0.0), &CoverageParams { range: 4.0, ..Default::default() });
+        assert!(cov.is_seen(&g, a));
     }
 
     #[test]

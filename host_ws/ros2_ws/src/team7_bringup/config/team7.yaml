@@ -118,7 +118,7 @@ scan_filter:
     output_topic: /scan_filtered
     odom_topic: /odom
     min_range: 0.18
-    max_range: 8.0
+    max_range: 10.0          # was 8.0; RPLIDAR A1M8 reaches 12 m, 10 m explores ~26 % more than 8 m on the same 150 s replay
     median_window: 3
     isolated_dist: 0.15
     deskew: true
@@ -133,7 +133,7 @@ slam:
     min_travel_dist: 0.1
     loop_prefer_oldest: false  # loop edge to oldest keyframe in radius, matched on its own scans
     min_travel_yaw: 0.1
-    max_range: 8.0
+    max_range: 10.0          # was 8.0, matches scan_filter
     map_publish_period: 1.0
     map_odom_scan_stamp: 0.0  # 1.0 = stamp map->odom with the scan time (test on replay first); 0.0 = current live behaviour
     scan_time_offset: -0.15  # s added to the scan stamp for the odom lookup. Replay 184838 through the full launch:

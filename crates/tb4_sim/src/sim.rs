@@ -87,6 +87,7 @@ pub struct SimConfig {
 pub fn team7_explorer_params() -> ExplorerParams {
     let cov = CoverageParams { half_fov: 0.52, range: 1.5, max_incidence: 1.3, standoff: 1.0, max_cluster_cells: 32, ..Default::default() };
     ExplorerParams {
+        approach_budget: 0.0,
         goal_timeout: 120.0,
         progress_timeout: 15.0,
         progress_epsilon: 0.1,
@@ -107,6 +108,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
             frontier_segment_length: 1.2,
             min_unknown_area: 1.0,
             goal_max_unknown: 0.15,
+            revisit_radius: 0.0,
+            revisit_penalty: 0.0,
                 min_free_fraction: 0.5,
         },
         coverage: Some(cov),
@@ -159,13 +162,14 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 36] = [
+pub const SET_NAMES: [&str; 42] = [
     "min_triangulation_spread",
     "min_free_fraction",
     "require_scale_all",
+    "max_consistency", "scale_tolerance", "scale_min_samples",
     "goal_timeout", "progress_timeout", "retry_delay", "blacklist_duration", "blacklist_max_duration", "turn_weight", "distance_weight",
     "size_weight", "min_goal_distance", "goal_standoff", "blacklist_radius", "camera_range", "view_standoff",
-    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
+    "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "revisit_radius", "revisit_penalty", "approach_budget", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
     "approach_markers", "approach_standoff", "approach_spread_deg", "approach_timeout",
 ];
@@ -198,6 +202,9 @@ impl SimConfig {
             "preempt_distance" => e.preempt_distance = x,
             "switch_cooldown" => e.switch_cooldown = x,
             "min_unknown_area" => e.explore.min_unknown_area = x,
+            "revisit_radius" => e.explore.revisit_radius = x,
+            "approach_budget" => e.approach_budget = x,
+            "revisit_penalty" => e.explore.revisit_penalty = x,
             "min_frontier_cells" => e.explore.min_frontier_cells = x as usize,
             "look_around_turns" => e.look_around_turns = x as u32,
             "camera_coverage" if x == 0.0 => e.coverage = None,
@@ -222,6 +229,9 @@ impl SimConfig {
             "pnp_sigma" => self.vision.pnp_sigma = x,
             "bearing_sigma_deg" => self.vision.bearing_sigma = x.to_radians(),
             "require_scale_all" => self.track.require_scale_all = x != 0.0,
+            "max_consistency" => self.track.max_consistency = x,
+            "scale_tolerance" => self.track.scale_tolerance = x,
+            "scale_min_samples" => self.track.scale_min_samples = x as usize,
             "min_triangulation_spread" => self.track.min_triangulation_spread = x,
             "min_free_fraction" => e.explore.min_free_fraction = x,
             "approach_markers" if x == 0.0 => e.approach = None,

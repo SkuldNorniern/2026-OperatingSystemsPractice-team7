@@ -31,6 +31,10 @@ pub struct ExploreParams {
     /// placement walked every goal back onto the robot and the explorer waited until someone pushed
     /// it (field run 184838, 75 s; recorded costmap at 30 s: 0 goals strict, 11 with 15 %)
     pub goal_max_unknown: f64,
+    /// frontiers within this distance (m) of a goal the explorer already reached lose `revisit_penalty`
+    /// (score units), so the robot looks at new places before going back to old ones. 0 = off
+    pub revisit_radius: f64,
+    pub revisit_penalty: f64,
     /// skip a frontier whose free side is a thin spike: share of known-free cells within 0.3 m of
     /// its centroid below this (lidar beams through chair legs and gaps leave 1-2 cell free lines
     /// into unknown that score like big frontiers). 0 = off
@@ -51,6 +55,8 @@ impl Default for ExploreParams {
             frontier_segment_length: 0.0,
             min_unknown_area: 0.0,
             goal_max_unknown: 0.0,
+            revisit_radius: 0.0,
+            revisit_penalty: 0.0,
             min_free_fraction: 0.0,
         }
     }

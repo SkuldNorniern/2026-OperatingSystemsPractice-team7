@@ -8,6 +8,9 @@ use crate::{Coverage, CoverageParams, ExploreParams, Frontier, View, find_fronti
 
 #[derive(Debug, Clone)]
 pub struct ExplorerParams {
+    /// s of approach-on-sight time allowed for the whole mission (0 = no cap). Once spent, no new
+    /// approach goals start; frontier exploration carries on. Stops decoy markers eating the run.
+    pub approach_budget: f64,
     /// s, a goal running longer than this is cancelled and blacklisted
     pub goal_timeout: f64,
     /// s without progress (progress_epsilon of movement or a 0.3 rad turn) before a goal is given up
@@ -47,6 +50,7 @@ impl Default for ExplorerParams {
             progress_timeout: 15.0,
             progress_epsilon: 0.1,
             retry_delay: 5.0,
+            approach_budget: 0.0,
             blacklist_duration: 45.0,
             blacklist_max_duration: 300.0,
             turn_weight: 0.5,
@@ -63,6 +67,8 @@ impl Default for ExplorerParams {
                 frontier_segment_length: 1.2,
                 min_unknown_area: 1.0,
                 goal_max_unknown: 0.15,
+                revisit_radius: 0.0,
+                revisit_penalty: 0.0,
                 min_free_fraction: 0.5,
             },
             coverage: Some({
@@ -207,6 +213,11 @@ pub struct ExplorerPolicy {
     p: ExplorerParams,
     coverage: Coverage,
     visited_views: Vec<(f64, f64)>,
+    /// goals that were reached (for the revisit penalty)
+    reached: Vec<(f64, f64)>,
+    /// approach-on-sight seconds spent this mission (see ExplorerParams::approach_budget)
+    approach_spent: f64,
+    last_tick: Option<f64>,
     active: Option<Active>,
     /// banned goals with the time the ban ends
     blacklist: Vec<((f64, f64), f64)>,
@@ -233,6 +244,9 @@ impl ExplorerPolicy {
         Self {
             coverage: Coverage::new(),
             visited_views: Vec::new(),
+            reached: Vec::new(),
+            approach_spent: 0.0,
+            last_tick: None,
             active: None,
             blacklist: Vec::new(),
             strikes: Vec::new(),
@@ -394,6 +408,9 @@ impl ExplorerPolicy {
         out: &mut Vec<Action>,
     ) -> Option<(Viewpoint, u64)> {
         let ap = self.p.approach.clone()?;
+        if self.p.approach_budget > 0.0 && self.approach_spent >= self.p.approach_budget {
+            return None;
+        }
         approach::sync(&mut self.approaches, markers, &ap, now, &mut self.next_serial);
         let active = self.active.as_ref().filter(|a| a.accepted && !a.cancelling).and_then(|a| a.approach);
         if let Some((serial, _)) = active
@@ -451,6 +468,13 @@ impl ExplorerPolicy {
     }
 
     fn tick_inner(&mut self, now: f64, input: TickInput, out: &mut Vec<Action>) {
+        // mission-wide approach time: count the time since the last tick while an approach goal is accepted
+        if let Some(prev) = self.last_tick
+            && self.active.as_ref().is_some_and(|a| a.kind == GoalKind::Approach && a.accepted && !a.cancelling)
+        {
+            self.approach_spent += (now - prev).clamp(0.0, 1.0);
+        }
+        self.last_tick = Some(now);
         if input.done {
             if self.active.as_ref().is_some_and(|a| !a.cancelling) {
                 out.push(Action::Info("mission done, cancelling navigation".into()));
@@ -466,6 +490,9 @@ impl ExplorerPolicy {
             let ok = status == NavStatus::Succeeded || (status == NavStatus::Canceled && cancel_ok);
             let finished = self.active.take();
             // a reached view whose wall still counts as unseen must not be picked again
+            if ok {
+                self.reached.push(goal);
+            }
             if let Some(t) = finished.as_ref().and_then(|a| a.view_target) {
                 self.visited_views.push(t);
             }
@@ -520,7 +547,16 @@ impl ExplorerPolicy {
             }
         };
         let p = self.p.clone();
-        let frontiers = find_frontiers(grid, (robot.x, robot.y), &p.explore);
+        let mut frontiers = find_frontiers(grid, (robot.x, robot.y), &p.explore);
+        // revisit penalty: frontiers near a goal already reached score lower, so new places come first
+        if p.explore.revisit_radius > 0.0 && p.explore.revisit_penalty > 0.0 && !self.reached.is_empty() {
+            for f in frontiers.iter_mut() {
+                if self.reached.iter().any(|r| dist(*r, f.goal) < p.explore.revisit_radius) {
+                    f.score -= p.explore.revisit_penalty;
+                }
+            }
+            frontiers.sort_by(|a, b| b.score.total_cmp(&a.score));
+        }
         self.recent.retain(|(_, at)| now - at < p.switch_cooldown);
         // goals switched away from lately are skipped like blacklisted ones (no ping-pong)
         let blacklist: Vec<_> = self.blacklist.iter().chain(&self.recent).map(|(goal, _)| *goal).collect();

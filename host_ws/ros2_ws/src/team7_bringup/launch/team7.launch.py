@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 
+from ament_index_python.packages import get_package_prefix
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -18,7 +19,8 @@ ARGS = [
     ('aruco', 'opencv', 'opencv (aruco_opencv) | team7 (our detector)'),
     ('slam_backend', 'toolbox', 'toolbox (slam_toolbox) | team7 (our SLAM)'),
     ('scan_filter', 'true', 'filter + deskew /scan into /scan_filtered for SLAM'),
-    ('rviz', 'true', 'Start RViz'),
+    ('viewer', 'true', 'Start our map viewer (team7_viz); the default view'),
+    ('rviz', 'false', 'Start RViz instead of our viewer (rviz:=true)'),
     ('slam', 'true', 'Start SLAM'),
     ('mission', 'true', 'Start the mission node (timer, stop, map save)'),
     ('output_dir', '~/team7_run', 'Where map.pgm/.yaml and targets.csv are written'),
@@ -207,6 +209,13 @@ def setup(context):
         actions.append(Node(package='rviz2', executable='rviz2', name='rviz2',
                             arguments=['-d', rviz_config_for(nav, aruco_be)],
                             additional_env=native_env, prefix=native_prefix))
+    # our map viewer (team7_viz, aurea): read-only, default view. Build it with prep.sh or
+    # `colcon build --packages-select team7_viz`; viewer:=false to skip it.
+    if on('viewer'):
+        # a plain process, not a Node: ROS adds --ros-args to nodes and the viewer has its own options
+        # the binary itself (not `ros2 run`): launch then stops it with the rest of the run
+        viz_bin = os.path.join(get_package_prefix('team7_viz'), 'lib', 'team7_viz', 'team7_viz')
+        actions.append(ExecuteProcess(cmd=[viz_bin], output='screen'))
     return actions
 
 def generate_launch_description():

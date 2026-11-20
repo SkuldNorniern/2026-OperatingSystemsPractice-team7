@@ -40,6 +40,10 @@ pub struct ExplorerParams {
     /// approach on sight: markers the mapper holds but has not confirmed get close views from a few
     /// angles, before frontiers and camera views. None = off
     pub approach: Option<ApproachParams>,
+    /// when no goal can be picked, try once more ignoring the bans on spots that failed only once
+    /// and the recent switches (bans on spots with two or more failures still hold). Only changes
+    /// the no-goal case, before the explorer waits for the map
+    pub idle_fallback: bool,
 }
 
 impl Default for ExplorerParams {
@@ -70,6 +74,8 @@ impl Default for ExplorerParams {
                 revisit_radius: 0.0,
                 revisit_penalty: 0.0,
                 min_free_fraction: 0.5,
+                gain_weight: 0.0,
+                gain_radius: 2.0,
             },
             coverage: Some({
                 let mut c = CoverageParams::default();
@@ -81,6 +87,7 @@ impl Default for ExplorerParams {
             preempt_distance: 0.5,
             switch_cooldown: 20.0,
             approach: Some(ApproachParams::default()),
+            idle_fallback: true,
         }
     }
 }
@@ -712,6 +719,16 @@ impl ExplorerPolicy {
                     self.spins_left
                 )));
                 ((robot.x, robot.y), yaw, None, GoalKind::Turn)
+            } else if p.idle_fallback
+                && let Some(f) = self.idle_fallback_pick(&frontiers, robot, &p)
+            {
+                let yaw = (f.centroid.1 - f.goal.1).atan2(f.centroid.0 - f.goal.0);
+                out.push(Action::Info(format!(
+                    "idle fallback: new goal ({:.2}, {:.2}) yaw={yaw:.2}, frontier {:.1} m, free-space path {:.1} m; \
+                     ignored bans with one failure and recent switches",
+                    f.goal.0, f.goal.1, f.size_m, f.distance
+                )));
+                (f.goal, yaw, None, GoalKind::Frontier)
             } else {
                 if !self.finished_exploring {
                     out.push(Action::Info(format!(
@@ -766,6 +783,19 @@ impl ExplorerPolicy {
             kind,
             preempts: preempt.is_some() || approach_goal.is_some_and(|(_, _, replace)| replace),
         }));
+    }
+
+    /// the no-goal fallback: frontiers that pass the bans on spots with two or more failures, ignoring
+    /// the other bans and the recent switches
+    fn idle_fallback_pick<'a>(&self, frontiers: &'a [Frontier], robot: Pose2, p: &ExplorerParams) -> Option<&'a Frontier> {
+        let r = p.explore.blacklist_radius;
+        let kept: Vec<(f64, f64)> = self
+            .blacklist
+            .iter()
+            .map(|(goal, _)| *goal)
+            .filter(|goal| self.strikes.iter().find(|(g, _)| dist(*g, *goal) < r).is_some_and(|(_, n)| *n >= 2))
+            .collect();
+        select_goal_with_heading(frontiers, &kept, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight)
     }
 
     fn set_viz(&mut self, frontiers: Vec<Frontier>, views: Vec<View>) {
@@ -903,6 +933,52 @@ mod tests {
         let a = e.tick(0.0, inp);
         assert!(sent(&a).is_none());
         assert!(a.iter().any(|a| matches!(a, Action::Warn(_))));
+    }
+
+    /// fully known free map with one unknown column on the east side: a single frontier
+    fn one_frontier_map() -> Grid {
+        let meta = GridMeta { width: 80, height: 80, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, 0);
+        for y in 0..80 {
+            g.set(Cell { x: 79, y }, UNKNOWN);
+        }
+        g
+    }
+
+    #[test]
+    fn idle_fallback_sends_goal_when_only_candidate_has_one_strike() {
+        let g = one_frontier_map();
+        let robot = Pose2::new(0.5, 0.5, 0.0);
+        let p = ExplorerParams { look_around_turns: 0, ..params() };
+        let goal = find_frontiers(&g, (robot.x, robot.y), &p.explore)[0].goal;
+        let mut e = ExplorerPolicy::new(p.clone(), 0.0);
+        e.ban(goal, 0.0);
+        assert_eq!(e.strikes.iter().map(|(_, n)| *n).collect::<Vec<_>>(), vec![1]);
+        // fallback off: the banned spot is the only candidate and the explorer waits
+        let mut off = ExplorerPolicy::new(ExplorerParams { idle_fallback: false, ..p.clone() }, 0.0);
+        off.ban(goal, 0.0);
+        let acts = off.tick(10.0, input(&g, robot, None, 10.0));
+        assert!(sent(&acts).is_none());
+        assert!(acts.iter().any(|a| matches!(a, Action::Info(t) if t.contains("waiting for map updates"))));
+        // fallback on: one strike is ignored and the goal goes out, logged as an idle fallback
+        let acts = e.tick(10.0, input(&g, robot, None, 10.0));
+        let req = sent(&acts).expect("idle fallback goal");
+        assert_eq!(req.kind, GoalKind::Frontier);
+        assert!((req.x - goal.0).hypot(req.y - goal.1) < 1e-9);
+        assert!(acts.iter().any(|a| matches!(a, Action::Info(t) if t.contains("idle fallback"))));
+    }
+
+    #[test]
+    fn idle_fallback_keeps_spots_with_two_strikes_banned() {
+        let g = one_frontier_map();
+        let robot = Pose2::new(0.5, 0.5, 0.0);
+        let p = ExplorerParams { look_around_turns: 0, ..params() };
+        let goal = find_frontiers(&g, (robot.x, robot.y), &p.explore)[0].goal;
+        let mut e = ExplorerPolicy::new(p, 0.0);
+        e.ban(goal, 0.0);
+        e.ban(goal, 0.0);
+        let acts = e.tick(10.0, input(&g, robot, None, 10.0));
+        assert!(sent(&acts).is_none(), "two failures keep the spot banned: {acts:?}");
     }
 
     #[test]

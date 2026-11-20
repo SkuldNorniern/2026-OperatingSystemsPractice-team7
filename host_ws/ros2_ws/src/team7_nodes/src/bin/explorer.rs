@@ -69,6 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_unknown_area: p.f64("min_unknown_area", 1.0),
             revisit_radius: p.f64("revisit_radius", 0.0),
             revisit_penalty: p.f64("revisit_penalty", 0.0),
+            gain_weight: p.f64("gain_weight", 0.0),
+            gain_radius: p.f64("gain_radius", 2.0),
             goal_max_unknown: p.f64("goal_max_unknown", 0.15),
             min_free_fraction: p.f64("min_free_fraction", 0.5),
         },
@@ -87,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         switch_cooldown: p.f64("switch_cooldown", 20.0),
         // approach on sight: views of unconfirmed markers from close by and from three angles
         approach_budget: p.f64("approach_budget", 0.0),
+        idle_fallback: p.bool("idle_fallback", false),
         approach: p.bool("approach_markers", true).then(|| {
             let d = ApproachParams::default();
             ApproachParams {

@@ -39,6 +39,11 @@ pub struct ExploreParams {
     /// its centroid below this (lidar beams through chair legs and gaps leave 1-2 cell free lines
     /// into unknown that score like big frontiers). 0 = off
     pub min_free_fraction: f64,
+    /// score units per m^2 of unseen area within gain_radius of a frontier's centroid: prefers the
+    /// frontier that opens more of the map. 0 = off (the gain is then not computed)
+    pub gain_weight: f64,
+    /// m, radius around a frontier's centroid in which unknown cells count towards its gain
+    pub gain_radius: f64,
 }
 
 impl Default for ExploreParams {
@@ -58,6 +63,8 @@ impl Default for ExploreParams {
             revisit_radius: 0.0,
             revisit_penalty: 0.0,
             min_free_fraction: 0.0,
+            gain_weight: 0.0,
+            gain_radius: 2.0,
         }
     }
 }
@@ -69,6 +76,8 @@ pub struct Frontier {
     pub centroid: (f64, f64),
     pub goal: (f64, f64),
     pub distance: f64,
+    /// m^2 of unknown cells within gain_radius of the centroid (0 when gain_weight is 0)
+    pub gain: f64,
     pub score: f64,
 }
 
@@ -139,6 +148,24 @@ fn unknown_pocket(g: &Grid, members: &[usize], area: f64) -> bool {
         }
     }
     seen.len() < limit
+}
+
+/// unseen area (m^2) within `radius` of the centroid of `members`; cells off the map are not counted
+fn unknown_area(g: &Grid, members: &[usize], radius: f64) -> f64 {
+    let w = g.meta.width as usize;
+    let n = members.len() as f64;
+    let (sx, sy) = members.iter().fold((0.0, 0.0), |a, &i| (a.0 + (i % w) as f64, a.1 + (i / w) as f64));
+    let (cx, cy) = ((sx / n).round() as i64, (sy / n).round() as i64);
+    let r = (radius / g.meta.resolution).ceil() as i64;
+    let mut unknown = 0usize;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r && g.cell_checked(cx + dx, cy + dy).is_some_and(|c| g.get(c) == UNKNOWN) {
+                unknown += 1;
+            }
+        }
+    }
+    unknown as f64 * g.meta.resolution * g.meta.resolution
 }
 
 pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Frontier> {
@@ -253,13 +280,15 @@ pub fn find_frontiers(g: &Grid, robot: (f64, f64), p: &ExploreParams) -> Vec<Fro
         let goal = to_world(goal_index);
         let size_m = n * g.meta.resolution;
         let distance = steps[goal_index] as f64 * g.meta.resolution;
+        let gain = if p.gain_weight > 0.0 { unknown_area(g, &members, p.gain_radius) } else { 0.0 };
         out.push(Frontier {
             cells: members.len(),
             size_m,
             centroid,
             goal,
             distance,
-            score: p.size_weight * size_m.sqrt() - p.distance_weight * distance,
+            gain,
+            score: p.size_weight * size_m.sqrt() - p.distance_weight * distance + p.gain_weight * gain,
         });
         }
     }
@@ -434,7 +463,7 @@ mod tests {
 
     #[test]
     fn heading_prefers_frontier_ahead() {
-        let mk = |x: f64, y: f64| Frontier { cells: 10, size_m: 1.0, centroid: (x, y), goal: (x, y), distance: 2.0, score: 0.0 };
+        let mk = |x: f64, y: f64| Frontier { cells: 10, size_m: 1.0, centroid: (x, y), goal: (x, y), distance: 2.0, gain: 0.0, score: 0.0 };
         let mut f = vec![mk(-2.0, 0.0), mk(2.0, 0.0)];
         rescore_heading(&mut f, (0.0, 0.0, 0.0), 0.5);
         assert_eq!(f[0].goal, (2.0, 0.0));
@@ -479,11 +508,72 @@ mod tests {
 
     #[test]
     fn equally_valuable_frontier_ahead_wins_over_turning_back() {
-        let ahead = Frontier { cells: 10, size_m: 1.0, centroid: (2.0, 0.0), goal: (1.0, 0.0), distance: 1.0, score: 0.0 };
+        let ahead = Frontier { cells: 10, size_m: 1.0, centroid: (2.0, 0.0), goal: (1.0, 0.0), distance: 1.0, gain: 0.0, score: 0.0 };
         let behind = Frontier { centroid: (-2.0, 0.0), goal: (-1.0, 0.0), ..ahead.clone() };
         let frontiers = [behind, ahead];
         let chosen = select_goal_with_heading(&frontiers, &[], &ExploreParams::default(), (0.0, 0.0), 0.0, 0.5).unwrap();
         assert_eq!(chosen.goal, (1.0, 0.0));
+    }
+
+    /// a 6 m known strip along y = 0 with walls on both sides, frontiers at its two ends. The left
+    /// end opens onto unknown space; the right end has one unknown column, then occupied cells.
+    fn two_ends_map() -> Grid {
+        let meta = GridMeta { width: 120, height: 120, resolution: 0.1, origin_x: -6.0, origin_y: -6.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 56..=63 {
+            for x in 30..=90 {
+                g.set(Cell { x, y }, 0);
+            }
+        }
+        for x in 30..=90 {
+            g.set(Cell { x, y: 55 }, 100);
+            g.set(Cell { x, y: 64 }, 100);
+        }
+        // the right half of the strip is walled in above and below, the end column is the only unknown
+        for y in (30..55).chain(65..90) {
+            for x in 60..=90 {
+                g.set(Cell { x, y }, 100);
+            }
+        }
+        for y in 30..90 {
+            for x in 92..120 {
+                g.set(Cell { x, y }, 100);
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn unseen_area_decides_between_equal_frontiers() {
+        let g = two_ends_map();
+        let robot = (0.05, 0.05);
+        let p = ExploreParams { min_frontier_cells: 3, ..Default::default() };
+        let plain = find_frontiers(&g, robot, &p);
+        assert_eq!(plain.len(), 2, "{plain:?}");
+        assert!((plain[0].distance - plain[1].distance).abs() < 1e-9, "equal distance: {plain:?}");
+        assert_eq!(plain[0].cells, plain[1].cells);
+        // gain_weight 0 (default): the score is the size and distance terms only, and the two tie
+        for f in &plain {
+            assert_eq!(f.gain, 0.0);
+            assert!((f.score - (f.size_m.sqrt() - f.distance)).abs() < 1e-9, "{f:?}");
+        }
+        assert!((plain[0].score - plain[1].score).abs() < 1e-9);
+        // gain_weight > 0: the open left end has far more unseen area and wins
+        let with_gain = find_frontiers(&g, robot, &ExploreParams { gain_weight: 0.5, ..p });
+        assert!(with_gain[0].gain > 5.0 * with_gain[1].gain, "{with_gain:?}");
+        assert!(with_gain[0].centroid.0 < 0.0, "the side with more unseen area first: {with_gain:?}");
+        assert!(with_gain[0].score > with_gain[1].score);
+        assert!((with_gain[0].distance - with_gain[1].distance).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gain_counts_only_the_unknown_cells_near_the_centroid() {
+        let g = two_ends_map();
+        let p = ExploreParams { min_frontier_cells: 3, gain_weight: 1.0, ..Default::default() };
+        let f = find_frontiers(&g, (0.05, 0.05), &p);
+        // the right end's 2 m disc holds one unknown column, 0.1 m wide and about 4 m long
+        let right = f.iter().find(|f| f.centroid.0 > 0.0).unwrap();
+        assert!(right.gain > 0.2 && right.gain < 0.6, "{right:?}");
     }
 
     #[test]

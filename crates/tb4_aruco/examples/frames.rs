@@ -22,7 +22,7 @@ fn load_pgm(bytes: &[u8]) -> Option<GrayImage> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("dir");
-    let dict = Dictionary::by_name(&args.next().unwrap_or("6X6_250".into())).expect("dict");
+    let dict = Dictionary::by_name(&args.next().unwrap_or("ARUCO_ORIGINAL".into())).expect("dict");
     let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "pgm")).collect();
     files.sort();

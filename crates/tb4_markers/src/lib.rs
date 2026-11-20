@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use tb4_core::grid::Grid;
@@ -319,6 +319,41 @@ pub struct Target {
     pub views: usize,
     pub spread: f64,
     pub confirmed: bool,
+}
+
+/// RViz marker namespaces on /team7/targets
+pub const NS_CONFIRMED: &str = "target_confirmed";
+pub const NS_TENTATIVE: &str = "target_tentative";
+
+impl Target {
+    pub fn ns(&self) -> &'static str {
+        if self.confirmed { NS_CONFIRMED } else { NS_TENTATIVE }
+    }
+}
+
+/// ids mission counts as found, from /team7/targets. marker_mapper sends every target on each
+/// message, so the latest one replaces the set: an id whose confirmation was withdrawn (LOST)
+/// drops out and the count stays equal to the rows in targets.csv
+#[derive(Debug, Default)]
+pub struct Found(BTreeSet<i32>);
+
+impl Found {
+    /// (namespace, id) of every marker in one /team7/targets message
+    pub fn update<'a>(&mut self, markers: impl IntoIterator<Item = (&'a str, i32)>) {
+        self.0 = markers.into_iter().filter(|m| m.0 == NS_CONFIRMED).map(|m| m.1).collect();
+    }
+
+    pub fn ids(&self) -> &BTreeSet<i32> {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -698,23 +733,31 @@ pub fn fuse(v: &[Estimate]) -> Fused {
         let s = v.first().map_or(f64::INFINITY, |e| e.sigma_along.max(e.sigma_across));
         return Fused { x: med.0, y: med.1, sigma: s, consistency: 0.0 };
     }
-    let info = |e: &Estimate| {
+    // along info divided by `shared`
+    let info = |e: &Estimate, shared: f64| {
         let (ux, uy) = e.dir;
-        let (a, c) = (1.0 / e.sigma_along.max(1e-3).powi(2), 1.0 / e.sigma_across.max(1e-3).powi(2));
+        let (a, c) = (1.0 / (shared * e.sigma_along.max(1e-3).powi(2)), 1.0 / e.sigma_across.max(1e-3).powi(2));
         // a u u^T + c n n^T with n = (-uy, ux)
         (a * ux * ux + c * uy * uy, (a - c) * ux * uy, a * uy * uy + c * ux * ux)
     };
     const K: f64 = 2.0;
     let dist = |x: (f64, f64), e: &Estimate| {
-        let (j11, j12, j22) = info(e);
+        let (j11, j12, j22) = info(e, 1.0);
         let (ex, ey) = (x.0 - e.x, x.1 - e.y);
         (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt()
     };
-    // weighted least squares step, weight per view from its distance (None = all 1)
+    // pnp range is off by the unknown marker size, the same factor in every view. more pnp views
+    // do not average that out, so for the spread all of them together count as one view along the
+    // ray: pnp alone never gets tight, bearings from different places (or a wall hit) have to.
+    // position still uses each view as before
+    let pnp_views = v.iter().filter(|e| e.source == Source::PnpRange).count().max(1) as f64;
+    // weighted least squares step, weight per view from its distance (None = all 1).
+    // returns new position and its covariance
     let step = |x: Option<(f64, f64)>, hard: bool| {
         let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut s11, mut s12, mut s22) = (0.0, 0.0, 0.0);
         for e in v {
-            let (j11, j12, j22) = info(e);
+            let (j11, j12, j22) = info(e, 1.0);
             let w = match x.map(|x| dist(x, e)) {
                 None => 1.0,
                 Some(d) if d <= K => 1.0,
@@ -726,9 +769,15 @@ pub fn fuse(v: &[Estimate]) -> Fused {
             a22 += w * j22;
             b1 += w * (j11 * e.x + j12 * e.y);
             b2 += w * (j12 * e.x + j22 * e.y);
+            let (k11, k12, k22) = info(e, if e.source == Source::PnpRange { pnp_views } else { 1.0 });
+            s11 += w * k11;
+            s12 += w * k12;
+            s22 += w * k22;
         }
         let det = a11 * a22 - a12 * a12;
-        (det.abs() >= 1e-12).then(|| (((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det), (a22 / det, -a12 / det, a11 / det)))
+        let sdet = s11 * s22 - s12 * s12;
+        let cov = if sdet.abs() >= 1e-12 { (s22 / sdet, -s12 / sdet, s11 / sdet) } else { (f64::INFINITY, 0.0, f64::INFINITY) };
+        (det.abs() >= 1e-12).then(|| (((a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det), cov))
     };
     // huber first, then drop views past 3K so far outliers stop pulling at all
     let solve = |mut x: (f64, f64)| {
@@ -765,7 +814,16 @@ pub fn fuse(v: &[Estimate]) -> Fused {
     let (x, cov, _) = best;
     let tr = cov.0 + cov.2;
     let l = tr / 2.0 + ((cov.0 - cov.2).powi(2) / 4.0 + cov.1 * cov.1).sqrt();
-    let ds: Vec<f64> = v.iter().map(|e| dist(x, e)).collect();
+    // same for agreement: a pnp view short or long along its ray is the marker size, not a view
+    // that disagrees. across the ray it has to fit like any other
+    let ds: Vec<f64> = v
+        .iter()
+        .map(|e| {
+            let (j11, j12, j22) = info(e, if e.source == Source::PnpRange { pnp_views } else { 1.0 });
+            let (ex, ey) = (x.0 - e.x, x.1 - e.y);
+            (ex * (j11 * ex + j12 * ey) + ey * (j12 * ex + j22 * ey)).max(0.0).sqrt()
+        })
+        .collect();
     Fused { x: x.0, y: x.1, sigma: l.max(0.0).sqrt(), consistency: median(ds) }
 }
 
@@ -1300,6 +1358,37 @@ mod tests {
         let tg = t.target(1).unwrap();
         assert!(tg.confirmed, "{tg:?}");
         assert!((tg.x - 3.0).abs() < 0.03 && tg.y.abs() < 0.03, "{tg:?}");
+    }
+
+    /// what mission gets from one /team7/targets message of marker_mapper
+    fn publish(t: &Tracker, found: &mut Found) {
+        found.update(t.targets().iter().map(|t| (t.ns(), t.id as i32)));
+    }
+
+    #[test]
+    fn withdrawn_confirmation_no_longer_counts_as_found() {
+        let mut t = Tracker::new(TrackParams { min_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
+        let e = |x, y| Estimate::point(x, y, Source::Raycast);
+        let mut found = Found::default();
+        for id in [1, 2] {
+            for d in [-0.01, 0.0, 0.01] {
+                t.add(id, &e(id as f64 + d, 0.0));
+            }
+        }
+        publish(&t, &mut found);
+        assert_eq!(found.len(), 2);
+        // later views of id 1 land all over the place: marker_mapper logs LOST and drops its csv row
+        for k in 0..10 {
+            t.add(1, &e(1.0 + k as f64, 3.0));
+        }
+        assert!(!t.target(1).unwrap().confirmed);
+        for d in [-0.01, 0.0, 0.01] {
+            t.add(3, &e(3.0 + d, 0.0));
+        }
+        publish(&t, &mut found);
+        // targets.csv has only 2 and 3, so mission must not stop with "3 targets found"
+        assert_eq!(found.ids().iter().copied().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(found.len(), to_csv(&t.confirmed()).lines().count() - 1);
     }
 
     #[test]

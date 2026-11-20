@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
@@ -11,6 +10,7 @@ use futures::task::LocalSpawnExt;
 use r2r::action_msgs::srv::CancelGoal;
 use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{QosProfile, log_error, log_info, log_warn};
+use tb4_markers::Found;
 use team7_nodes::Params;
 
 const LATCHED: QosProfile = QosProfile::default().keep_last(1).reliable().transient_local();
@@ -38,16 +38,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         QosProfile::services_default(),
     )?;
 
-    let found: Rc<RefCell<BTreeSet<i32>>> = Rc::default();
+    let found: Rc<RefCell<Found>> = Rc::default();
     let targets = node.subscribe::<MarkerArray>("/team7/targets", QosProfile::default())?;
     let f = found.clone();
     let pool = LocalPool::new();
     let spawner = pool.spawner();
     team7_nodes::spawn_param_services(&mut node, &spawner)?;
     spawner.spawn_local(targets.for_each(move |m| {
-        // the mapper's current confirmed set: a target it drops again (LOST) must not count
-        // toward "all found" (replay 184838 counted a chair label it confirmed and lost)
-        *f.borrow_mut() = m.markers.iter().filter(|mk| mk.ns == "target_confirmed").map(|mk| mk.id).collect();
+        // whole message replaces the set, a LOST id stops counting
+        f.borrow_mut().update(m.markers.iter().map(|mk| (mk.ns.as_str(), mk.id)));
         futures::future::ready(())
     }))?;
 
@@ -66,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start.elapsed();
             let n = found.borrow().len();
             if n != last_count {
-                log_info!(&log, "{n}/{expected} targets confirmed at {:.1} s: {:?}", elapsed.as_secs_f64(), found.borrow());
+                log_info!(&log, "{n}/{expected} targets confirmed at {:.1} s: {:?}", elapsed.as_secs_f64(), found.borrow().ids());
                 last_count = n;
             }
             if let Some(c) = saver.as_mut()

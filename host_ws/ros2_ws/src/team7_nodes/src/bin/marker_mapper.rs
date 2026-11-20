@@ -293,11 +293,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn markers(frame: &str, targets: &[Target], pending: impl Fn(i64) -> Vec<String>) -> MarkerArray {
     let mut out = vec![viz::delete_all(frame)];
     for t in targets {
-        let (ns, c) = if t.confirmed {
-            ("target_confirmed", viz::color(0.1, 0.9, 0.2, 0.9))
-        } else {
-            ("target_tentative", viz::color(1.0, 0.8, 0.0, 0.6))
-        };
+        // mission counts ids in the confirmed namespace
+        let ns = t.ns();
+        let c = if t.confirmed { viz::color(0.1, 0.9, 0.2, 0.9) } else { viz::color(1.0, 0.8, 0.0, 0.6) };
         let mut s = viz::base(frame, ns, t.id as i32, viz::SPHERE);
         s.pose.position.x = t.x;
         s.pose.position.y = t.y;

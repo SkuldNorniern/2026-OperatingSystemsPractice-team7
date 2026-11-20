@@ -23,6 +23,8 @@ ARGS = [
     ('mission', 'true', 'Start the mission node (timer, stop, map save)'),
     ('output_dir', '~/team7_run', 'Where map.pgm/.yaml and targets.csv are written'),
     ('camera_topic', '/oakd/rgb/preview/image_raw', 'Image topic for ArUco detection'),
+    ('marker_dict', 'ARUCO_ORIGINAL', 'ArUco dictionary for both detectors, OpenCV name without DICT_ '
+                                      '(task sheet: ARUCO_ORIGINAL, our test prints 10 and 11: 6X6_250)'),
     ('marker_size', '0.10', 'ArUco side length in m (only used for the PnP fallback)'),
     ('time_limit', '590.0', 'Seconds until the mission stops'),
     ('expected_targets', '3', 'Stop once this many marker IDs are confirmed'),
@@ -163,12 +165,14 @@ def setup(context):
         actions.append(Node(package='team7_nodes', executable='aruco_detector', name='aruco_detector',
                             parameters=[team7_yaml, {
                                 'image_topic': arg('camera_topic'),
+                                'marker_dict': ParameterValue(arg('marker_dict'), value_type=str),
                                 'marker_size': ParameterValue(arg('marker_size'), value_type=float)}],
                             output='screen'))
     else:
         actions.append(Node(package='aruco_opencv', executable='aruco_tracker_autostart', name='aruco_tracker',
                             parameters=[cfg('aruco.yaml'), {
                                 'cam_base_topic': arg('camera_topic'),
+                                'marker_dict': ParameterValue(arg('marker_dict'), value_type=str),
                                 'marker_size': ParameterValue(arg('marker_size'), value_type=float)}],
                             output='screen', additional_env=native_env, prefix=native_prefix))
 

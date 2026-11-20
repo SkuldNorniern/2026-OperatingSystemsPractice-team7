@@ -1,6 +1,6 @@
 # launch sets per mode, dont set here: output_dir, time_limit, expected_targets, nav_action,
-# costmap_topic, scan_topic (slam), mode and cmd_vel_topic (navigator), image_topic, marker_size,
-# map_origin_shift (marker_mapper, mission)
+# costmap_topic, scan_topic (slam), mode and cmd_vel_topic (navigator), image_topic, marker_dict,
+# marker_size, map_origin_shift (marker_mapper, mission)
 
 marker_mapper:
   # publishes /team7/marker_approach (MarkerArray ns tentative, id = aruco id, map frame): tentative markers with 2+ views at their fused
@@ -181,7 +181,6 @@ navigator:
 
 aruco_detector:
   ros__parameters:
-    marker_dict: ARUCO_ORIGINAL  # same as aruco.yaml. exam markers are ARUCO_ORIGINAL; other names: 4X4_50 .. 7X7_1000, APRILTAG_16H5/25H9/36H10/36H11. Old 6X6_250 test markers 10, 11 are NOT detected with this setting
     image_transport: compressed  # compressed | raw
     max_hamming: 1            # 1 bit corrected, as OpenCV does: a cable or leg over one bit still decodes. Costs more
                               # false ids (field 2026-11-18: 128 vs 36 in 27k frames); marker_mapper's wall rules stop

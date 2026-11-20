@@ -54,6 +54,7 @@ if rays a bit left and right of the marker land at different depth, hit is at an
 if one side runs past (marker near end of small box face), hit is used only when PnP range agrees with it, so a ray clipping past the end of a wall in front is still dropped.
 each id needs a few views that agree before it counts. views are fused by weighted least squares, each view trusted along ray by how good its range is (head on wall hit good, grazing or PnP bad) and across ray by bearing error.
 confirmed when fused position is tight and views agree, and stays confirmed unless views clearly fall apart.
+PnP range of a marker whose size is not known is off by the same factor in every view, so for "tight" and "agree" all such views together count as one along the ray. a marker seen only that way (bigger than `marker_size` on a small box face, or wall not in map yet) is confirmed once the camera has seen it from different places, not from driving straight at it.
 
 every part has stock ROS version and ours, switch with launch args (host_ws/README.md):
 aruco_opencv or our detector, slam_toolbox or our SLAM, Nav2 NavFn+RPP or our Lazy Theta* with Nav2 RPP or with our MPPI.

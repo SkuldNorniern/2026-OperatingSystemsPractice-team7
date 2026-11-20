@@ -11,6 +11,7 @@
 //! | `FRONTIER` blue, `VIEW` orange | frontier goals and camera views (`/team7/frontiers`) |
 //! | `GOAL` yellow | the active goal (`/team7/goal`), drawn as a ring with a cross |
 //! | `TARGET_TENTATIVE` amber, `TARGET_CONFIRMED` green | ArUco targets (`/team7/targets`) |
+//! | `DETECTION` light blue | raw ArUco detections (`/aruco_detections`), short bearing ticks |
 //! | `SCAN` red | latest `/scan` points |
 //! | `COST_LOW` blue .. `COST_MID` magenta .. `COST_HIGH` red, `COST_INSCRIBED` cyan, `COST_LETHAL` purple | costmaps, see-through, under the walls |
 //! | `GRID`, `SLAM_GRAPH` pink, `MEASURE` cyan, `AXIS_X` red, `AXIS_Y` green | 1 m grid, SLAM pose graph, measure tool, robot axes |
@@ -36,6 +37,7 @@ pub const VIEW: Rgba = [255, 150, 0, 255];
 pub const GOAL: Rgba = [255, 230, 0, 255];
 pub const TARGET_TENTATIVE: Rgba = [255, 200, 0, 255];
 pub const TARGET_CONFIRMED: Rgba = [0, 210, 90, 255];
+pub const DETECTION: Rgba = [130, 220, 255, 255];
 pub const SCAN: Rgba = [255, 70, 70, 255];
 
 // costmaps (global costmap, MPPI local cost): ramp from low to high cost, then inscribed and lethal

@@ -140,7 +140,29 @@ cp "\$F.orig" "\$F"
 EOS
       cmd_restart_bringup
       ;;
-    *) die "sensors: check, enable or restore" ;;
+    boot-install)
+      # copies team7_sensors.sh and its systemd unit to the Pi and enables the unit, so the lines are
+      # re-applied at every boot (and after apt updates) before turtlebot4.service starts
+      HERE_OPS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      [ -f "$HERE_OPS/robot/team7_sensors.sh" ] && [ -f "$HERE_OPS/robot/team7-sensors.service" ] \
+        || die "missing robot/team7_sensors.sh or robot/team7-sensors.service"
+      scp "${SSH_OPTS[@]}" "$HERE_OPS/robot/team7_sensors.sh" "$HERE_OPS/robot/team7-sensors.service" \
+        "$TB4_USER@$TB4_HOST:/tmp/" >/dev/null 2>&1 || die "scp to the Pi failed"
+      sudo_script <<EOS
+set -e
+install -m 755 /tmp/team7_sensors.sh /usr/local/bin/team7_sensors.sh
+install -m 644 /tmp/team7-sensors.service /etc/systemd/system/team7-sensors.service
+systemctl daemon-reload
+systemctl enable team7-sensors.service
+/usr/local/bin/team7_sensors.sh
+systemctl is-enabled team7-sensors.service
+EOS
+      ;;
+    boot-check)
+      rssh "systemctl is-enabled team7-sensors.service; systemctl is-active team7-sensors.service; sudo -n true 2>/dev/null; grep -nE '^\s*\"(hazard_detection|ir_intensity)\",' $REPUB" \
+        || echo "boot service not installed or no passwordless check"
+      ;;
+    *) die "sensors: check, enable, restore, boot-install or boot-check" ;;
   esac
 }
 

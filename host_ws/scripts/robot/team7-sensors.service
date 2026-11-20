@@ -1,0 +1,14 @@
+[Unit]
+Description=team7: enable Create 3 bump and IR relays in the TurtleBot 4 republisher config
+# must finish before the bringup reads its config
+Before=turtlebot4.service
+DefaultDependencies=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/team7_sensors.sh
+# the bringup is not restarted here: at boot it has not started yet
+
+[Install]
+WantedBy=multi-user.target

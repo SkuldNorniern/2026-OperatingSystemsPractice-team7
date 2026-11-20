@@ -28,10 +28,11 @@ marker_mapper:
                               # (approach on, 12 runs): all 3 confirmed 11/12 vs 10/12 without, 0 decoys; closes the
                               # case of a mid-air sticker confirmed after approach views (1 of 30 runs)
     max_spread: 0.08          # m, fused position 1 sigma
-    max_consistency: 3.0      # median mahalanobis distance of views, bigger = views disagree
+    max_consistency: 12.0     # median mahalanobis distance of views, bigger = views disagree. 3.0 -> 12 (2026-11-20):
+                              # real marker 5 (run 153653) failed at 10.6; decoys 0/1023/103 stayed unconfirmed on 3 real runs and in the sim
     max_history: 200
-    scale_tolerance: 0.25     # learned per marker: ray/pnp range ratio, rejects rays that hit something in front
-    scale_min_samples: 3
+    scale_tolerance: 0.4      # learned per marker: ray/pnp range ratio, rejects rays that hit something in front (0.25 -> 0.4, same change)
+    scale_min_samples: 2      # 3 -> 2: a learned scale is reached sooner (same change)
     min_view_move: 0.05       # m, new view only counts after camera moved or turned
     min_view_turn: 0.05       # rad
     wall_fit_radius: 0.2      # m, fit line to wall cells around ray hit, 0 = raw cell hit

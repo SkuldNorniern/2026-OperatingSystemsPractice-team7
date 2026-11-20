@@ -14,7 +14,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "$HERE/../ros2_ws" && pwd)"
 ROS_SETUP=/opt/ros/jazzy/setup.bash
-MIN_RUST="1.85"
+MIN_RUST="1.90"   # aurea (GUI, team7_viz) needs 1.90
 
 DEPS=false; CLEAN=false; BUILD=true
 for arg in "$@"; do

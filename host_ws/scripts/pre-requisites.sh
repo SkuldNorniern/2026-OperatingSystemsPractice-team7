@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # usage: pre-requisites.sh [--yes] [--skip-apt] [--skip-rust] [--skip-sources] [--skip-rosdep]
 #   One-time setup for a new laptop, before prep.sh. Covers everything in host_ws/README.md "setup (once)":
-#     1. apt packages (ROS 2 Jazzy desktop extras, colcon, vcstool, rosdep, libclang, Nav2 and TB4 packages)
-#     2. rust from rustup (apt rust is too old; we need 1.85 or newer)
+#     1. apt packages (ROS 2 Jazzy extras, colcon, vcstool, rosdep, libclang, git, GTK3 and X11 for aurea, Nav2 and TB4)
+#     2. rust from rustup (apt rust is too old; we need 1.90 or newer, for aurea)
 #     3. workspace sources: vcs import team7.repos into host_ws/ros2_ws/src
 #     4. ROS dependencies: rosdep install
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "$HERE/../ros2_ws" && pwd)"
 ROS_SETUP=/opt/ros/jazzy/setup.bash
-MIN_RUST="1.85"
+MIN_RUST="1.90"   # aurea (GUI, team7_viz) needs 1.90; edition 2024 needs 1.85
 
 YES=false; SKIP_APT=false; SKIP_RUST=false; SKIP_SRC=false; SKIP_ROSDEP=false
 for arg in "$@"; do
@@ -30,6 +30,8 @@ done
 
 APT_PKGS=(
   python3-colcon-common-extensions python3-vcstool python3-rosdep libclang-dev
+  git                    # aurea is fetched from GitHub by cargo
+  libgtk-3-dev libx11-xcb-dev   # aurea GUI: team7_viz (map viewer) and tb4_viewer
   ros-jazzy-turtlebot4-desktop ros-jazzy-turtlebot4-navigation ros-jazzy-slam-toolbox
   ros-jazzy-nav2-bringup ros-jazzy-nav2-map-server ros-jazzy-aruco-opencv ros-jazzy-irobot-create-msgs
 )

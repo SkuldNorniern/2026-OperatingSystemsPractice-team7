@@ -8,7 +8,8 @@ use tb4_core::{Grid, Pose2};
 
 /// Create 3 bumper zones, as `/hazard_detection` frame ids. Angle of the zone centre from the
 /// robot's forward axis (rad), from the robot's TF: bump_front_center 0, front_left/right +-30 deg,
-/// left/right +-60 deg, all on a 0.175 m radius.
+/// left/right +-60 deg. The bumper itself is about 0.175 m from the centre; the marks are drawn at
+/// `VirtualParams::bump_radius` (0.20 m default, a 2.5 cm margin).
 pub fn bump_zone_angle(frame_id: &str) -> Option<f64> {
     let deg = match frame_id.trim_start_matches('/') {
         "bump_front_center" => 0.0,

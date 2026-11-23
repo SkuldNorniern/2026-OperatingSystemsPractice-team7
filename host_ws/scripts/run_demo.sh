@@ -19,6 +19,9 @@
 #   --no-prepare: live only; skip undock and odometry reset (stationary diagnostics).
 #   --no-record / record:=: live only. A replay never records (a bag of a bag only fills the disk).
 # extra name:=value args go to team7.launch.py, e.g. nav:=lazy_nav2, explorer:=none, output_dir:=DIR
+#   overlay:=PATH loads an experiment parameter file after team7.yaml on every team7 node (values win),
+#   e.g. overlay:=host_ws/ros2_ws/src/team7_bringup/config/experiments/sched_gain_idle.yaml
+#   Defaults stay in team7.yaml; an experiment is tested with the overlay, then committed as a default if it wins.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

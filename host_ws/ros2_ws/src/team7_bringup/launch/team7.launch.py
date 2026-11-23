@@ -24,6 +24,7 @@ ARGS = [
     ('slam', 'true', 'Start SLAM'),
     ('mission', 'true', 'Start the mission node (timer, stop, map save)'),
     ('output_dir', '~/team7_run', 'Where map.pgm/.yaml and targets.csv are written'),
+    ('overlay', '', 'Optional parameter file loaded after team7.yaml for experiments (overlay:=PATH); empty = none'),
     ('camera_topic', '/oakd/rgb/preview/image_raw', 'Image topic for ArUco detection'),
     ('marker_dict', 'ARUCO_ORIGINAL', 'ArUco dictionary for both detectors, OpenCV name without DICT_ '
                                       '(task sheet: ARUCO_ORIGINAL, our test prints 10 and 11: 6X6_250)'),
@@ -95,6 +96,8 @@ def setup(context):
     val = lambda name: context.perform_substitution(arg(name))  # noqa: E731
     on = lambda name: val(name).lower() in ('true', '1', 'yes')  # noqa: E731
     team7_yaml = cfg('team7.yaml')
+    # optional experiment overlay (overlay:=PATH), loaded after team7.yaml so its values win
+    overlay = [val('overlay')] if val('overlay') else []
     out_dir = {'output_dir': arg('output_dir')}
     nav, aruco_be, slam_be, explorer = val('nav'), val('aruco'), val('slam_backend'), val('explorer')
     actions = [LogInfo(msg=f'team7: nav={nav} aruco={aruco_be} slam={slam_be} explorer={explorer}')]
@@ -110,11 +113,11 @@ def setup(context):
     scan_topic = '/scan_filtered' if on('scan_filter') else '/scan'
     if on('scan_filter'):
         actions.append(Node(package='team7_nodes', executable='scan_filter', name='scan_filter',
-                            parameters=[team7_yaml], output='screen'))
+                            parameters=[team7_yaml, *overlay], output='screen'))
 
     if on('slam') and slam_be == 'team7':
         actions.append(Node(package='team7_nodes', executable='slam', name='slam',
-                            parameters=[team7_yaml, {'scan_topic': scan_topic}], output='screen'))
+                            parameters=[team7_yaml, *overlay, {'scan_topic': scan_topic}], output='screen'))
     elif on('slam'):
         slam_params = RewrittenYaml(source_file=cfg('slam.yaml'), root_key='',
                                     param_rewrites={'scan_topic': scan_topic}, convert_types=True)
@@ -126,7 +129,7 @@ def setup(context):
     # every velocity source ends in velocity_guard: forward only, create3 limits, stops on stale commands
     if nav in ('nav2', 'lazy_nav2', 'team7'):
         actions.append(Node(package='team7_nodes', executable='velocity_guard', name='velocity_guard',
-                            parameters=[team7_yaml], output='screen'))
+                            parameters=[team7_yaml, *overlay], output='screen'))
     if use_nav2:
         nav2_params = RewrittenYaml(source_file=cfg('nav2.yaml'),
             param_rewrites={'default_nav_to_pose_bt_xml': cfg('navigate_forward.xml')}, convert_types=True)
@@ -144,7 +147,7 @@ def setup(context):
         actions.append(TimerAction(period=3.0, actions=nav_nodes))
     if nav in ('lazy_nav2', 'team7'):
         actions.append(Node(package='team7_nodes', executable='navigator', name='navigator',
-                            parameters=[team7_yaml, {'mode': 'nav2' if nav == 'lazy_nav2' else 'mppi',
+                            parameters=[team7_yaml, *overlay, {'mode': 'nav2' if nav == 'lazy_nav2' else 'mppi',
                                                      'cmd_vel_topic': '/cmd_vel_nav'}],
                             output='screen'))
     if nav == 'team7':
@@ -165,7 +168,7 @@ def setup(context):
 
     if aruco_be == 'team7':
         actions.append(Node(package='team7_nodes', executable='aruco_detector', name='aruco_detector',
-                            parameters=[team7_yaml, {
+                            parameters=[team7_yaml, *overlay, {
                                 'image_topic': arg('camera_topic'),
                                 'marker_dict': ParameterValue(arg('marker_dict'), value_type=str),
                                 'marker_size': ParameterValue(arg('marker_size'), value_type=float)}],
@@ -181,10 +184,10 @@ def setup(context):
     # slam_toolbox grid sits half a cell (+0.025 m in x and y) off its own map frame, measured in sim
     shift = {'map_origin_shift': -0.025 if slam_be == 'toolbox' else 0.0}
     actions.append(Node(package='team7_nodes', executable='marker_mapper', name='marker_mapper',
-                        parameters=[team7_yaml, out_dir, shift], output='screen'))
+                        parameters=[team7_yaml, *overlay, out_dir, shift], output='screen'))
     if on('mission'):
         actions.append(Node(package='team7_nodes', executable='mission', name='mission',
-                            parameters=[team7_yaml, out_dir, shift, {
+                            parameters=[team7_yaml, *overlay, out_dir, shift, {
                                 'nav_action': nav_action,
                                 'time_limit': ParameterValue(arg('time_limit'), value_type=float),
                                 'expected_targets': ParameterValue(arg('expected_targets'), value_type=int)}],
@@ -193,7 +196,7 @@ def setup(context):
     explorers = []
     if explorer == 'team7':
         explorers.append(Node(package='team7_nodes', executable='explorer', name='explorer',
-                              parameters=[team7_yaml, {
+                              parameters=[team7_yaml, *overlay, {
                                   'nav_action': nav_action,
                                   'costmap_topic': '/global_costmap/costmap' if use_nav2 else '/map'}],
                               output='screen'))

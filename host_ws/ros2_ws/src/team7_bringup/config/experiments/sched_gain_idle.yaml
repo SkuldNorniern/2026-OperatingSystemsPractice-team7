@@ -1,0 +1,6 @@
+# experiment overlay (launch arg overlay:=PATH): explorer gain and idle fallback, both off in team7.yaml.
+# Sim (10 seeds, studio): gain marks markers faster but slower on average, idle helps a little; not a default.
+explorer:
+  ros__parameters:
+    gain_weight: 0.3
+    idle_fallback: true

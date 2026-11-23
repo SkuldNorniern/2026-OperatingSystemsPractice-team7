@@ -1,0 +1,5 @@
+# experiment overlay (overlay:=PATH): confirm without a learned marker size. Full-pipeline replay of 153653:
+# marker 5 was seen 14 times (6 lidar-backed) but its scale was never learned, so require_scale_all blocked it.
+marker_mapper:
+  ros__parameters:
+    require_scale_all: false

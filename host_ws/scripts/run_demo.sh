@@ -306,9 +306,19 @@ PY
       /team7/frontiers /team7/goal /team7/targets /team7/mission_state /aruco_detections \
       /navigate_to_pose/_action/status /navigate_to_pose/_action/feedback /collision_monitor_state \
       --remap /tf:=/old_tf /tf_static:=/old_tf_static > "$TMP/bag.log" 2>&1 &
+  BAG_PID=$!
   PIDS+=($!)
   python3 "$TMP/tf_relay.py" > "$TMP/tf_relay.log" 2>&1 & PIDS+=($!)
   python3 "$TMP/static_relay.py" "$BAG" > "$TMP/static_relay.log" 2>&1 & PIDS+=($!)
+  # the replay ends by itself: when the bag ends, wait for the mission to save its map and targets
+  # (REPLAY_GRACE seconds, default 30), then stop the launch with SIGINT like a live run. Without this a
+  # replay keeps running after its mission is done (seen on 2026-11-23: about 8 min each).
+  (
+    while kill -0 "$BAG_PID" 2>/dev/null; do sleep 2; done
+    sleep "${REPLAY_GRACE:-30}"
+    LP=$(pgrep -f "ros2 launch team7_bringup" | head -1 || true)
+    [ -n "$LP" ] && kill -INT "$LP" && echo "[*] replay: bag finished, launch stopped after the grace period" >&2
+  ) & PIDS+=($!)
   echo "replay: $BAG on ROS_DOMAIN_ID=$ROS_DOMAIN_ID (logs in $TMP)"
   sleep 3
 }
@@ -331,6 +341,17 @@ if [ -n "$BAG" ]; then
   export ROS_LOG_DIR="$LOG_DIR/ros_logs"
   # map, targets and autosaves of the replay stay with its logs instead of overwriting ~/team7_run
   LAUNCH_ARGS+=("output_dir:=$LOG_DIR")
+  # the mission ends with the bag: its time limit is the bag length after the start offset, so it saves
+  # map.pgm and targets.csv when the bag ends (the 590 s default outlasts a 533 s bag and saved nothing).
+  # An explicit time_limit:= from the command line wins.
+  case " ${EXTRA[*]:-} " in
+    *" time_limit:="*) ;;
+    *)
+      NS=$(awk '/duration:/{getline; print $2; exit}' "$BAG/metadata.yaml" 2>/dev/null || true)
+      LIMIT=$(python3 -c 'import sys; print(max(60.0, int(sys.argv[1]) / 1e9 - float(sys.argv[2])))' "${NS:-0}" "${OFFSET:-0}" 2>/dev/null || true)
+      [ -n "$LIMIT" ] && LAUNCH_ARGS+=("time_limit:=$LIMIT") && echo "[*] replay: mission time limit ${LIMIT}s (bag length after the start offset)"
+      ;;
+  esac
 fi
 echo "[*] run logs: $LOG_DIR"
 

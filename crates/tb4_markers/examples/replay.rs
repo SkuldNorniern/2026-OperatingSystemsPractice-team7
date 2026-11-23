@@ -112,6 +112,10 @@ fn main() {
     if let Some(v) = env("min_views").and_then(|v| v.parse().ok()) { tp.min_views = v; }
     if let Some(v) = env("scale_min_samples").and_then(|v| v.parse().ok()) { tp.scale_min_samples = v; }
     if let Some(v) = env("require_scale_all").and_then(|v| v.parse::<i32>().ok()) { tp.require_scale_all = v != 0; }
+    if let Some(v) = env("max_triangulation_gap").and_then(|v| v.parse().ok()) { tp.max_triangulation_gap = v; }
+    if let Some(v) = env("min_triangulation_spread").and_then(|v| v.parse().ok()) { tp.min_triangulation_spread = v; }
+    if let Some(v) = env("edge_triangulation_gap").and_then(|v| v.parse().ok()) { tp.edge_triangulation_gap = v; }
+    if let Some(v) = env("edge_ratio_gate").and_then(|v| v.parse().ok()) { tp.edge_ratio_gate = v; }
     if let Some(v) = env("strict_ids").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<i64>>()) { tp.strict_ids = v; }
     let mut tr = Tracker::new(tp);
     let mut first_confirm: BTreeMap<i64, usize> = BTreeMap::new();

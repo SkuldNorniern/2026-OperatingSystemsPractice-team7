@@ -85,6 +85,23 @@ pub fn costmap_image(meta: &GridMeta, data: &[i8], opacity: f32) -> Option<Image
     Some(Image::new(meta.width, meta.height, out).with_opaque(false))
 }
 
+/// a 0..100 grid tinted with `color`: alpha grows with the value (0 and unknown clear), scaled by
+/// `opacity` 0..1; for overlays like camera fog or banned areas
+pub fn tint_image(meta: &GridMeta, data: &[i8], color: Rgba, opacity: f32) -> Option<Image> {
+    let (w, h) = (meta.width as usize, meta.height as usize);
+    if w == 0 || h == 0 || data.len() != w * h {
+        return None;
+    }
+    let alpha = |v: i8| (f32::from(color[3]) * f32::from(v.min(100)) / 100.0 * opacity.clamp(0.0, 1.0)).round() as u8;
+    let mut out = Vec::with_capacity(w * h * 4);
+    for v in 0..h {
+        for &c in &data[(h - 1 - v) * w..(h - v) * w] {
+            out.extend_from_slice(&if c > 0 { [color[0], color[1], color[2], alpha(c)] } else { [0, 0, 0, 0] });
+        }
+    }
+    Some(Image::new(meta.width, meta.height, out).with_opaque(false))
+}
+
 /// only the occupied cells of a map (>= 65), opaque, the rest clear: drawn over the costmaps so
 /// walls stay readable
 pub fn occupied_image(meta: &GridMeta, data: &[i8]) -> Option<Image> {

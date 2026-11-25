@@ -53,7 +53,8 @@ pub fn team7_track_params() -> TrackParams {
         min_wall_fraction: 0.25,
         min_triangulation_spread: 0.2,
         max_triangulation_gap: 0.3,
-        strict_ids: vec![0, 341, 682, 1023],
+        // barcode-like ids of the marker dictionary, computed from the codes
+        strict_ids: tb4_aruco::Dictionary::by_name("ARUCO_ORIGINAL").map(|d| d.barcode_ids(1)).unwrap_or_default(),
         require_scale_all: true,
         max_spread: 0.08,
         max_consistency: 3.0,
@@ -67,6 +68,7 @@ pub fn team7_track_params() -> TrackParams {
         pnp_sigma: 0.08,
         edge_ratio_gate: 1.5,
         edge_triangulation_gap: 0.15,
+        ..TrackParams::default()
     }
 }
 

@@ -91,6 +91,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
         idle_fallback: false,
         goal_timeout: 120.0,
         progress_timeout: 15.0,
+        closing_timeout: 30.0,
+        closing_epsilon: 0.25,
         progress_epsilon: 0.1,
         retry_delay: 5.0,
         blacklist_duration: 45.0,
@@ -165,7 +167,8 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 45] = [
+pub const SET_NAMES: [&str; 46] = [
+    "closing_timeout",
     "min_triangulation_spread",
     "min_free_fraction",
     "require_scale_all",
@@ -190,6 +193,7 @@ impl SimConfig {
         match k {
             "goal_timeout" => e.goal_timeout = x,
             "progress_timeout" => e.progress_timeout = x,
+            "closing_timeout" => e.closing_timeout = x,
             "retry_delay" => e.retry_delay = x,
             "blacklist_duration" => e.blacklist_duration = x,
             "blacklist_max_duration" => e.blacklist_max_duration = x,

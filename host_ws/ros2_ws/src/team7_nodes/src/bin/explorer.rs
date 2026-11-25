@@ -50,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let params = ExplorerParams {
         goal_timeout: p.f64("goal_timeout", 60.0),
         progress_timeout: p.f64("progress_timeout", 15.0),
+        closing_timeout: p.f64("closing_timeout", 30.0),
+        closing_epsilon: p.f64("closing_epsilon", 0.25),
         progress_epsilon: p.f64("progress_epsilon", 0.1),
         retry_delay: p.f64("retry_delay", 5.0),
         blacklist_duration: p.f64("blacklist_duration", 45.0),

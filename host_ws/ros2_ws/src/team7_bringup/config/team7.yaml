@@ -59,6 +59,9 @@ explorer:
     goal_timeout: 75.0       # s per goal; above the navigator's 60 s so the navigator's limit applies
     approach_budget: 180.0   # s of approach trips for the whole run (3 min of marker search, per the task); 0 = no limit
     progress_timeout: 15.0    # s without 0.1 m of movement: give the goal up (field runs lost 30 s per stuck goal)
+    closing_timeout: 30.0     # s without getting 0.25 m closer to the goal: give it up (live 2026-11-25: 3 goals behind a
+                              # half wall wiggled into the 60 s timeout, about 3 min lost)
+    closing_epsilon: 0.25
     progress_epsilon: 0.1
     blacklist_duration: 45.0
     blacklist_max_duration: 300.0  # s, ban doubles per failure at one spot (183647 replay cycled 3 failing goals)

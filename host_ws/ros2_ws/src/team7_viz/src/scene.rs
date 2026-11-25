@@ -86,9 +86,9 @@ pub const LAYERS: [LayerInfo; 19] = [
     info(Layer::Detections, "detections", "ArUco detections", "camera hits now", false, None, Some(Slot::Detections), Some(MsgKind::Detections)),
     info(Layer::Robot, "robot", "Robot", "pose, x/y axes", true, None, None, None),
     info(Layer::Views, "camera_views", "Camera views", "planned view poses", true, None, Some(Slot::Views), Some(MsgKind::Markers)),
-    info(Layer::SeenViews, "seen_views", "Seen views", "where the camera saw a marker", true, None, Some(Slot::SeenViews), Some(MsgKind::Markers)),
-    info(Layer::Coverage, "camera_coverage", "Camera coverage", "walls seen / not seen", true, Some(1.0), Some(Slot::Coverage), Some(MsgKind::Markers)),
-    info(Layer::Banned, "banned", "Banned areas", "no goals sent here", true, None, Some(Slot::Banned), Some(MsgKind::Markers)),
+    info(Layer::SeenViews, "seen_views", "Seen views", "where the camera saw a marker", false, None, Some(Slot::SeenViews), Some(MsgKind::Markers)),
+    info(Layer::Coverage, "camera_fog", "Camera fog", "not yet seen close enough to read a marker", true, Some(0.6), Some(Slot::Coverage), Some(MsgKind::Grid)),
+    info(Layer::Banned, "banned", "Banned areas", "no goals sent here", true, Some(0.6), Some(Slot::Banned), Some(MsgKind::Grid)),
     info(Layer::SlamGraph, "slam_graph", "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph), Some(MsgKind::Markers)),
     info(Layer::Grid, "grid", "Grid", "1 m", true, None, None, None),
     info(Layer::Trail, "trail", "Trail", "where it drove", true, None, None, None),
@@ -107,7 +107,7 @@ pub fn info_of(l: Layer) -> &'static LayerInfo {
 /// costmaps get an opacity slider row; the other layers with an opacity a small button that
 /// steps through `OPACITY_STEPS`, so the list stays short
 pub fn has_slider(l: Layer) -> bool {
-    matches!(l, Layer::GlobalCost | Layer::LocalCost)
+    matches!(l, Layer::GlobalCost | Layer::LocalCost | Layer::Coverage | Layer::Banned)
 }
 
 pub const OPACITY_STEPS: [f32; 3] = [1.0, 0.6, 0.3];
@@ -274,6 +274,17 @@ impl Cache {
         self.costs.get(topic).map(|(.., i)| i.clone())
     }
 
+    /// a 0..100 overlay grid tinted with one colour (camera fog, banned areas)
+    fn tint(&mut self, topic: &str, g: &GridLayer, opacity: f32, color: Rgba) -> Option<Image> {
+        let m = g.grid.as_ref()?;
+        let slot = self.costs.get(topic);
+        if slot.is_none_or(|(seq, o, _)| *seq != g.seq || *o != opacity) {
+            let img = tb4_draw::tint_image(&m.meta, &m.data, color, opacity)?;
+            self.costs.insert(topic.to_owned(), (g.seq, opacity, img));
+        }
+        self.costs.get(topic).map(|(.., i)| i.clone())
+    }
+
     /// the map image and its occupied-only overlay
     fn map(&mut self, topic: &str, g: &GridLayer) -> Option<(Image, Image)> {
         let m = g.grid.as_ref()?;
@@ -324,12 +335,9 @@ const ORDER: [Layer; 16] = [
     Layer::Map,
 ];
 
-/// camera coverage: wall seen / not seen yet
-const COVERAGE_SEEN: Rgba = [60, 210, 110, 230];
-const COVERAGE_UNSEEN: Rgba = [255, 140, 30, 230];
-/// banned areas: navigator abort zone / failed goal spot
-const BANNED_ZONE: Rgba = [235, 50, 50, 230];
-const BANNED_SPOT: Rgba = [235, 120, 120, 180];
+/// camera fog of war (not yet seen close enough to read a marker) and banned areas, grid tints
+const FOG: Rgba = [25, 28, 40, 220];
+const BANNED: Rgba = [235, 45, 45, 200];
 
 /// `c` with its alpha scaled by `o`
 fn faded(c: Rgba, o: f32) -> Rgba {
@@ -393,20 +401,8 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport, now: Instant, select
                 }
                 Layer::Frontiers => out.extend(model::frontier_points(model.markers(t)).iter().map(|p| prim::dot(at(p), 4.0, pal::FRONTIER))),
                 Layer::Views => out.extend(model::view_points(model.markers(t)).iter().map(|p| Prim::Points { pts: vec![at(p)], size: 7.0, color: pal::VIEW })),
-                Layer::Coverage => {
-                    for m in model.markers(t) {
-                        let c = if m.ns == "coverage_seen" { COVERAGE_SEEN } else { COVERAGE_UNSEEN };
-                        out.push(Prim::Points { pts: m.pts.iter().map(at).collect(), size: 3.0, color: color(c) });
-                    }
-                }
-                Layer::Banned => {
-                    // LINE_LIST circles; abort zones stronger than failed spots
-                    for m in model.markers(t) {
-                        let c = if m.ns == "banned_zone" { BANNED_ZONE } else { BANNED_SPOT };
-                        let pts: Vec<_> = m.pts.iter().map(at).collect();
-                        out.extend(pts.as_chunks::<2>().0.iter().map(|&[a, b]| Prim::Line { a, b, color: color(c), width: 2.0, dashed: true }));
-                    }
-                }
+                // grids, drawn as images with the costmaps
+                Layer::Coverage | Layer::Banned => {}
                 Layer::SeenViews => {
                     // LINE_LIST wedges: each pair of points is one edge
                     for m in model.markers(t) {
@@ -502,6 +498,14 @@ pub fn draw(ctx: &mut dyn DrawingContext, model: &Model, layers: &Layers, cache:
             tb4_draw::draw_map(ctx, &img, &l)?;
         }
     }
+    for s in layers.list.iter().filter(|s| matches!(s.kind, Layer::Coverage | Layer::Banned) && s.on) {
+        let Some(t) = s.topic(model) else { continue };
+        let Some(g) = model.grid(&t) else { continue };
+        let tint = if s.kind == Layer::Coverage { FOG } else { BANNED };
+        if let (Some(img), Some(l)) = (cache.tint(&t, g, s.opacity, tint), place(g)) {
+            tb4_draw::draw_map(ctx, &img, &l)?;
+        }
+    }
     if layers.shown(Layer::Grid) {
         tb4_draw::paint_prims(ctx, &grid_lines(grid_bounds, vp))?;
     }
@@ -544,8 +548,8 @@ pub fn symbol(l: Layer, c: (f32, f32)) -> Vec<Prim> {
         Layer::Frontiers => vec![prim::dot(c, 4.0, pal::FRONTIER)],
         Layer::Views => vec![square(0.0, pal::VIEW)],
         Layer::SeenViews => vec![Prim::Line { a: (x - 8.0, y + 4.0), b: (x + 8.0, y - 4.0), color: pal::SEEN_VIEW, width: 2.0, dashed: false }],
-        Layer::Coverage => vec![square(-4.0, COVERAGE_SEEN), square(4.0, COVERAGE_UNSEEN)],
-        Layer::Banned => vec![Prim::Circle { c, r: 6.0, fill: None, stroke: Some((BANNED_ZONE, 2.0)) }],
+        Layer::Coverage => vec![square(0.0, FOG)],
+        Layer::Banned => vec![square(0.0, BANNED)],
         Layer::Goal => prim::goal(c).to_vec(),
         Layer::Candidates => vec![Prim::Circle { c, r: 5.5, fill: None, stroke: Some((pal::TARGET_TENTATIVE, 2.0)) }],
         Layer::Confirmed => vec![Prim::Circle { c, r: 5.5, fill: Some(pal::TARGET_CONFIRMED), stroke: Some((pal::ROBOT_EDGE, 1.0)) }],

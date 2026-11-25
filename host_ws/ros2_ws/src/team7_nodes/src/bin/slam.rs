@@ -6,13 +6,13 @@ use futures::StreamExt;
 use futures::executor::LocalPool;
 use futures::task::LocalSpawnExt;
 use r2r::geometry_msgs::msg::{Point, TransformStamped};
-use r2r::nav_msgs::msg::{MapMetaData, OccupancyGrid};
+use r2r::nav_msgs::msg::OccupancyGrid;
 use r2r::sensor_msgs::msg::LaserScan;
 use r2r::tf2_msgs::msg::TFMessage;
 use r2r::visualization_msgs::msg::MarkerArray;
 use r2r::{QosProfile, log_info, log_warn};
 use tb4_core::nalgebra::Point3;
-use tb4_core::{Grid, Pose2, Stamp, TfBuffer};
+use tb4_core::{Pose2, Stamp, TfBuffer};
 use tb4_slam::smooth::PoseSmoother;
 use tb4_slam::{Slam, SlamParams};
 use team7_nodes::{Params, pose_msg, spawn_tf_listener, stamp, viz};
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 s.last_map = Instant::now();
                 if s.map_dirty || s.grid.is_none() {
                     s.map_dirty = false;
-                    s.grid = Some(grid_msg(&s.slam.published_map(), &map_frame, &now));
+                    s.grid = Some(team7_nodes::grid_msg(&s.slam.published_map(), &map_frame, &now));
                     let _ = graph_pub.publish(&graph_markers(&s.slam, &map_frame));
                 }
                 if let Some(g) = s.grid.as_mut() {
@@ -190,21 +190,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     team7_nodes::run(node, pool, || false);
     Ok(())
-}
-
-fn grid_msg(g: &Grid, frame: &str, now: &r2r::builtin_interfaces::msg::Time) -> OccupancyGrid {
-    let mut m = OccupancyGrid::default();
-    m.header.frame_id = frame.to_owned();
-    m.header.stamp = now.clone();
-    m.info = MapMetaData {
-        map_load_time: now.clone(),
-        resolution: g.meta.resolution as f32,
-        width: g.meta.width,
-        height: g.meta.height,
-        origin: pose_msg(g.meta.origin_x, g.meta.origin_y, 0.0),
-    };
-    m.data = g.data.clone();
-    m
 }
 
 fn graph_markers(slam: &Slam, frame: &str) -> MarkerArray {

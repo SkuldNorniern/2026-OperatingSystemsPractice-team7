@@ -46,6 +46,22 @@ pub fn grid_from_msg(m: &r2r::nav_msgs::msg::OccupancyGrid) -> Option<Grid> {
     Some(Grid::new(meta, m.data.clone()))
 }
 
+/// a grid as an OccupancyGrid message in `frame`
+pub fn grid_msg(g: &Grid, frame: &str, now: &r2r::builtin_interfaces::msg::Time) -> r2r::nav_msgs::msg::OccupancyGrid {
+    let mut m = r2r::nav_msgs::msg::OccupancyGrid::default();
+    m.header.frame_id = frame.to_owned();
+    m.header.stamp = now.clone();
+    m.info = r2r::nav_msgs::msg::MapMetaData {
+        map_load_time: now.clone(),
+        resolution: g.meta.resolution as f32,
+        width: g.meta.width,
+        height: g.meta.height,
+        origin: pose_msg(g.meta.origin_x, g.meta.origin_y, 0.0),
+    };
+    m.data = g.data.clone();
+    m
+}
+
 pub fn pose_msg(x: f64, y: f64, yaw: f64) -> r2r::geometry_msgs::msg::Pose {
     let [qx, qy, qz, qw] = tb4_core::pose::yaw_to_quaternion(yaw);
     r2r::geometry_msgs::msg::Pose {

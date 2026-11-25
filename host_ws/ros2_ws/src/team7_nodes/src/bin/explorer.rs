@@ -111,6 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map_frame = Rc::new(p.string("map_frame", "map"));
     let base_frame = Rc::new(p.string("base_frame", "base_link"));
     let map_topic = p.string("coverage_map_topic", "/map");
+    // the camera reads markers `camera_range` far at `camera_range_width` px; a bigger preview reads further
+    let (base_range, base_width) = (p.f64("camera_range", 2.5), p.f64("camera_range_width", 250.0));
+    let info_topic = p.string("camera_info_topic", "/oakd/rgb/preview/camera_info");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
     let costmap_topic = p.string("costmap_topic", "/global_costmap/costmap");
     let nav_action = p.string("nav_action", "/navigate_to_pose");
@@ -189,13 +192,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pubs = Pubs {
         frontiers: node.create_publisher::<MarkerArray>("/team7/frontiers", QosProfile::default())?,
         goal: node.create_publisher::<r2r::geometry_msgs::msg::PoseStamped>("/team7/goal", QosProfile::default())?,
-        banned: node.create_publisher::<MarkerArray>("/team7/banned", QosProfile::default())?,
     };
     let mut timer = node.create_wall_timer(period)?;
 
-    // what the camera saw, 5 Hz; the walls seen / not seen go to /team7/camera_coverage at 1 Hz
+    let infos = node.subscribe::<r2r::sensor_msgs::msg::CameraInfo>(&info_topic, QosProfile::sensor_data())?;
+    let (st, lg) = (state.clone(), log.clone());
+    spawner.spawn_local(async move {
+        let mut infos = infos;
+        let mut last = 0u32;
+        while let Some(i) = infos.next().await {
+            if i.width > 0 && i.width != last {
+                last = i.width;
+                let r = base_range * f64::from(i.width) / base_width;
+                st.borrow_mut().policy.set_camera_range(r);
+                log_info!(&lg, "camera {}x{}: coverage reads markers to {r:.2} m", i.width, i.height);
+            }
+        }
+    })?;
+
+    // what the camera saw, 5 Hz; fog of war and banned areas as grids at 1 Hz
     let mut cov_timer = node.create_wall_timer(Duration::from_millis(200))?;
-    let cov_pub = node.create_publisher::<MarkerArray>("/team7/camera_coverage", QosProfile::default())?;
+    let fog_pub = node.create_publisher::<OccupancyGrid>("/team7/camera_fog", QosProfile::default())?;
+    let ban_pub = node.create_publisher::<OccupancyGrid>("/team7/banned_grid", QosProfile::default())?;
+    let mut clock = r2r::Clock::create(r2r::ClockType::RosTime)?;
     let (st, tfc, mf, bf) = (state.clone(), tf.clone(), map_frame.clone(), base_frame.clone());
     spawner.spawn_local(async move {
         let mut n = 0u32;
@@ -204,8 +223,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if n % 5 == 0 {
                 let s = st.borrow();
                 if let Some(m) = s.map.as_ref() {
-                    let (seen, unseen) = s.policy.coverage().wall_split(m, 65);
-                    let _ = cov_pub.publish(&coverage_markers(&mf, &seen, &unseen));
+                    let now = clock.get_now().map(|t| r2r::Clock::to_builtin_time(&t)).unwrap_or_default();
+                    let fog = Grid::new(m.meta, s.policy.coverage().fog(m, 65));
+                    let _ = fog_pub.publish(&team7_nodes::grid_msg(&fog, &mf, &now));
+                    let _ = ban_pub.publish(&team7_nodes::grid_msg(&banned_grid(m, &s.policy.banned()), &mf, &now));
                 }
             }
             if st.borrow().policy.params().coverage.is_none() {
@@ -244,8 +265,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct Pubs {
     frontiers: r2r::Publisher<MarkerArray>,
-    /// areas the explorer will not send goals to (abort zones, failed spots)
-    banned: r2r::Publisher<MarkerArray>,
     goal: r2r::Publisher<r2r::geometry_msgs::msg::PoseStamped>,
 }
 
@@ -283,7 +302,6 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
         s.viz_seq = seq;
         let _ = io.pubs.frontiers.publish(&frontier_markers(io.map_frame, frontiers, views));
     }
-    let _ = io.pubs.banned.publish(&banned_markers(io.map_frame, &s.policy.banned()));
     let mut send = None;
     for a in actions {
         match a {
@@ -348,40 +366,26 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
     });
 }
 
-/// banned areas as circles (LINE_LIST, 24 segments): abort zones (ns banned_zone), failed spots (banned_spot)
-fn banned_markers(frame: &str, areas: &[((f64, f64), f64, bool)]) -> MarkerArray {
-    let mut out = vec![viz::delete_all(frame)];
-    for (i, ((cx, cy), r, zone)) in areas.iter().enumerate() {
-        let mut m = viz::base(frame, if *zone { "banned_zone" } else { "banned_spot" }, i as i32, viz::LINE_LIST);
-        m.scale.x = 0.03;
-        m.color = if *zone { viz::color(0.95, 0.2, 0.2, 0.9) } else { viz::color(0.95, 0.5, 0.5, 0.8) };
-        let p = |k: usize| {
-            let a = k as f64 * std::f64::consts::TAU / 24.0;
-            r2r::geometry_msgs::msg::Point { x: cx + r * a.cos(), y: cy + r * a.sin(), z: 0.03 }
-        };
-        m.points = (0..24).flat_map(|k| [p(k), p(k + 1)]).collect();
-        out.push(m);
+/// banned areas on the map grid: 100 inside a navigator abort zone, 60 inside a failed spot, else 0
+fn banned_grid(m: &Grid, areas: &[((f64, f64), f64, bool)]) -> Grid {
+    let mut g = Grid::new(m.meta, vec![0; m.data.len()]);
+    let res = m.meta.resolution;
+    for ((cx, cy), r, zone) in areas {
+        let v = if *zone { 100 } else { 60 };
+        let k = (r / res).ceil() as i64;
+        let Some(c) = m.world_to_cell(*cx, *cy) else { continue };
+        for dy in -k..=k {
+            for dx in -k..=k {
+                if (dx * dx + dy * dy) as f64 * res * res <= r * r
+                    && let Some(n) = g.cell_checked(c.x as i64 + dx, c.y as i64 + dy)
+                    && g.get(n) < v
+                {
+                    g.set(n, v);
+                }
+            }
+        }
     }
-    MarkerArray { markers: out }
-}
-
-/// wall cells the camera has seen (green) and not seen yet (orange), map frame
-fn coverage_markers(frame: &str, seen: &[(f64, f64)], unseen: &[(f64, f64)]) -> MarkerArray {
-    let pts = |ns: &str, cells: &[(f64, f64)], c| {
-        let mut m = viz::base(frame, ns, 0, viz::POINTS);
-        m.scale.x = 0.05;
-        m.scale.y = 0.05;
-        m.color = c;
-        m.points = cells.iter().map(|p| r2r::geometry_msgs::msg::Point { x: p.0, y: p.1, z: 0.02 }).collect();
-        m
-    };
-    MarkerArray {
-        markers: vec![
-            viz::delete_all(frame),
-            pts("coverage_seen", seen, viz::color(0.2, 0.85, 0.4, 0.9)),
-            pts("coverage_unseen", unseen, viz::color(1.0, 0.55, 0.1, 0.9)),
-        ],
-    }
+    g
 }
 
 fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> MarkerArray {

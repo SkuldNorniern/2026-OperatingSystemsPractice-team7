@@ -116,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map_topic = p.string("coverage_map_topic", "/map");
     // the camera reads markers `camera_range` far at `camera_range_width` px; a bigger preview reads further
     let (base_range, base_width) = (p.f64("camera_range", 2.5), p.f64("camera_range_width", 250.0));
+    let standoff_ratio = p.f64("view_standoff_ratio", 0.0);
     let info_topic = p.string("camera_info_topic", "/oakd/rgb/preview/camera_info");
     let period = Duration::from_secs_f64(p.f64("period", 1.0));
     let costmap_topic = p.string("costmap_topic", "/global_costmap/costmap");
@@ -207,8 +208,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if i.width > 0 && i.width != last {
                 last = i.width;
                 let r = base_range * f64::from(i.width) / base_width;
-                st.borrow_mut().policy.set_camera_range(r);
-                log_info!(&lg, "camera {}x{}: coverage reads markers to {r:.2} m", i.width, i.height);
+                st.borrow_mut().policy.set_camera_range(r, standoff_ratio);
+                let so = st.borrow().policy.params().coverage.as_ref().map_or(0.0, |c| c.standoff);
+                log_info!(&lg, "camera {}x{}: coverage reads markers to {r:.2} m, views {so:.2} m from the wall", i.width, i.height);
             }
         }
     })?;

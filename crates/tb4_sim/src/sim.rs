@@ -97,6 +97,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
         retry_delay: 5.0,
         blacklist_duration: 45.0,
         blacklist_max_duration: 300.0,
+        abort_ban_radius: 2.0,
+        abort_ban_duration: 120.0,
         turn_weight: 0.5,
         costmap_timeout: 5.0,
         explore: ExploreParams {

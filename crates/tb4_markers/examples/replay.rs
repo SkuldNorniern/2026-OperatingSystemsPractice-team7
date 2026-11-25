@@ -92,6 +92,8 @@ fn main() {
             require_scale_all: true,
             max_spread: 0.08,
             max_consistency: 12.0,
+            pnp_only_spread: 0.35,
+            glass_max_resid: 0.2,
             scale_tolerance: 0.4,
             scale_min_samples: 2,
             min_view_move: 0.05,

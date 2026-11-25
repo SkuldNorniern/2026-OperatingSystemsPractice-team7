@@ -290,6 +290,10 @@ pub struct TrackParams {
     /// consistency limit for camera-only confirmations (no wall views): their scatter is a little higher
     /// than wall-backed views (live marker 5: 12.5-13.4). Decoy 103 sits at 16.
     pub pnp_only_max_consistency: f64,
+    /// m, glass case: the bearings of a wide spread of views cross at one point (median miss at most
+    /// this) but the lidar hits lie behind it (marker on glass, rays pass through). Confirmed at the
+    /// crossing; 0 = off. Live 2026-11-25: id 42, bearings crossed 1.1 m in front of the lidar hits
+    pub glass_max_resid: f64,
     /// for a confirmed marker: fuse only the views whose bearing passes within this distance (m) of the
     /// fused position (a real marker's rays all point at it; a view off the marker is left out). 0 = off.
     pub ray_agree_m: f64,
@@ -308,6 +312,7 @@ impl Default for TrackParams {
             max_triangulation_gap: 0.3,
             pnp_only_spread: 0.0,
             pnp_only_max_consistency: 14.0,
+            glass_max_resid: 0.0,
             ray_agree_m: 0.0,
             ray_resid_m: 0.0,
             strict_ids: Vec::new(),
@@ -547,6 +552,19 @@ impl Tracker {
         let wall = v.iter().filter(|e| e.source == Source::Raycast).count();
         let raw = if p.ray_resid_m > 0.0 { triangulate_robust(v, p.ray_resid_m) } else { triangulate(v) };
         let tri = raw.filter(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap);
+        // glass case: bearings agree on a point the lidar views do not (they hit what is behind)
+        let glass = raw.filter(|t| {
+            p.glass_max_resid > 0.0
+                && p.pnp_only_spread > 0.0
+                && !p.strict_ids.contains(&id)
+                && t.spread >= p.pnp_only_spread
+                && (t.x - f.x).hypot(t.y - f.y) > p.max_triangulation_gap
+                && v.len() >= p.min_views
+                && median(v.iter().map(|e| perp_dist(e, (t.x, t.y))).collect()) <= p.glass_max_resid
+        });
+        if let Some(t) = glass {
+            return Some(Target { id, x: t.x, y: t.y, views: v.len(), spread: p.glass_max_resid, confirmed: true });
+        }
         // lidar-backed: enough wall views, and every id that needs it has a consistent learned size
         let wall_ok = wall >= p.min_wall_views && wall as f64 >= p.min_wall_fraction * v.len() as f64
             && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
@@ -1143,6 +1161,31 @@ mod tests {
             t.add(1, &view_at((0.25 * k as f64, 0.6), m, 0.0, Source::Raycast));
         }
         assert!(t.target(1).unwrap().confirmed);
+    }
+
+    #[test]
+    fn a_marker_on_glass_is_confirmed_where_the_bearings_cross() {
+        // lidar hits 1.1 m behind the marker (rays through the glass), bearings from 70 deg apart cross at it
+        let m = (3.0, 1.0);
+        let p = TrackParams { pnp_only_spread: 0.35, glass_max_resid: 0.2, ..Default::default() };
+        let mut t = Tracker::new(p.clone());
+        for k in 0..12 {
+            let c = (0.0, -1.5 + 0.35 * k as f64);
+            t.add(9, &view_at(c, m, 1.1, Source::Raycast));
+        }
+        let tg = t.target(9).unwrap();
+        assert!(tg.confirmed, "{tg:?}");
+        assert!((tg.x - m.0).hypot(tg.y - m.1) < 0.1, "{tg:?}");
+        // off by default; and never for a strict (barcode) id
+        let mut off = Tracker::new(TrackParams { glass_max_resid: 0.0, ..p.clone() });
+        let mut strict = Tracker::new(TrackParams { strict_ids: vec![9], ..p });
+        for k in 0..12 {
+            let c = (0.0, -1.5 + 0.35 * k as f64);
+            off.add(9, &view_at(c, m, 1.1, Source::Raycast));
+            strict.add(9, &view_at(c, m, 1.1, Source::Raycast));
+        }
+        assert!(!off.target(9).unwrap().confirmed || (off.target(9).unwrap().x - m.0).abs() > 0.5);
+        assert!(!strict.target(9).unwrap().confirmed);
     }
 
     #[test]

@@ -6,6 +6,14 @@ from run_processes import ProcessInfo, RunProcesses, StopRequested
 
 
 class ShutdownTests(unittest.TestCase):
+    def test_mission_is_stopped_before_a_viewer_started_during_the_run(self):
+        runner = RunProcesses()
+        stack, mission, viewer = 5100, 5200, 5300
+        runner.jobs = {pid: Mock(returncode=0) for pid in (stack, mission, viewer)}
+        with patch.object(runner, 'stop', return_value=[]) as stop:
+            runner.close(mission_pid=mission)
+        self.assertEqual([call.args[0] for call in stop.call_args_list], [mission, viewer, stack, None])
+
     def test_stage_includes_reparented_job_children_and_ignores_unrelated_processes(self):
         runner = RunProcesses()
         leader = 5100

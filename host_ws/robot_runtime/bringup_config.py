@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 
 import yaml
 
+from visualization import MARKER_TOPIC
+
 
 def prepare_bringup(source, prefix, *, map_frame, map_topic, base_frame='base_link'):
     package = 'team7_bringup'
@@ -51,7 +53,7 @@ def prepare_bringup(source, prefix, *, map_frame, map_topic, base_frame='base_li
                 topic['Value'] = map_topic
             if topic.get('Value') == '/team7/targets':
                 display['Name'] = 'V1 ArUco Targets'
-                topic['Value'] = '/team7/v1/targets'
+                topic['Value'] = MARKER_TOPIC
                 topic['Durability Policy'] = 'Transient Local'
             if topic.get('Value') in ('/aruco_tracker/debug', '/team7/aruco/debug'):
                 display['Enabled'] = False

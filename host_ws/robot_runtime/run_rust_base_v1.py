@@ -13,6 +13,7 @@ import time
 
 from run_robot import ROOT, load_config, parser as mission_parser
 from run_processes import RunProcesses, StopRequested
+from visualization import VIEWER_PROFILE, find_native_viewer, prepare_viewer_profile
 
 DEMO = Path('host_ws/scripts/run_demo.sh')
 WORKSPACE = Path('host_ws/ros2_ws')
@@ -39,13 +40,12 @@ def has_rust_base_build(checkout):
             and all(installed_node(checkout, node) is not None for node in ('velocity_guard', 'explorer')))
 
 
-def prepare_rust_base(root, override, processes):
-    default = root.with_name(f'{root.name}-rust_base-{RUST_BASE_COMMIT[:7]}')
+def rust_base_candidates(root, default, override):
     if override is not None:
-        checkout = override.expanduser().resolve()
-        if not has_rust_base_source(checkout):
-            raise ValueError(f'{checkout} does not contain the rust_base demo.')
-    candidates = [checkout] if override is not None else []
+        override = override.expanduser().resolve()
+        if not has_rust_base_source(override):
+            raise ValueError(f'{override} does not contain the rust_base demo.')
+    candidates = [override] if override is not None else []
     candidates.extend((default, root.parent / 'rust_base'))
     worktrees = subprocess.check_output(['git', 'worktree', 'list', '--porcelain', '-z'], cwd=root, text=True)
     candidates.extend(Path(field.removeprefix('worktree '))
@@ -56,14 +56,17 @@ def prepare_rust_base(root, override, processes):
         if install.parts[-3:] == ('host_ws', 'ros2_ws', 'install'):
             candidates.append(install.parents[2])
     candidates.extend(path for path in root.parent.iterdir() if root.name in path.name or 'rust_base' in path.name)
+    return list(dict.fromkeys(candidates))
 
+
+def prepare_rust_base(root, default, candidates, processes):
     def matches_revision(path):
         if not has_rust_base_source(path):
             return False
         head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=path, text=True, capture_output=True)
         return head.returncode == 0 and head.stdout.strip() == RUST_BASE_COMMIT
 
-    checkout = next((path for path in dict.fromkeys(candidates) if matches_revision(path)), None)
+    checkout = next((path for path in candidates if matches_revision(path)), None)
     if checkout is None:
         if default.exists() or default.is_symlink():
             raise ValueError(f'{default} exists but does not contain rust_base {RUST_BASE_COMMIT[:7]}.')
@@ -118,12 +121,28 @@ def start_logged(processes, command, cwd, log_path, env):
     return process, thread
 
 
+def sourced_command(install, command):
+    return ['bash', '-ec', 'source "$1"; shift; exec "$@"', Path(command[0]).name, str(install), *command]
+
+
+def start_rviz_fallback(processes, install, share, folder, env):
+    command = sourced_command(install, ['ros2', 'run', 'rviz2', 'rviz2', '-d', str(share / 'rviz/stock.rviz')])
+    print('Opening RViz after team7_viz failed. See team7_viz.log.', flush=True)
+    rviz_env = dict(env, QT_QPA_PLATFORM='xcb') if env.get('WAYLAND_DISPLAY') else env
+    try:
+        _, log = start_logged(processes, command, ROOT, folder / 'rviz.log', rviz_env)
+        return log
+    except OSError as exc:
+        print(f'Could not start RViz: {exc}', file=sys.stderr, flush=True)
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, add_help=False)
     ap.add_argument('--rust-base', type=Path, help='Use this rust_base checkout (overrides TEAM7_RUST_BASE)')
     ap.add_argument('--no-prepare', action='store_true', help='Compatibility option. V1 always skips upstream robot preparation.')
     ap.add_argument('--no-record', action='store_true', help='Skip upstream rosbag recording')
-    ap.add_argument('--no-rviz', action='store_true', help='Run without RViz')
+    ap.add_argument('--no-rviz', action='store_true', help='Run without a map viewer')
     if '-h' in sys.argv[1:] or '--help' in sys.argv[1:]:
         ap.print_help()
         mission_parser().print_help()
@@ -151,6 +170,7 @@ def main():
 def run_demo(args, cfg, stack_args, mission_args, processes):
     checkout_env = os.environ.get('TEAM7_RUST_BASE')
     override = stack_args.rust_base or (Path(checkout_env) if checkout_env else None)
+    default = ROOT.with_name(f'{ROOT.name}-rust_base-{RUST_BASE_COMMIT[:7]}')
     lock_dir = Path(os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir())
     try:
         with (lock_dir / f'team7_v1_build_{os.getuid()}.lock').open('a') as lock:
@@ -161,7 +181,8 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
                     break
                 except BlockingIOError:
                     time.sleep(.1)
-            checkout = prepare_rust_base(ROOT, override, processes)
+            candidates = rust_base_candidates(ROOT, default, override)
+            checkout = prepare_rust_base(ROOT, default, candidates, processes)
             if args.execute and not (ROOT / 'target/release/libtb4_aruco_gazebo.so').is_file():
                 processes.run(['bash', str(ROOT / 'host_ws/scripts/build_robot.sh')], cwd=ROOT)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
@@ -177,16 +198,27 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
 
     folder = args.output_dir.expanduser().resolve() / time.strftime('%Y%m%d-%H%M%S-rust-base-v1')
     folder.mkdir(parents=True)
+    show_map = args.execute and not stack_args.no_rviz
+    viewer = None
+    if show_map and (args.map_frame, args.base_frame) == ('map', 'base_link'):
+        viewer = find_native_viewer(path / WORKSPACE / 'install' for path in [checkout, *candidates])
+        if viewer is not None:
+            try:
+                prepare_viewer_profile(folder / 'viewer_config', map_topic=args.map_topic,
+                                       scan_topic=args.scan_topic, image_topic=args.image_topic)
+            except OSError as exc:
+                print(f'Could not configure team7_viz: {exc}. Using RViz.', file=sys.stderr, flush=True)
+                viewer = None
     # Dock actions can move the base independently of the forward-only velocity guard.
     command = ['bash', str(demo), '--no-prepare']
     stack_output = folder / 'rust_base'
-    # V1 builds the ROS stack without rust_base's optional team7_viz package.
+    # Start the optional native viewer separately so its absence cannot abort the ROS launch.
     command += ['explorer:=none', 'mission:=false', 'viewer:=false',
                 'nav:=nav2', 'slam_backend:=toolbox', 'aruco:=opencv',
                 f'marker_dict:={cfg["dictionary"].removeprefix("DICT_")}',
                 f'output_dir:={stack_output}',
                 f'record:={str(args.execute and not stack_args.no_record).lower()}',
-                f'rviz:={str(args.execute and not stack_args.no_rviz).lower()}']
+                f'rviz:={str(show_map and viewer is None).lower()}']
     command.append(f'camera_topic:={args.image_topic.removesuffix("/compressed")}')
     if args.marker_size is not None:
         command.append(f'marker_size:={args.marker_size}')
@@ -213,7 +245,7 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
         v1 += ['--interior-explorer', str(installed_node(checkout, 'explorer')),
                '--interior-params', str(share / 'config/team7.yaml'),
                '--interior-xy-tree', str(share / 'config/navigate_forward_xy.xml')]
-        v1 = ['bash', '-ec', 'source "$1"; shift; exec "$@"', 'team7-mission', str(install), *v1]
+        v1 = sourced_command(install, v1)
     # Source the original install before prepending the generated package share.
     # Check precedence after a second source, as run_demo.sh sources it again.
     bootstrap = """
@@ -228,10 +260,12 @@ shift 3
 exec "$@"
 """
     command = ['bash', '-ec', bootstrap, 'team7-bringup', str(install), str(overlay), str(share), *command]
-    stack = mission = None
+    stack = mission = viewer_process = None
     log_threads = []
     try:
         print(f'Run outputs: {folder}', flush=True)
+        if show_map and viewer is None:
+            print('Opening RViz with the V1 map configuration.', flush=True)
         stack, stack_log = start_logged(processes, command, checkout, folder / 'stack.log', env)
         log_threads.append(stack_log)
         # run_demo.sh opens console.log in the launch pipeline after preparation.
@@ -245,6 +279,20 @@ exec "$@"
                 print('Timed out waiting for rust_base to start its ROS launch', file=sys.stderr)
                 return 1
             time.sleep(.2)
+        if viewer is not None:
+            print(f'Opening team7_viz from {viewer}', flush=True)
+            viewer_env = dict(env, XDG_CONFIG_HOME=str(folder / 'viewer_config'))
+            viewer_command = sourced_command(install, [str(viewer), '--profile', VIEWER_PROFILE,
+                                                       '--output-dir', str(folder / 'mission')])
+            try:
+                viewer_process, viewer_log = start_logged(processes, viewer_command, checkout,
+                                                          folder / 'team7_viz.log', viewer_env)
+                log_threads.append(viewer_log)
+            except OSError as exc:
+                print(f'Could not start team7_viz: {exc}', file=sys.stderr, flush=True)
+                fallback_log = start_rviz_fallback(processes, install, share, folder, env)
+                if fallback_log is not None:
+                    log_threads.append(fallback_log)
         mission, mission_log = start_logged(processes, v1, ROOT, folder / 'mission.log', env)
         log_threads.append(mission_log)
         while mission.poll() is None:
@@ -252,10 +300,16 @@ exec "$@"
             if stack.poll() is not None:
                 print(f'rust_base demo stopped with status {stack.returncode}', file=sys.stderr)
                 return 1
+            if viewer_process is not None and viewer_process.poll() is not None:
+                if viewer_process.returncode != 0:
+                    fallback_log = start_rviz_fallback(processes, install, share, folder, env)
+                    if fallback_log is not None:
+                        log_threads.append(fallback_log)
+                viewer_process = None
             time.sleep(.2)
         return mission.returncode
     finally:
-        processes.close()
+        processes.close(mission_pid=mission.pid if mission is not None else None)
         for thread in log_threads:
             thread.join(timeout=2)
         if mission is not None:

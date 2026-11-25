@@ -6,8 +6,8 @@ from control import CommandGate,transform_matrix
 from depth_input import DepthFrames, select_depth_topic
 from interior_nav import EXPLORER_ACTION, InteriorNav
 from nav2_motion import Nav2GoalError, Nav2Motion
+from visualization import MARKER_TOPIC
 
-MARKER_TOPIC = '/team7/v1/targets'
 MARKER_SLOW_PERCENT = 80.0
 MARKER_SLOW_HOLD = 2.5
 
@@ -95,13 +95,14 @@ class ROSAdapter:
         result = [clear]
         for key, target in markers.items():
             confirmed = target['observations'] >= 2
+            namespace = 'target_confirmed' if confirmed else 'target_tentative'
             color = (0.25, 0.65, 1.0) if key in visited else (
                 (0.15, 0.95, 0.30) if confirmed else (1.0, 0.70, 0.15))
             for label in (False, True):
                 marker = self.Marker()
                 marker.header.frame_id = self.args.map_frame
                 marker.header.stamp = stamp
-                marker.ns = 'v1_labels' if label else 'v1_markers'
+                marker.ns = namespace + '_label' if label else namespace
                 marker.id = target['id']
                 marker.action = self.Marker.ADD
                 marker.type = self.Marker.TEXT_VIEW_FACING if label else self.Marker.SPHERE
@@ -113,7 +114,9 @@ class ROSAdapter:
                 marker.color.r, marker.color.g, marker.color.b = color
                 marker.color.a = 1.0
                 if label:
-                    marker.text = f"ArUco {target['id']}" + ('' if confirmed else ' ?')
+                    marker.text = f"ID {target['id']}"
+                    if not confirmed:
+                        marker.text += f"? {target['observations']}v"
                 result.append(marker)
         self.marker_pub.publish(self.MarkerArray(markers=result))
 

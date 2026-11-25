@@ -144,13 +144,16 @@ class RunProcesses:
                 time.sleep(.1)
         return self.members(session)
 
-    def close(self):
+    def close(self, *, mission_pid=None):
         if self.closed:
             return
         self.closed = True
-        # The mission was launched last. Give it time to cancel Nav2 before stopping the stack.
+        # Give the mission time to cancel Nav2 before stopping the stack or viewers.
+        if mission_pid is not None:
+            self.stop(mission_pid)
         for session in reversed(self.jobs):
-            self.stop(session)
+            if session != mission_pid:
+                self.stop(session)
         self.remaining = self.stop(None)
         if self.remaining:
             pids = ', '.join(str(process.pid) for process in self.remaining)

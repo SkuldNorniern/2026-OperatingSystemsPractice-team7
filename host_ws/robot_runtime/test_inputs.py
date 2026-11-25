@@ -65,6 +65,26 @@ class InputTests(unittest.TestCase):
         self.assertEqual([(m.percentage, m.speed_limit) for m in messages],
                          [(True, 80.0), (True, 80.0), (True, 0.0)])
 
+    def test_marker_array_matches_the_native_viewer_and_keeps_visited_color(self):
+        class Marker(NS):
+            DELETEALL, ADD, TEXT_VIEW_FACING, SPHERE = 3, 0, 9, 2
+
+            def __init__(self):
+                super().__init__(header=NS(), pose=NS(position=NS(), orientation=NS()), scale=NS(), color=NS())
+
+        adapter = self.adapter()
+        adapter.Marker, adapter.MarkerArray = Marker, NS
+        adapter.node = Mock()
+        adapter.marker_pub = Mock()
+        targets = {'8': dict(id=8, x=1, y=2, observations=1),
+                   '19': dict(id=19, x=3, y=4, observations=2)}
+        adapter.publish_markers(targets, {'19'})
+        clear, candidate, label, confirmed, _ = adapter.marker_pub.publish.call_args.args[0].markers
+        self.assertEqual(clear.action, clear.DELETEALL)
+        self.assertEqual((candidate.ns, label.ns, label.text), ('target_tentative', 'target_tentative_label', 'ID 8? 1v'))
+        self.assertEqual((confirmed.ns, confirmed.id), ('target_confirmed', 19))
+        self.assertEqual((confirmed.color.r, confirmed.color.g, confirmed.color.b), (0.25, 0.65, 1.0))
+
     def test_navigation_uses_known_space_until_the_map_reaches_the_corner(self):
         adapter = self.adapter()
         adapter.ready = lambda: True

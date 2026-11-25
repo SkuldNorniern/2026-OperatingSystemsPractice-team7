@@ -100,6 +100,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
         abort_ban_radius: 2.0,
         abort_ban_duration: 120.0,
         abort_ban_max_radius: 6.0,
+        ban_region_cost: 95,
+        ban_region_max_cells: 40_000,
         turn_weight: 0.5,
         costmap_timeout: 5.0,
         explore: ExploreParams {

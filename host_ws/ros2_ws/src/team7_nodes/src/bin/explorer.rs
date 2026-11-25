@@ -59,6 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         abort_ban_radius: p.f64("abort_ban_radius", 2.0),
         abort_ban_duration: p.f64("abort_ban_duration", 120.0),
         abort_ban_max_radius: p.f64("abort_ban_max_radius", 6.0),
+        ban_region_cost: p.i64("ban_region_cost", 0) as i8,
+        ban_region_max_cells: p.i64("ban_region_max_cells", 40_000) as usize,
         turn_weight: p.f64("turn_weight", 0.5),
         costmap_timeout: 5.0,
         explore: ExploreParams {
@@ -227,7 +229,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let now = clock.get_now().map(|t| r2r::Clock::to_builtin_time(&t)).unwrap_or_default();
                     let fog = Grid::new(m.meta, s.policy.coverage().fog(m, 65));
                     let _ = fog_pub.publish(&team7_nodes::grid_msg(&fog, &mf, &now));
-                    let _ = ban_pub.publish(&team7_nodes::grid_msg(&banned_grid(m, &s.policy.banned()), &mf, &now));
+                    let mut bg = banned_grid(m, &s.policy.banned());
+                    for (x, y) in s.policy.banned_cells() {
+                        if let Some(c) = bg.world_to_cell(x, y) {
+                            bg.set(c, 100);
+                        }
+                    }
+                    let _ = ban_pub.publish(&team7_nodes::grid_msg(&bg, &mf, &now));
                 }
             }
             if st.borrow().policy.params().coverage.is_none() {

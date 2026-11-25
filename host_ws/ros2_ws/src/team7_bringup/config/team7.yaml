@@ -71,6 +71,10 @@ explorer:
     abort_ban_duration: 600.0  # s, the whole run: glass does not move, and after 120 s the robot went back to it
     abort_ban_max_radius: 3.0  # m, aborts close together grow the zone (1, 2, 3 m); frontiers only, never camera views: live 2026-11-25 nine aborts outside the
                                # glass, each next frontier just past the last 2 m disc
+    ban_region_cost: 95        # an aborted goal bans the region it reaches through costmap cells < 95 (~0.26 m clear),
+                               # if that region does not reach the robot: fog over the area behind glass / gaps.
+                               # An abort in reachable space bans only its spot (no circles in the room)
+    ban_region_max_cells: 40000
     turn_weight: 0.5
     goal_standoff: 0.3
     free_threshold: 50

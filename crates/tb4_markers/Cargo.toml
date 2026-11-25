@@ -8,3 +8,6 @@ license.workspace = true
 
 [dependencies]
 tb4_core = { path = "../tb4_core" }
+
+[dev-dependencies]
+tb4_aruco = { path = "../tb4_aruco" }

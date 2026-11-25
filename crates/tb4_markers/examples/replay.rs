@@ -88,7 +88,7 @@ fn main() {
             min_wall_fraction: 0.25,
             min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
-            strict_ids: vec![0, 341, 682, 1023],
+            strict_ids: tb4_aruco::Dictionary::by_name("ARUCO_ORIGINAL").map(|d| d.barcode_ids(1)).unwrap_or_default(),
             require_scale_all: true,
             max_spread: 0.08,
             max_consistency: 12.0,

@@ -22,6 +22,8 @@
 #   overlay:=PATH loads an experiment parameter file after team7.yaml on every team7 node (values win),
 #   e.g. overlay:=host_ws/ros2_ws/src/team7_bringup/config/experiments/sched_gain_idle.yaml
 #   Defaults stay in team7.yaml; an experiment is tested with the overlay, then committed as a default if it wins.
+# ROS domain: live and --stock use the robot's, TB4_DOMAIN (default 0, the TB4 factory setting), whatever the
+#   shell's ROS_DOMAIN_ID is. A replay always uses TEAM7_REPLAY_DOMAIN (default 79), away from the robot.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +57,18 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# the domain is set here, not inherited: a shell left on another domain made the robot invisible
+if [ -n "$BAG" ]; then
+  RUN_DOMAIN="${TEAM7_REPLAY_DOMAIN:-79}"
+else
+  RUN_DOMAIN="${TB4_DOMAIN:-0}"
+fi
+if [ -n "${ROS_DOMAIN_ID:-}" ] && [ "$ROS_DOMAIN_ID" != "$RUN_DOMAIN" ]; then
+  echo "[*] ROS_DOMAIN_ID $ROS_DOMAIN_ID from the shell replaced by $RUN_DOMAIN (TB4_DOMAIN / TEAM7_REPLAY_DOMAIN to change)" >&2
+fi
+export ROS_DOMAIN_ID="$RUN_DOMAIN"
+echo "[*] ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
 
 if [ "$STOCK" = true ]; then
   # build the pinned commit from git into a cache, so the working tree stays untouched
@@ -216,7 +230,6 @@ prepare_live() {
 
 # ---------------------------------------------------------------- replay
 replay_relays() {
-  export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-79}"
   RECORD=false
   [ "$RECORD_SET" = true ] && echo '[*] replay: recording option ignored, a replay never records' >&2
   # record:=false last, so it wins over anything passed through

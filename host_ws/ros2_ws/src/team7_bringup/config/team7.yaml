@@ -87,13 +87,13 @@ explorer:
     min_goal_distance: 0.65
     camera_coverage: true     # after frontiers, drive to look at walls the camera has not seen
     coverage_map_topic: /map
-    camera_half_fov: 0.52     # rad, OAK-D preview is ~60 deg wide
-    camera_range: 1.0         # m a marker is still read at camera_range_width px; scaled with the real preview width from
-                              # camera_info (500 px -> 2.0 m). Live 2026-11-25: small markers read only at 0.5-0.8 m at 250 px
+    camera_half_fov: 0.47     # rad, 27 deg: 90 % of real detections (ids 7, 42, 5, 103) were within 20-27 deg of the axis
+    camera_range: 0.8         # m a marker is still read at camera_range_width px, scaled with the real preview width
+                              # (500 px -> 1.6 m). Replays 2026-11-25: big marker 7 read to 2-4 m, small 84 / 682 only at 0.5-0.8 m
     camera_range_width: 250.0
                               # (8 px detector floor at 2.5 m); seen at an angle counts as range / cos(incidence)
     camera_max_incidence: 1.3 # rad, wall seen further off its normal than this does not count as seen
-    view_standoff: 0.75       # m from the wall when looking at it; must be inside camera_range
+    view_standoff: 0.6        # m from the wall when looking at it; must be inside camera_range
     view_max_cells: 32        # wall piece per view (cells)
     view_detour: 1.0          # m, take a camera view of an unseen wall this close during the frontier phase, 0 = off
     preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one once its frontier starts to go

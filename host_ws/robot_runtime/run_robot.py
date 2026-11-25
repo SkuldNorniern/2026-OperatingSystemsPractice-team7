@@ -33,7 +33,7 @@ def parser():
     ap.add_argument('--output-dir',type=Path,default=Path.home()/'team7_robot_runs')
     return ap
 
-def load_config(ap, args):
+def load_config(ap, args, *, require_room_size=True):
     cfg=json.loads(args.config.read_text())
     if args.marker_size is not None:cfg['default_marker_size']=args.marker_size
     if args.marker_ids is not None:
@@ -48,7 +48,7 @@ def load_config(ap, args):
         if getattr(args,name) is not None:cfg[name]=getattr(args,name)
     if args.execute:
         if not cfg.get('default_marker_size') and not cfg.get('marker_sizes'):ap.error('Set actual --marker-size or per-ID marker_sizes before execution')
-        if not all(cfg.get(k,0)>0 for k in ['room_width','room_height']):ap.error('V1 requires actual --room-width and --room-height, measured between inner walls')
+        if require_room_size and not all(cfg.get(k,0)>0 for k in ['room_width','room_height']):ap.error('V1 requires actual --room-width and --room-height, measured between inner walls')
     if any(not(0<float(s)<2) for s in [*cfg.get('marker_sizes',{}).values(),*([cfg['default_marker_size']] if cfg.get('default_marker_size') else [])]):ap.error('Invalid physical marker size')
     return cfg
 
@@ -68,7 +68,7 @@ def wait_for_inputs(adapter, args, mission=None):
     return False
 
 def main():
-    ap=parser();args=ap.parse_args();cfg=load_config(ap,args)
+    ap=parser();args=ap.parse_args();cfg=load_config(ap,args,require_room_size=not args.interior_explorer)
     try:
         import rclpy
         from rclpy.signals import SignalHandlerOptions

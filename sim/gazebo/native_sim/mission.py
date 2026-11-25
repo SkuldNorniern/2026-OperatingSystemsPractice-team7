@@ -4,6 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from rust_detector import RustDetector
+from wall_survey import WallSurvey
 
 ROOT=Path(__file__).resolve().parent
 TAU=2*math.pi
@@ -131,6 +132,9 @@ class Mission:
         self.transport=transport
         self.nav2=getattr(args,'nav2',False)
         self.interior_exploration = bool(getattr(args, 'interior_explorer', None))
+        self.wall_survey = WallSurvey(self.cfg['wall_standoff']) if self.interior_exploration else None
+        self.wall_step = None
+        self.next_wall_plan = 0.0
         self.state='WAIT_SENSORS';self.bounds=None;self.route=[];self.goal=None;self.path=[]
         self.last_pose=None;self.distance=0.;self.spin_total=0.;self.last_yaw=None;self.after_spin='PATROL'
         self.last_plan=-100;self.last_map=-100;self.last_save=-100;self.last_image=-100;self.status='running'
@@ -241,22 +245,13 @@ class Mission:
         pts=np.array(pts);walls=[]
         for axis,size in [(0,self.cfg['room_width']),(1,self.cfg['room_height'])]:
             bins=np.round(pts[:,axis]/.1).astype(int);values,counts=np.unique(bins,return_counts=True)
-            order=np.argsort(counts)[::-1];candidates=[]
+            order=np.argsort(counts)[::-1];usable=[]
             for j in order[:15]:
                 if counts[j]<5:continue
                 val=values[j]*.1
-                if abs(val-p[axis]) <= .20:continue
-                span = np.ptp(pts[bins == values[j], 1-axis])
-                if span < .75:continue
-                candidates.append((int(counts[j]), float(span), float(val)))
-            if self.interior_exploration:
-                left = max((c for c in candidates if c[2] < p[axis]), key=lambda c: (c[1], c[0]), default=None)
-                right = max((c for c in candidates if c[2] > p[axis]), key=lambda c: (c[1], c[0]), default=None)
-                if left and right and right[2] - left[2] > 2 * self.cfg['wall_standoff'] + .4:
-                    walls.extend([left[2], right[2]])
-                    continue
-            usable = [(count, val if val < p[axis] else val - size)
-                      for count, _, val in candidates if abs(val - p[axis]) < size]
+                if not .20 < abs(val-p[axis]) < size:continue
+                if np.ptp(pts[bins == values[j], 1-axis]) < .75:continue
+                usable.append((counts[j], val if val < p[axis] else val - size))
             if not usable:return False
             _, lo = max(usable)
             walls.extend([lo, lo + size])
@@ -298,6 +293,46 @@ class Mission:
             self.goal = self.route.pop(0)
             self.begin_spin('PATROL')
 
+    def follow_wall(self, scan, pose, now):
+        survey = self.wall_survey
+        already_there = False
+        if self.goal is None:
+            if now < self.next_wall_plan:
+                return
+            self.next_wall_plan = now + .5
+            step = survey.step(scan, pose)
+            if step is not None:
+                goal = (step.target if math.dist(pose[:2], step.target) <= .25
+                        else self.grid.reachable_goal(pose[:2], step.target))
+                if goal is not None:
+                    self.goal = goal
+                    self.wall_step = step if goal == step.target else None
+                    already_there = math.dist(pose[:2], goal) <= .25
+                    self.event('wall_navigation_goal', goal=goal)
+            if self.goal is None:
+                if now - self.wait_print > 5:
+                    self.event('waiting_for_wall_path', wall_step_found=step is not None)
+                    self.wait_print = now
+                return
+
+        if not already_there and not self.transport.navigate(self.goal, pose):
+            return
+        self.command()
+        if self.wall_step is not None:
+            step = self.wall_step
+            first = survey.home is None
+            survey.reached(step)
+            if first:
+                self.event('wall_follow_started', start=survey.home)
+            if step.corner is not None:
+                self.event('wall_corner_reached', corner=step.corner, count=len(survey.corners))
+        self.goal = self.wall_step = None
+        self.next_wall_plan = 0.0
+        if survey.complete:
+            self.bounds = survey.bounds()
+            self.event('room_mapped_from_perimeter', bounds=self.bounds)
+            self.finish_perimeter()
+
     def next_marker(self):
         candidates = [self.markers[key] for key in self.visit_ids if key not in self.visited]
         if not candidates:
@@ -333,6 +368,8 @@ class Mission:
         if t-self.last_save>5:self.save();self.last_save=t
         if self.begin_marker_visits():
             return
+        if self.state == 'WAIT_SENSORS' and self.wall_survey is not None:
+            self.state = 'WALL_SURVEY'
         if self.state=='WAIT_SENSORS':
             if not self.initialize(scan,p):
                 self.command()
@@ -345,6 +382,9 @@ class Mission:
             self.total_distance+=delta;self.total_rotation+=abs(wrap(p[2]-self.last_pose[2]))
             if self.state in ('APPROACH_WALL','PATROL'):self.distance+=delta
         self.last_pose=p
+        if self.state == 'WALL_SURVEY':
+            self.follow_wall(scan, p, now)
+            return
         if self.state == 'EXPLORE_INTERIOR':
             self.transport.start_exploration()
             return

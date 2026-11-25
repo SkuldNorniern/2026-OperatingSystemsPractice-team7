@@ -138,7 +138,7 @@ def main():
     mission_args = ['--timeout', '75', *mission_args]
     robot_parser = mission_parser()
     args = robot_parser.parse_args(mission_args)
-    cfg = load_config(robot_parser, args)
+    cfg = load_config(robot_parser, args, require_room_size=False)
     checkout_env = os.environ.get('TEAM7_RUST_BASE')
     override = stack_args.rust_base or (Path(checkout_env) if checkout_env else None)
     lock_dir = Path(os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir())

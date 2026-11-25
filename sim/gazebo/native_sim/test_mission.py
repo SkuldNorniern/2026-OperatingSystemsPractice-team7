@@ -3,22 +3,24 @@ from types import SimpleNamespace
 import cv2,numpy as np
 from mission import Grid,Mission,overlaps_qr,wrap
 from rust_detector import RustDetector
+from wall_survey import WallSurvey, visible_walls
 from gz.msgs10.laserscan_pb2 import LaserScan
 
 class MissionTests(unittest.TestCase):
     def stub(self):
         m=Mission.__new__(Mission);m.cfg={'room_width':19.85,'room_height':11.05,'wall_standoff':.8,'scan_every_m':5.,'marker_sizes':{'8':.25,'19':.2,'29':.28},'marker_standoff':.8}
         m.interior_exploration=False
+        m.wall_survey=None
         m.pose=(-5.,0.,0.);m.markers={};m.visited=set();m.visit_ids=None;m.expected_targets=3;m.command=lambda *a:None;m.events=[];m.event=lambda e,**kw:m.events.append((e,kw));m.grid=Grid();m.path=[]
         return m
-    def rectangle_scan(self, pose):
-        scan = LaserScan(range_min=.1, range_max=12, angle_min=-math.pi, angle_step=2*math.pi/360)
+    def rectangle_scan(self, pose, *, half_width=10, half_height=5.5, reach=12):
+        scan = LaserScan(range_min=.1, range_max=reach, angle_min=-math.pi, angle_step=2*math.pi/360)
         x, y, yaw = pose
         for index in range(360):
             angle = yaw + scan.angle_min + index * scan.angle_step
             dx, dy = math.cos(angle), math.sin(angle)
-            wall_x = 10 if dx > 0 else -10
-            wall_y = 5.5 if dy > 0 else -5.5
+            wall_x = half_width if dx > 0 else -half_width
+            wall_y = half_height if dy > 0 else -half_height
             scan.ranges.append(min(scan.range_max, (wall_x-x)/dx if dx else math.inf,
                                    (wall_y-y)/dy if dy else math.inf))
         return scan
@@ -32,13 +34,10 @@ class MissionTests(unittest.TestCase):
         self.assertTrue(mission.initialize(self.rectangle_scan(mission.pose), mission.pose))
         self.assertAlmostEqual(mission.bounds[0], -10.0)
         self.assertAlmostEqual(mission.goal[0], -9.2)
-    def test_hybrid_uses_both_visible_wall_positions(self):
-        mission = self.stub()
-        mission.pose = (0.0, 0.0, 0.0)
-        mission.interior_exploration = True
-        mission.cfg.update(room_width=30., room_height=30.)
-        self.assertTrue(mission.initialize(self.rectangle_scan(mission.pose), mission.pose))
-        np.testing.assert_allclose(mission.bounds, [-10., 10., -5.5, 5.5], atol=.11)
+    def test_wall_survey_requires_a_visible_wall(self):
+        survey = WallSurvey(.8)
+        pose = (0., 0., 0.)
+        self.assertIsNone(survey.step(self.rectangle_scan(pose, reach=4), pose))
     def test_scan_trigger_and_full_turn_across_yaw_wrap(self):
         m=self.stub();m.distance=5.01;m.begin_spin('PATROL')
         self.assertEqual(m.state,'SCAN_360');self.assertEqual(m.distance,0)
@@ -84,29 +83,49 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(mission.state, 'VISIT_MARKER')
         self.assertEqual(mission.target['id'], 19)
 
-    def test_hybrid_completes_one_lap_before_starting_rust_explorer(self):
+    def test_hybrid_starts_from_one_wall_and_maps_a_full_lap_before_rust_explorer(self):
         mission = self.stub()
         mission.interior_exploration = mission.nav2 = mission.external_map = True
         mission.state = 'WAIT_SENSORS'
+        mission.pose = (0., -7., 0.)
+        mission.goal = mission.wall_step = None
+        mission.next_wall_plan = 0.0
+        mission.wall_survey = WallSurvey(.8)
         mission.lock = threading.Lock()
         mission.image = mission.first_sim_time = mission.last_pose = None
-        mission.scan = self.rectangle_scan(mission.pose)
         mission.odom_seen = mission.scan_seen = time.monotonic()
         mission.odom_t = mission.last_save = mission.distance = mission.total_distance = mission.total_rotation = 0.0
         visited = []
         starts = []
 
+        def scan():
+            return self.rectangle_scan(mission.pose, half_width=12, half_height=9, reach=5)
+
         def navigate(goal, _pose):
             visited.append(goal)
-            mission.pose = (*goal, 0.0)
+            x, y, _ = mission.pose
+            mission.pose = (*goal, math.atan2(goal[1] - y, goal[0] - x))
             return True
 
         mission.transport = SimpleNamespace(navigate=navigate, start_exploration=lambda: starts.append(True))
-        for _ in range(6):
+        mission.scan = scan()
+        self.assertEqual(len(visible_walls(mission.scan, mission.pose)), 1)
+        mission.wait_print = time.monotonic() - 10
+        mission.tick()
+        self.assertFalse(visited)
+        self.assertEqual(mission.events[-1][0], 'waiting_for_wall_path')
+
+        mission.grid.reachable_goal = lambda _start, goal: goal
+        mission.next_wall_plan = 0.0
+        for _ in range(100):
+            mission.scan = scan()
             mission.tick()
             self.assertFalse(starts)
-        self.assertEqual(visited[0], visited[-1])
-        self.assertEqual(len(set(visited[1:-1])), 4)
+            if mission.state == 'EXPLORE_INTERIOR':
+                break
+        self.assertEqual(len(mission.wall_survey.corners), 4)
+        self.assertLess(math.dist(visited[0], visited[-1]), .25)
+        np.testing.assert_allclose(mission.bounds, [-12, 12, -9, 9], atol=.11)
         mission.tick()
         self.assertEqual(starts, [True])
     def test_qr_is_not_an_aruco_and_only_overlapping_candidates_are_removed(self):

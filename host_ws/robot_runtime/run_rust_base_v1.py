@@ -23,12 +23,18 @@ def has_rust_base_source(checkout):
     return (checkout / DEMO).is_file() and launch.is_file()
 
 
-def has_rust_base_build(checkout):
+def installed_node(checkout, name):
     install = checkout / WORKSPACE / 'install'
-    guard = Path('lib/team7_nodes/velocity_guard')
-    return (install / 'setup.bash').is_file() and any(
-        (prefix / guard).is_file() for prefix in (install / 'team7_nodes', install)
-    )
+    for prefix in (install / 'team7_nodes', install):
+        executable = prefix / 'lib/team7_nodes' / name
+        if executable.is_file():
+            return executable
+    return None
+
+
+def has_rust_base_build(checkout):
+    return ((checkout / WORKSPACE / 'install/setup.bash').is_file()
+            and all(installed_node(checkout, node) is not None for node in ('velocity_guard', 'explorer')))
 
 
 def prepare_rust_base(root, override):
@@ -71,7 +77,7 @@ def prepare_rust_base(root, override):
     subprocess.run(['colcon', 'build', '--symlink-install', '--packages-select', 'team7_nodes', 'team7_bringup'],
                    cwd=checkout / WORKSPACE, check=True)
     if not has_rust_base_build(checkout):
-        raise ValueError(f'Build at {checkout / WORKSPACE} did not produce a ROS setup and velocity_guard.')
+        raise ValueError(f'Build at {checkout / WORKSPACE} did not produce the ROS setup, velocity_guard and explorer.')
     return checkout
 
 
@@ -179,6 +185,10 @@ def main():
         checkout / 'host_ws/ros2_ws/src/team7_bringup', overlay,
         map_frame=args.map_frame, map_topic=args.map_topic,
     )
+    if args.execute:
+        v1 += ['--interior-explorer', str(installed_node(checkout, 'explorer')),
+               '--interior-params', str(share / 'config/team7.yaml')]
+        v1 = ['bash', '-ec', 'source "$1"; shift; exec "$@"', 'team7-mission', str(install), *v1]
     # Source the original install before prepending the generated package share.
     # Check precedence after a second source, as run_demo.sh sources it again.
     bootstrap = """

@@ -17,10 +17,16 @@ def parser():
     ap.add_argument('--scan-topic',default='/scan');ap.add_argument('--odom-topic',default='/odom');ap.add_argument('--map-topic',default='/map')
     ap.add_argument('--image-topic',default='/oakd/rgb/preview/image_raw/compressed')
     ap.add_argument('--camera-info-topic',default='/oakd/rgb/preview/camera_info')
+    ap.add_argument('--depth-topic', default=os.environ.get('TEAM7_DEPTH_TOPIC', 'auto'),
+                    help='RGB-aligned depth Image topic, auto (default), or off')
+    ap.add_argument('--depth-camera-info-topic', default=os.environ.get('TEAM7_DEPTH_CAMERA_INFO_TOPIC'),
+                    help='Override the camera_info topic paired with the depth image')
     ap.add_argument('--optical-frame',default='')
     ap.add_argument('--map-frame',default='map');ap.add_argument('--base-frame',default='base_link')
     ap.add_argument('--nav2',action='store_true',help='Use the existing Nav2 actions for navigation and rotation')
     ap.add_argument('--marker-slowdown', action='store_true', help=argparse.SUPPRESS)
+    ap.add_argument('--interior-explorer', type=Path, help=argparse.SUPPRESS)
+    ap.add_argument('--interior-params', type=Path, help=argparse.SUPPRESS)
     ap.add_argument('--cmd-topic',default='/cmd_vel')
     ap.add_argument('--cmd-type',choices=['stamped','unstamped'],default='stamped' if os.environ.get('ROS_DISTRO','jazzy')=='jazzy' else 'unstamped')
     ap.add_argument('--timeout',type=float,default=30);ap.add_argument('--time-limit',type=float,default=600)

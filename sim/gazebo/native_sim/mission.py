@@ -130,6 +130,7 @@ class Mission:
             transport=GazeboTransport()
         self.transport=transport
         self.nav2=getattr(args,'nav2',False)
+        self.interior_exploration = bool(getattr(args, 'interior_explorer', None))
         self.state='WAIT_SENSORS';self.bounds=None;self.route=[];self.goal=None;self.path=[]
         self.last_pose=None;self.distance=0.;self.spin_total=0.;self.last_yaw=None;self.after_spin='PATROL'
         self.last_plan=-100;self.last_map=-100;self.last_save=-100;self.last_image=-100;self.status='running'
@@ -174,6 +175,7 @@ class Mission:
         frame_ids = set()
         f=m.width/(2*math.tan(1.2/2));K=getattr(m,'intrinsics',np.array([[f,0,m.width/2],[0,f,m.height/2],[0,0,1]],np.float64))
         D=getattr(m,'distortion',None)
+        depth = getattr(m, 'depth', None)
         for mid,c in zip(ids.flatten(),corners):
             if (self.allowed_ids and str(mid) not in self.allowed_ids) or mid in frame_ids or overlaps_qr(c, qr_polygons):
                 continue
@@ -186,6 +188,9 @@ class Mission:
             if not ok or tv[2,0]<=0:continue
             projected,_=cv2.projectPoints(obj,rv,tv,K,D)
             if np.mean(np.linalg.norm(projected.reshape(4,2)-c.reshape(4,2),axis=1))>1.5:continue
+            refined = depth.refine_translation(tv) if depth is not None else None
+            if refined is not None:
+                tv = refined
             R,_=cv2.Rodrigues(rv);n=R[:,2]
             if np.dot(n,-tv[:,0])<0:n=-n
             if hasattr(m,'camera_to_map'):
@@ -206,6 +211,13 @@ class Mission:
                 count=old['observations']+1;weight=1/min(count,20)
                 mx=old['x']*(1-weight)+mx*weight;my=old['y']*(1-weight)+my*weight
             self.markers[str(mid)]={'id':int(mid),'x':mx,'y':my,'normal_x':float(nx),'normal_y':float(ny),'size_m':size,'observations':count}
+            depth_count = old.get('depth_observations', 0) if old else 0
+            if refined is not None:
+                if depth_count == 0:
+                    self.event('marker_depth_used', id=int(mid), fused_z_m=float(tv[2, 0]))
+                depth_count += 1
+            if depth_count:
+                self.markers[str(mid)]['depth_observations'] = depth_count
             frame_ids.add(mid)
             updated = True
             if not old:
@@ -229,16 +241,25 @@ class Mission:
         pts=np.array(pts);walls=[]
         for axis,size in [(0,self.cfg['room_width']),(1,self.cfg['room_height'])]:
             bins=np.round(pts[:,axis]/.1).astype(int);values,counts=np.unique(bins,return_counts=True)
-            order=np.argsort(counts)[::-1];pairs=[]
+            order=np.argsort(counts)[::-1];candidates=[]
             for j in order[:15]:
                 if counts[j]<5:continue
                 val=values[j]*.1
-                if not .20 < abs(val-p[axis]) < size:continue
-                if np.ptp(pts[bins == values[j], 1-axis]) < .75:continue
-                lo=val if val<p[axis] else val-size
-                pairs.append((counts[j],lo,lo+size))
-            if not pairs:return False
-            _,lo,hi=max(pairs);walls.extend([lo,hi])
+                if abs(val-p[axis]) <= .20:continue
+                span = np.ptp(pts[bins == values[j], 1-axis])
+                if span < .75:continue
+                candidates.append((int(counts[j]), float(span), float(val)))
+            if self.interior_exploration:
+                left = max((c for c in candidates if c[2] < p[axis]), key=lambda c: (c[1], c[0]), default=None)
+                right = max((c for c in candidates if c[2] > p[axis]), key=lambda c: (c[1], c[0]), default=None)
+                if left and right and right[2] - left[2] > 2 * self.cfg['wall_standoff'] + .4:
+                    walls.extend([left[2], right[2]])
+                    continue
+            usable = [(count, val if val < p[axis] else val - size)
+                      for count, _, val in candidates if abs(val - p[axis]) < size]
+            if not usable:return False
+            _, lo = max(usable)
+            walls.extend([lo, lo + size])
         self.bounds=walls;x0,x1,y0,y1=walls;s=self.cfg['wall_standoff']
         near=[(p[0]-x0,(x0+s,p[1]),3),(x1-p[0],(x1-s,p[1]),1),(p[1]-y0,(p[0],y0+s),0),(y1-p[1],(p[0],y1-s),2)]
         _,self.goal,side=min(near)
@@ -258,11 +279,24 @@ class Mission:
         confirmed = [key for key, marker in self.markers.items() if marker['observations'] >= 2]
         if len(confirmed) < self.expected_targets:
             return False
+        if self.state == 'EXPLORE_INTERIOR' and not self.transport.stop_exploration():
+            return True
         self.visit_ids = confirmed[:self.expected_targets]
         self.command()  # Cancel the current Nav2 action before the first visit.
         self.event('marker_search_complete', ids=[int(key) for key in self.visit_ids])
         self.next_marker()
         return True
+
+    def finish_perimeter(self):
+        self.event('patrol_lap_complete', confirmed=sum(m['observations'] >= 2 for m in self.markers.values()))
+        if self.interior_exploration:
+            self.state = 'EXPLORE_INTERIOR'
+            self.goal = None
+            self.event('interior_exploration_begin', algorithm='rust_base')
+        else:
+            self.route = list(self.patrol_route)
+            self.goal = self.route.pop(0)
+            self.begin_spin('PATROL')
 
     def next_marker(self):
         candidates = [self.markers[key] for key in self.visit_ids if key not in self.visited]
@@ -311,6 +345,9 @@ class Mission:
             self.total_distance+=delta;self.total_rotation+=abs(wrap(p[2]-self.last_pose[2]))
             if self.state in ('APPROACH_WALL','PATROL'):self.distance+=delta
         self.last_pose=p
+        if self.state == 'EXPLORE_INTERIOR':
+            self.transport.start_exploration()
+            return
         if self.state=='SCAN_360':
             step=wrap(p[2]-self.last_yaw);self.spin_total+=step;self.last_yaw=p[2]
             spin_finished = self.transport.turn(TAU, 'scan') if self.nav2 else self.spin_total>=TAU-.04
@@ -326,7 +363,7 @@ class Mission:
                 self.command();self.visited.add(str(self.target['id']));self.event('marker_visited',id=self.target['id']);self.show_markers();self.next_marker()
             elif not self.nav2:self.command(0,float(np.clip(1.5*err,-.5,.5)))
             return
-        if self.state=='PATROL' and self.distance>=self.cfg['scan_every_m']:
+        if self.state=='PATROL' and not self.interior_exploration and self.distance>=self.cfg['scan_every_m']:
             self.begin_spin('PATROL');self.command();return
         distance=math.hypot(self.goal[0]-p[0],self.goal[1]-p[1])
         reached = self.transport.navigate(self.goal, p) if self.nav2 else distance<.18
@@ -336,11 +373,7 @@ class Mission:
             elif self.state=='PATROL':
                 self.event('waypoint_reached',goal=self.goal)
                 if self.route:self.goal=self.route.pop(0)
-                else:
-                    self.route = list(self.patrol_route)
-                    self.goal = self.route.pop(0)
-                    self.event('patrol_lap_complete', confirmed=sum(m['observations'] >= 2 for m in self.markers.values()))
-                    self.begin_spin('PATROL')
+                else:self.finish_perimeter()
             elif self.state=='VISIT_MARKER':self.state='FACE_MARKER'
             return
         if self.nav2:return

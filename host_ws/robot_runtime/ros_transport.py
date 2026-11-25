@@ -1,8 +1,10 @@
 """Real TurtleBot4 ROS 2 input adapter; no Gazebo dependency."""
-import math,threading,time
+import math,subprocess,threading,time
 from types import SimpleNamespace as NS
 import cv2,numpy as np
 from control import CommandGate,transform_matrix
+from depth_input import DepthFrames, select_depth_topic
+from interior_nav import EXPLORER_ACTION, InteriorNav
 from nav2_motion import Nav2GoalError, Nav2Motion
 
 MARKER_TOPIC = '/team7/v1/targets'
@@ -13,6 +15,9 @@ class ROSAdapter:
     def __init__(self,args):
         self.args=args;self.mission=None;self.gate=CommandGate();self.gate.execute=args.execute
         self.info=None;self.latest_scan=None;self.latest_pose=None;self.errors={};self.closed=False
+        self.depth = DepthFrames()
+        self.depth_topic = None
+        self.interior = self.interior_process = None
         self.lock=threading.Lock();self.last_graph_check=0.;self.conflict=False;self.motion=None;self.nav2_ready=False
         self.speed_limit_pub = None
         self.slow_until = self.last_speed_limit = 0.0
@@ -34,6 +39,8 @@ class ROSAdapter:
         self.tf=Buffer();self.listener=TransformListener(self.tf,self.node)
         if getattr(self.args,'nav2',False):
             self.motion=Nav2Motion(self.node,self.args.map_frame)
+            if mission is not None and self.args.interior_explorer:
+                self.interior = InteriorNav(self.node, self.motion, self.ready)
         self.Twist=Twist;self.TwistStamped=TwistStamped
         self.pub=self.node.create_publisher(TwistStamped if self.args.cmd_type=='stamped' else Twist,self.args.cmd_topic,10) if self.args.execute and self.motion is None else None
         self.node.create_subscription(LaserScan,self.args.scan_topic,self.scan_cb,qos_profile_sensor_data)
@@ -43,6 +50,12 @@ class ROSAdapter:
         map_qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.node.create_subscription(OccupancyGrid,self.args.map_topic,self.map_cb,map_qos)
         if mission is not None:
+            if self.args.depth_topic != 'off':
+                self.subscribe_depth(Image, CameraInfo, qos_profile_sensor_data)
+                if self.depth_topic is None:
+                    self.depth_discovery = self.node.create_timer(
+                        1.0, lambda: self.subscribe_depth(Image, CameraInfo, qos_profile_sensor_data),
+                    )
             self.Marker, self.MarkerArray = Marker, MarkerArray
             self.marker_pub = self.node.create_publisher(MarkerArray, MARKER_TOPIC, map_qos)
             self.publish_markers({}, set())
@@ -53,6 +66,24 @@ class ROSAdapter:
         self.node.create_timer(.05,self.timer)
         self.executor=SingleThreadedExecutor();self.executor.add_node(self.node)
         self.thread=threading.Thread(target=self.executor.spin,daemon=True);self.thread.start()
+
+    def subscribe_depth(self, image_type, info_type, qos):
+        topic = self.args.depth_topic
+        if topic == 'auto':
+            topic = select_depth_topic(self.node.get_topic_names_and_types(), self.args.image_topic)
+        if topic is None:
+            return
+        info_topic = self.args.depth_camera_info_topic or topic.rpartition('/')[0] + '/camera_info'
+        self.node.create_subscription(image_type, topic, self.depth.add, qos)
+        self.node.create_subscription(info_type, info_topic, self.depth_info_cb, qos)
+        self.depth_topic = topic
+        if hasattr(self, 'depth_discovery'):
+            self.depth_discovery.cancel()
+        self.node.get_logger().info(f'Optional ArUco depth input: {topic} ({info_topic})')
+
+    def depth_info_cb(self, message):
+        self.depth.info = message
+
     def error(self,key,exception):self.errors[key]=str(exception)
     def publish_markers(self, markers, visited):
         stamp = self.node.get_clock().now().to_msg()
@@ -181,6 +212,15 @@ class ROSAdapter:
                 rgb=np.ascontiguousarray(rgb);normalized=NS(height=rgb.shape[0],width=rgb.shape[1],step=rgb.shape[1]*3,data=rgb.tobytes(),
                     header=NS(stamp=NS(sec=m.header.stamp.sec,nsec=m.header.stamp.nanosec)),
                     intrinsics=np.array(info.k,dtype=float).reshape(3,3),distortion=np.array(info.d,dtype=float),camera_to_map=T)
+                if self.depth_topic:
+                    try:
+                        normalized.depth = self.depth.match(
+                            m.header, info, optical,
+                            rectified='image_rect' in self.depth_topic.rsplit('/', 1)[-1],
+                        )
+                        self.errors.pop('depth', None)
+                    except (TypeError, ValueError) as error:
+                        self.error('depth', error)
                 self.mission.image_cb(normalized)
         except Exception as e:self.error('camera',e)
     def ready(self):
@@ -216,6 +256,8 @@ class ROSAdapter:
         except Exception as e:self.gate.fresh.pop('tf',None);self.error('tf',e)
         if self.motion is not None and not self.ready():
             self.motion.cancel()
+            if self.interior is not None:
+                self.interior.pause()
         if not self.closed:
             self.update_marker_speed_limit(time.monotonic())
         if self.pub:
@@ -232,6 +274,28 @@ class ROSAdapter:
         else:
             self.nav_step = None
             self.motion.cancel()
+            if self.interior is not None:
+                self.interior.pause()
+
+    def start_exploration(self):
+        if not self.ready():
+            return
+        self.interior.enable(self.mission.bounds)
+        if self.interior_process is None:
+            self.interior_process = subprocess.Popen([
+                str(self.args.interior_explorer), '--ros-args', '--params-file', str(self.args.interior_params),
+                '-p', f'nav_action:={EXPLORER_ACTION}', '-p', f'map_frame:={self.args.map_frame}',
+                '-p', f'base_frame:={self.args.base_frame}', '-p', f'coverage_map_topic:={self.args.map_topic}',
+            ], stdin=subprocess.DEVNULL)
+        elif self.interior_process.poll() is not None:
+            raise RuntimeError(f'rust_base explorer exited with status {self.interior_process.returncode}')
+
+    def stop_exploration(self):
+        if not self.interior.stop():
+            return False
+        if self.interior_process is not None and self.interior_process.poll() is None:
+            self.interior_process.terminate()
+        return True
     def navigate(self,goal,pose):
         if not self.ready():
             return False
@@ -277,6 +341,15 @@ class ROSAdapter:
     def close(self):
         if self.closed:return
         self.closed=True;self.gate.execute=False
+        if self.interior is not None:
+            self.interior.close()
+        if self.interior_process is not None and self.interior_process.poll() is None:
+            self.interior_process.terminate()
+            try:
+                self.interior_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.interior_process.kill()
+                self.interior_process.wait()
         if self.motion is not None:self.motion.close()
         if getattr(self,'pub',None):
             for _ in range(3):self.emit(0.,0.);time.sleep(.05)

@@ -16,6 +16,11 @@ pub struct ExplorerParams {
     /// s without progress (progress_epsilon of movement or a 0.3 rad turn) before a goal is given up
     pub progress_timeout: f64,
     pub progress_epsilon: f64,
+    /// s without getting `closing_epsilon` closer to the goal (best distance so far) before it is given
+    /// up; 0 = off. Wiggling in front of a gap the robot cannot pass counts as movement, not as closing
+    /// in (live 2026-11-25: three goals behind a half wall ran into the 60 s timeout)
+    pub closing_timeout: f64,
+    pub closing_epsilon: f64,
     /// s to wait after a failed or cancelled goal; a success chains on at once
     pub retry_delay: f64,
     pub blacklist_duration: f64,
@@ -53,6 +58,8 @@ impl Default for ExplorerParams {
             goal_timeout: 60.0,
             progress_timeout: 15.0,
             progress_epsilon: 0.1,
+            closing_timeout: 30.0,
+            closing_epsilon: 0.25,
             retry_delay: 5.0,
             approach_budget: 0.0,
             blacklist_duration: 45.0,
@@ -200,6 +207,9 @@ struct Active {
     /// x, y, yaw where progress was last seen
     progress_pose: (f64, f64, f64),
     last_progress: f64,
+    /// best distance to the goal so far and when it last improved by closing_epsilon
+    closest: f64,
+    last_closer: f64,
     cancelling: bool,
     /// cancelled for a reason that is not a failure (its wall got seen on the way)
     cancel_ok: bool,
@@ -605,10 +615,20 @@ impl ExplorerPolicy {
                 a.progress_pose = (robot.x, robot.y, robot.yaw);
                 a.last_progress = now;
             }
+            let d = robot.distance_to(a.goal.0, a.goal.1);
+            if d < a.closest - p.closing_epsilon {
+                a.closest = d;
+                a.last_closer = now;
+            }
+            // a turn in place has its goal under the robot: only goals that need driving
+            let closing_stalled = p.closing_timeout > 0.0
+                && a.kind != GoalKind::Turn
+                && a.closest > p.closing_epsilon
+                && now - a.last_closer > p.closing_timeout;
             if !a.cancelling && a.accepted {
                 if now - a.started > p.goal_timeout {
                     abandon = Some((a.goal, CancelReason::Timeout, true));
-                } else if now - a.last_progress > p.progress_timeout {
+                } else if now - a.last_progress > p.progress_timeout || closing_stalled {
                     abandon = Some((a.goal, CancelReason::NoProgress, true));
                 } else if a.view_target.is_some_and(|t| !views.iter().any(|v| dist(v.target, t) < 0.6)) {
                     abandon = Some((a.goal, CancelReason::WallSeen, false));
@@ -762,6 +782,8 @@ impl ExplorerPolicy {
             started: now,
             progress_pose: (robot.x, robot.y, robot.yaw),
             last_progress: now,
+            closest: robot.distance_to(goal.0, goal.1),
+            last_closer: now,
             cancelling: false,
             cancel_ok: false,
         });
@@ -899,9 +921,44 @@ mod tests {
     }
 
     #[test]
-    fn no_progress_cancels_but_a_turn_counts_as_progress() {
+    fn wiggling_without_closing_in_is_given_up() {
         let g = map();
         let mut e = ExplorerPolicy::new(params(), 0.0);
+        let start = Pose2::new(1.0, 1.0, 0.0);
+        let goal = sent(&e.tick(0.0, input(&g, start, None, 0.0))).unwrap();
+        e.goal_accepted((goal.x, goal.y));
+        // back and forth 0.3 m across the line to the goal: moving, never closer
+        let (dx, dy) = (goal.x - start.x, goal.y - start.y);
+        let n = dx.hypot(dy);
+        let (px, py) = (-dy / n, dx / n);
+        let mut cancelled = None;
+        for k in 1..60 {
+            let s = if k % 2 == 0 { 0.15 } else { -0.15 };
+            let r = Pose2::new(start.x + px * s, start.y + py * s, (k as f64 * 0.5).sin());
+            if e.tick(k as f64, input(&g, r, None, k as f64)).contains(&Action::Cancel(CancelReason::NoProgress)) {
+                cancelled = Some(k);
+                break;
+            }
+        }
+        assert!(cancelled.is_some_and(|k| (30..=32).contains(&k)), "{cancelled:?}");
+        // driving at the goal steadily is never cut off
+        let mut e = ExplorerPolicy::new(params(), 0.0);
+        let goal = sent(&e.tick(0.0, input(&g, start, None, 0.0))).unwrap();
+        e.goal_accepted((goal.x, goal.y));
+        let n = (goal.x - start.x).hypot(goal.y - start.y);
+        for k in 1..(n / 0.02) as i32 {
+            let f = 0.02 * k as f64 / n;
+            let r = Pose2::new(start.x + (goal.x - start.x) * f, start.y + (goal.y - start.y) * f, 0.0);
+            let a = e.tick(k as f64, input(&g, r, None, k as f64));
+            assert!(!a.iter().any(|a| matches!(a, Action::Cancel(_))), "cancelled at {k}");
+        }
+    }
+
+    #[test]
+    fn no_progress_cancels_but_a_turn_counts_as_progress() {
+        let g = map();
+        // the closing check would end this turn-in-place goal at 30 s; this test is about movement
+        let mut e = ExplorerPolicy::new(ExplorerParams { closing_timeout: 0.0, ..params() }, 0.0);
         let goal = sent(&e.tick(0.0, input(&g, Pose2::new(1.0, 1.0, 0.0), None, 0.0))).unwrap();
         e.goal_accepted((goal.x, goal.y));
         let mut t = 0.0;
@@ -1174,7 +1231,8 @@ mod tests {
     fn approach_times_out() {
         let g = room();
         // a goal timeout longer than the approach timeout
-        let mut e = ExplorerPolicy::new(ExplorerParams { goal_timeout: 200.0, ..approach_params() }, 0.0);
+        // closing check off: this test is about the approach timeout
+        let mut e = ExplorerPolicy::new(ExplorerParams { goal_timeout: 200.0, closing_timeout: 0.0, ..approach_params() }, 0.0);
         let r = Pose2::new(2.5, 1.0, 0.0);
         let hints = [HINT];
         let a = sent(&e.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();

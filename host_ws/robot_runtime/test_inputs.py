@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 import cv2,numpy as np
+from interior_nav import EXPLORER_ACTION
 from nav2_motion import Nav2GoalError
 from ros_transport import ROSAdapter
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'sim/gazebo/native_sim'))
@@ -52,6 +53,25 @@ class InputTests(unittest.TestCase):
             adapter.gate.fresh['odom'] = 10.
             adapter.nav2_ready = True
             self.assertTrue(adapter.ready())
+
+    def test_interior_explorer_uses_v1_camera_and_nav2_gate(self):
+        adapter = self.adapter()
+        adapter.args.interior_explorer = '/stack/explorer'
+        adapter.args.interior_params = '/stack/team7.yaml'
+        adapter.args.map_topic = '/slam/map'
+        adapter.args.camera_info_topic = '/robot/rgb/camera_info'
+        adapter.mission = NS(bounds=(0., 14., 0., 9.))
+        adapter.ready = Mock(return_value=True)
+        adapter.interior = Mock()
+        with patch('ros_transport.subprocess.Popen') as start:
+            adapter.start_exploration()
+        adapter.interior.enable.assert_called_once_with(adapter.mission.bounds)
+        command = start.call_args.args[0]
+        self.assertEqual(command[:4], ['/stack/explorer', '--ros-args', '--params-file', '/stack/team7.yaml'])
+        self.assertIn(f'nav_action:={EXPLORER_ACTION}', command)
+        self.assertIn('coverage_map_topic:=/slam/map', command)
+        self.assertIn('camera_info_topic:=/robot/rgb/camera_info', command)
+
     def test_validated_candidate_applies_and_clears_speed_limit(self):
         adapter = self.adapter()
         messages = []

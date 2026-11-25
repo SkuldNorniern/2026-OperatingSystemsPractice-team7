@@ -18,7 +18,7 @@ from visualization import VIEWER_PROFILE, find_native_viewer, prepare_viewer_pro
 DEMO = Path('host_ws/scripts/run_demo.sh')
 WORKSPACE = Path('host_ws/ros2_ws')
 RUST_BASE_REF = 'refs/remotes/origin/rust_base'
-RUST_BASE_COMMIT = 'a7eda3ef47ff0fe1c34009739ab69abbf7f4f145'
+RUST_BASE_COMMIT = 'db0d4a8addab7c8f3c08dca8cfe1f9e01f199c2a'
 
 
 def has_rust_base_source(checkout):

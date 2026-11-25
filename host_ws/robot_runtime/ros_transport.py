@@ -321,6 +321,7 @@ class ROSAdapter:
                 str(self.args.interior_explorer), '--ros-args', '--params-file', str(self.args.interior_params),
                 '-p', f'nav_action:={EXPLORER_ACTION}', '-p', f'map_frame:={self.args.map_frame}',
                 '-p', f'base_frame:={self.args.base_frame}', '-p', f'coverage_map_topic:={self.args.map_topic}',
+                '-p', f'camera_info_topic:={self.args.camera_info_topic}',
             ], stdin=subprocess.DEVNULL)
         elif self.interior_process.poll() is not None:
             raise RuntimeError(f'rust_base explorer exited with status {self.interior_process.returncode}')

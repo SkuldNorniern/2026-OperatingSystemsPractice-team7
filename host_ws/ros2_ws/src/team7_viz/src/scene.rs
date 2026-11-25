@@ -36,6 +36,8 @@ pub enum Layer {
     Views,
     /// camera views that saw a marker (`/team7/views_seen`), as wedges
     SeenViews,
+    /// walls the camera has seen (green) and not seen yet (orange), `/team7/camera_coverage`
+    Coverage,
     SlamGraph,
     Robot,
     Grid,
@@ -68,7 +70,7 @@ pub const COST_OPACITY: f32 = 0.35;
 
 /// all base layers in panel order; the first nine toggle with keys 1-9. Costmaps and the raw
 /// detections start off.
-pub const LAYERS: [LayerInfo; 17] = [
+pub const LAYERS: [LayerInfo; 18] = [
     info(Layer::Map, "map", "Map", "free, wall, unknown", true, None, Some(Slot::Map), Some(MsgKind::Grid)),
     info(Layer::Scan, "scan", "Scan", "laser points", true, None, Some(Slot::Scan), Some(MsgKind::Scan)),
     info(Layer::Path, "plan", "Plan", "global path", true, None, Some(Slot::Plan), Some(MsgKind::Path)),
@@ -83,6 +85,7 @@ pub const LAYERS: [LayerInfo; 17] = [
     info(Layer::Robot, "robot", "Robot", "pose, x/y axes", true, None, None, None),
     info(Layer::Views, "camera_views", "Camera views", "planned view poses", true, None, Some(Slot::Views), Some(MsgKind::Markers)),
     info(Layer::SeenViews, "seen_views", "Seen views", "where the camera saw a marker", true, None, Some(Slot::SeenViews), Some(MsgKind::Markers)),
+    info(Layer::Coverage, "camera_coverage", "Camera coverage", "walls seen / not seen", true, Some(1.0), Some(Slot::Coverage), Some(MsgKind::Markers)),
     info(Layer::SlamGraph, "slam_graph", "SLAM graph", "keyframes, edges", true, None, Some(Slot::SlamGraph), Some(MsgKind::Markers)),
     info(Layer::Grid, "grid", "Grid", "1 m", true, None, None, None),
     info(Layer::Trail, "trail", "Trail", "where it drove", true, None, None, None),
@@ -299,7 +302,8 @@ fn grid_lines(bounds: [f64; 4], vp: &Viewport) -> Vec<Prim> {
 }
 
 /// the drawing order of the kinds over the map images
-const ORDER: [Layer; 14] = [
+const ORDER: [Layer; 15] = [
+    Layer::Coverage,
     Layer::Trail,
     Layer::SlamGraph,
     Layer::Path,
@@ -315,6 +319,10 @@ const ORDER: [Layer; 14] = [
     Layer::Robot,
     Layer::Map,
 ];
+
+/// camera coverage: wall seen / not seen yet
+const COVERAGE_SEEN: Rgba = [60, 210, 110, 230];
+const COVERAGE_UNSEEN: Rgba = [255, 140, 30, 230];
 
 /// `c` with its alpha scaled by `o`
 fn faded(c: Rgba, o: f32) -> Rgba {
@@ -378,6 +386,12 @@ pub fn prims(model: &Model, layers: &Layers, vp: &Viewport, now: Instant, select
                 }
                 Layer::Frontiers => out.extend(model::frontier_points(model.markers(t)).iter().map(|p| prim::dot(at(p), 4.0, pal::FRONTIER))),
                 Layer::Views => out.extend(model::view_points(model.markers(t)).iter().map(|p| Prim::Points { pts: vec![at(p)], size: 7.0, color: pal::VIEW })),
+                Layer::Coverage => {
+                    for m in model.markers(t) {
+                        let c = if m.ns == "coverage_seen" { COVERAGE_SEEN } else { COVERAGE_UNSEEN };
+                        out.push(Prim::Points { pts: m.pts.iter().map(at).collect(), size: 3.0, color: color(c) });
+                    }
+                }
                 Layer::SeenViews => {
                     // LINE_LIST wedges: each pair of points is one edge
                     for m in model.markers(t) {
@@ -515,6 +529,7 @@ pub fn symbol(l: Layer, c: (f32, f32)) -> Vec<Prim> {
         Layer::Frontiers => vec![prim::dot(c, 4.0, pal::FRONTIER)],
         Layer::Views => vec![square(0.0, pal::VIEW)],
         Layer::SeenViews => vec![Prim::Line { a: (x - 8.0, y + 4.0), b: (x + 8.0, y - 4.0), color: pal::SEEN_VIEW, width: 2.0, dashed: false }],
+        Layer::Coverage => vec![square(-4.0, COVERAGE_SEEN), square(4.0, COVERAGE_UNSEEN)],
         Layer::Goal => prim::goal(c).to_vec(),
         Layer::Candidates => vec![Prim::Circle { c, r: 5.5, fill: None, stroke: Some((pal::TARGET_TENTATIVE, 2.0)) }],
         Layer::Confirmed => vec![Prim::Circle { c, r: 5.5, fill: Some(pal::TARGET_CONFIRMED), stroke: Some((pal::ROBOT_EDGE, 1.0)) }],

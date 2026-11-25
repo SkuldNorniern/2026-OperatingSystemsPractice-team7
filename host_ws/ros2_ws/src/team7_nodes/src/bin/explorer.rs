@@ -192,11 +192,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut timer = node.create_wall_timer(period)?;
 
-    // what the camera saw, 5 Hz
+    // what the camera saw, 5 Hz; the walls seen / not seen go to /team7/camera_coverage at 1 Hz
     let mut cov_timer = node.create_wall_timer(Duration::from_millis(200))?;
+    let cov_pub = node.create_publisher::<MarkerArray>("/team7/camera_coverage", QosProfile::default())?;
     let (st, tfc, mf, bf) = (state.clone(), tf.clone(), map_frame.clone(), base_frame.clone());
     spawner.spawn_local(async move {
+        let mut n = 0u32;
         while cov_timer.tick().await.is_ok() {
+            n += 1;
+            if n % 5 == 0 {
+                let s = st.borrow();
+                if let Some(m) = s.map.as_ref() {
+                    let (seen, unseen) = s.policy.coverage().wall_split(m, 65);
+                    let _ = cov_pub.publish(&coverage_markers(&mf, &seen, &unseen));
+                }
+            }
             if st.borrow().policy.params().coverage.is_none() {
                 return;
             }
@@ -332,6 +342,25 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
             }
         }
     });
+}
+
+/// wall cells the camera has seen (green) and not seen yet (orange), map frame
+fn coverage_markers(frame: &str, seen: &[(f64, f64)], unseen: &[(f64, f64)]) -> MarkerArray {
+    let pts = |ns: &str, cells: &[(f64, f64)], c| {
+        let mut m = viz::base(frame, ns, 0, viz::POINTS);
+        m.scale.x = 0.05;
+        m.scale.y = 0.05;
+        m.color = c;
+        m.points = cells.iter().map(|p| r2r::geometry_msgs::msg::Point { x: p.0, y: p.1, z: 0.02 }).collect();
+        m
+    };
+    MarkerArray {
+        markers: vec![
+            viz::delete_all(frame),
+            pts("coverage_seen", seen, viz::color(0.2, 0.85, 0.4, 0.9)),
+            pts("coverage_unseen", unseen, viz::color(1.0, 0.55, 0.1, 0.9)),
+        ],
+    }
 }
 
 fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> MarkerArray {

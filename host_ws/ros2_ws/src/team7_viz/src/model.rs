@@ -73,6 +73,8 @@ pub enum Slot {
     Views,
     /// where the camera was when it saw a marker (wedges)
     SeenViews,
+    /// wall cells the camera has / has not seen (explorer coverage)
+    Coverage,
     Goal,
     Targets,
     SlamGraph,
@@ -96,6 +98,7 @@ impl Slot {
             Slot::Frontiers => &["/team7/frontiers", "/explore/frontiers"],
             Slot::Views => &["/team7/frontiers"],
             Slot::SeenViews => &["/team7/views_seen"],
+            Slot::Coverage => &["/team7/camera_coverage"],
             Slot::Goal => &["/team7/goal", "/goal_pose"],
             Slot::Targets => &["/team7/targets"],
             Slot::SlamGraph => &["/team7/slam/graph", "/slam_toolbox/graph_visualization"],

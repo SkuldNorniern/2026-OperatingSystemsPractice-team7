@@ -84,6 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             edge_triangulation_gap: p.f64("edge_triangulation_gap", 0.15),
             pnp_only_spread: p.f64("pnp_only_spread", 0.0),
             pnp_only_max_consistency: p.f64("pnp_only_max_consistency", 14.0),
+            ray_agree_m: p.f64("ray_agree_m", 0.0),
+            ray_resid_m: p.f64("ray_resid_m", 0.0),
         };
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {

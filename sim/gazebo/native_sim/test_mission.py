@@ -97,6 +97,7 @@ class MissionTests(unittest.TestCase):
         mission.odom_t = mission.last_save = mission.distance = mission.total_distance = mission.total_rotation = 0.0
         visited = []
         starts = []
+        spins = []
 
         def scan():
             return self.rectangle_scan(mission.pose, half_width=12, half_height=9, reach=5)
@@ -107,7 +108,11 @@ class MissionTests(unittest.TestCase):
             mission.pose = (*goal, math.atan2(goal[1] - y, goal[0] - x))
             return True
 
-        mission.transport = SimpleNamespace(navigate=navigate, start_exploration=lambda: starts.append(True))
+        def turn(angle, _purpose):
+            spins.append(angle)
+            return True
+
+        mission.transport = SimpleNamespace(navigate=navigate, turn=turn, start_exploration=lambda: starts.append(True))
         mission.scan = scan()
         self.assertEqual(len(visible_walls(mission.scan, mission.pose)), 1)
         mission.wait_print = time.monotonic() - 10
@@ -124,6 +129,8 @@ class MissionTests(unittest.TestCase):
             if mission.state == 'EXPLORE_INTERIOR':
                 break
         self.assertEqual(len(mission.wall_survey.corners), 4)
+        self.assertGreater(len(spins), 0)
+        self.assertEqual(spins, [math.tau] * len(spins))
         self.assertLess(math.dist(visited[0], visited[-1]), .25)
         np.testing.assert_allclose(mission.bounds, [-12, 12, -9, 9], atol=.11)
         mission.tick()

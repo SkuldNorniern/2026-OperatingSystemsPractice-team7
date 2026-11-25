@@ -6,13 +6,16 @@ EXPLORER_ACTION = '/team7/v1/interior_navigate_to_pose'
 
 
 class InteriorNav:
-    def __init__(self, node, motion, ready):
+    def __init__(self, node, motion, ready, xy_tree=None):
         from action_msgs.msg import GoalStatus
         from rclpy.action import ActionServer, CancelResponse, GoalResponse
+        from rclpy.task import Future
 
         self.node = node
         self.motion = motion
         self.ready = ready
+        self.new_future = lambda: Future(executor=node.executor)
+        self.xy_tree = str(xy_tree) if xy_tree is not None else ''
         self.accept, self.reject = GoalResponse.ACCEPT, GoalResponse.REJECT
         self.accept_cancel = CancelResponse.ACCEPT
         self.terminal = {GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED}
@@ -20,6 +23,7 @@ class InteriorNav:
         self.enabled = False
         self.bounds = None
         self.outer = self.inner = None
+        self.pending = self.finished = None
         self.cancel_sent = False
         self.pause_since = None
         self.error = None
@@ -28,11 +32,13 @@ class InteriorNav:
 
     def accept_goal(self, request):
         with self.lock:
-            if not (self.enabled and self.ready() and self.outer is None and self.error is None):
+            if not (self.enabled and self.ready() and self.pending is None and self.error is None):
                 return self.reject
             x0, x1, y0, y1 = self.bounds
             p = request.pose.pose.position
             if request.pose.header.frame_id != self.motion.frame or not (x0 < p.x < x1 and y0 < p.y < y1):
+                return self.reject
+            if request.behavior_tree not in ('', 'xy_only'):
                 return self.reject
             return self.accept
 
@@ -54,7 +60,7 @@ class InteriorNav:
         with self.lock:
             if self.error is not None:
                 raise RuntimeError(self.error)
-            if self.pause_since is None or self.outer is None:
+            if self.pause_since is None or (self.outer is None and self.pending is None):
                 self.bounds = bounds
                 self.enabled = True
                 self.pause_since = None
@@ -62,7 +68,7 @@ class InteriorNav:
     def pause(self):
         with self.lock:
             self.enabled = False
-            if self.outer is None:
+            if self.outer is None and self.pending is None:
                 return True
             if self.pause_since is None:
                 self.pause_since = time.monotonic()
@@ -80,6 +86,7 @@ class InteriorNav:
 
     async def execute(self, outer):
         result = self.motion.NavigateToPose.Result()
+        previous = None
         with self.lock:
             # A handoff can occur after acceptance, before the callback is scheduled.
             if outer.is_cancel_requested:
@@ -88,17 +95,36 @@ class InteriorNav:
             if self.accept_goal(outer.request) != self.accept:
                 outer.abort()
                 return result
+            if self.outer is not None:
+                self.pending = outer
+                previous = self.finished
+                self.cancel_forwarded()
+        if previous is not None:
+            await previous
+        with self.lock:
+            if self.pending is outer:
+                self.pending = None
+            if outer.is_cancel_requested:
+                outer.canceled()
+                return result
+            if self.outer is not None or self.accept_goal(outer.request) != self.accept:
+                outer.abort()
+                return result
             self.outer = outer
+            self.finished = self.new_future()
             self.cancel_sent = False
 
         try:
-            inner = await self.motion.navigation.send_goal_async(outer.request)
+            request = outer.request
+            if request.behavior_tree == 'xy_only':
+                request.behavior_tree = self.xy_tree
+            inner = await self.motion.navigation.send_goal_async(request)
             if not inner.accepted:
                 outer.abort()
                 return result
             with self.lock:
                 self.inner = inner
-                if not self.enabled or outer.is_cancel_requested:
+                if not self.enabled or self.pending is not None or outer.is_cancel_requested:
                     self.cancel_forwarded()
             response = await inner.get_result_async()
             if response.status not in self.terminal:
@@ -120,6 +146,8 @@ class InteriorNav:
         finally:
             with self.lock:
                 self.outer = self.inner = None
+                self.finished.set_result(None)
+                self.finished = None
 
     def close(self):
         deadline = time.monotonic() + 4

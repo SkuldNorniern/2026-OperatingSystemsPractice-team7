@@ -380,10 +380,16 @@ class Mission:
         if self.last_pose:
             delta=math.hypot(p[0]-self.last_pose[0],p[1]-self.last_pose[1])
             self.total_distance+=delta;self.total_rotation+=abs(wrap(p[2]-self.last_pose[2]))
-            if self.state in ('APPROACH_WALL','PATROL'):self.distance+=delta
+            if (self.state in ('APPROACH_WALL', 'PATROL')
+                    or (self.state == 'WALL_SURVEY' and self.wall_survey.home is not None)):
+                self.distance += delta
         self.last_pose=p
         if self.state == 'WALL_SURVEY':
-            self.follow_wall(scan, p, now)
+            if self.distance >= self.cfg['scan_every_m']:
+                self.begin_spin('WALL_SURVEY')
+                self.command()
+            else:
+                self.follow_wall(scan, p, now)
             return
         if self.state == 'EXPLORE_INTERIOR':
             self.transport.start_exploration()

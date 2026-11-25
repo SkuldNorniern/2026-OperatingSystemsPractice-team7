@@ -27,6 +27,7 @@ def parser():
     ap.add_argument('--marker-slowdown', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--interior-explorer', type=Path, help=argparse.SUPPRESS)
     ap.add_argument('--interior-params', type=Path, help=argparse.SUPPRESS)
+    ap.add_argument('--interior-xy-tree', type=Path, help=argparse.SUPPRESS)
     ap.add_argument('--cmd-topic',default='/cmd_vel')
     ap.add_argument('--cmd-type',choices=['stamped','unstamped'],default='stamped' if os.environ.get('ROS_DISTRO','jazzy')=='jazzy' else 'unstamped')
     ap.add_argument('--timeout',type=float,default=30);ap.add_argument('--time-limit',type=float,default=600)

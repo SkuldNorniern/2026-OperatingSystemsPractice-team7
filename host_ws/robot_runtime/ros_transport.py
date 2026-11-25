@@ -40,7 +40,7 @@ class ROSAdapter:
         if getattr(self.args,'nav2',False):
             self.motion=Nav2Motion(self.node,self.args.map_frame)
             if mission is not None and self.args.interior_explorer:
-                self.interior = InteriorNav(self.node, self.motion, self.ready)
+                self.interior = InteriorNav(self.node, self.motion, self.ready, self.args.interior_xy_tree)
         self.Twist=Twist;self.TwistStamped=TwistStamped
         self.pub=self.node.create_publisher(TwistStamped if self.args.cmd_type=='stamped' else Twist,self.args.cmd_topic,10) if self.args.execute and self.motion is None else None
         self.node.create_subscription(LaserScan,self.args.scan_topic,self.scan_cb,qos_profile_sensor_data)

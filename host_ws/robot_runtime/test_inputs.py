@@ -47,7 +47,7 @@ class InputTests(unittest.TestCase):
         for now in (10.0, 10.5, 11.0, 12.5, 13.0):
             adapter.update_marker_speed_limit(now)
         self.assertEqual([(m.percentage, m.speed_limit) for m in messages],
-                         [(True, 65.0), (True, 65.0), (True, 0.0)])
+                         [(True, 80.0), (True, 80.0), (True, 0.0)])
 
     def test_navigation_uses_known_space_until_the_map_reaches_the_corner(self):
         adapter = self.adapter()

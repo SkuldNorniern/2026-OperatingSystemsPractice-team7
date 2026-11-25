@@ -6,7 +6,7 @@ from control import CommandGate,transform_matrix
 from nav2_motion import Nav2GoalError, Nav2Motion
 
 MARKER_TOPIC = '/team7/v1/targets'
-MARKER_SLOW_PERCENT = 65.0
+MARKER_SLOW_PERCENT = 80.0
 MARKER_SLOW_HOLD = 2.5
 
 class ROSAdapter:

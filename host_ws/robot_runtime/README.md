@@ -2,7 +2,7 @@
 
 ## 기존 rust_base 데모에서 V1 실행
 
-`host_ws/scripts/run_rust_base_v1.sh`는 기존 빌드의 `run_demo.sh`를 실행합니다. V1은 기존 SLAM, Nav2, 충돌 감시와 rosbag을 사용하고 `/navigate_to_pose`와 `/spin`으로 이동·회전합니다. V1 필터를 통과한 마커를 처음 관측하면 2.5초간 Nav2 주행 속도를 일반 주행 속도의 65%로 제한합니다. 전진 상한은 0.18 m/s이고, `velocity_guard`가 후진 명령을 0으로 제한합니다.
+`host_ws/scripts/run_rust_base_v1.sh`는 기존 빌드의 `run_demo.sh`를 실행합니다. V1은 기존 SLAM, Nav2, 충돌 감시와 rosbag을 사용하고 `/navigate_to_pose`와 `/spin`으로 이동·회전합니다. V1 필터를 통과한 마커를 처음 관측하면 2.5초간 Nav2 주행 속도를 일반 주행 속도의 80%로 제한합니다. 전진 상한은 0.18 m/s이고, `velocity_guard`가 후진 명령을 0으로 제한합니다.
 
 RViz의 **V1 ArUco Targets**는 `/team7/v1/targets`를 읽습니다. 지도에서 첫 관측은 주황색, 두 프레임에서 위치가 일치한 마커는 초록색, 방문을 마친 마커는 파란색으로 표시합니다. RViz를 따로 열면 Fixed Frame을 `map`으로 두고 **MarkerArray**를 추가한 뒤 `/team7/v1/targets`와 **Transient Local**을 선택하세요. 데모가 시작할 때 해당 실행 폴더에 RViz와 감속 설정을 생성합니다.
 

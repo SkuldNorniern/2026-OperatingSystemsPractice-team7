@@ -1,0 +1,8 @@
+# experiment overlay (overlay:=PATH): approach budget 240 s (counted from the first view, not per view as before)
+# plus camera-only confirmation (bearings spread >= 0.35 rad) for markers with no lidar wall hit.
+explorer:
+  ros__parameters:
+    approach_timeout: 240.0
+marker_mapper:
+  ros__parameters:
+    pnp_only_spread: 0.35

@@ -283,6 +283,10 @@ pub struct TrackParams {
     /// m, an edge hit this close to where earlier bearings cross is on the marker's face whatever
     /// the pnp range says, and teaches the scale (spec: marker sizes differ, boxes have only edges)
     pub edge_triangulation_gap: f64,
+    /// camera-only confirmation, for a marker no lidar wall hit or learned size supports: views whose
+    /// bearings spread at least this (rad) and cross within max_triangulation_gap confirm it. Not for
+    /// strict ids (they need a learned size). 0 = off.
+    pub pnp_only_spread: f64,
 }
 
 impl Default for TrackParams {
@@ -293,6 +297,7 @@ impl Default for TrackParams {
             min_wall_fraction: 0.25,
             min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
+            pnp_only_spread: 0.0,
             strict_ids: Vec::new(),
             require_scale_all: false,
             max_spread: 0.08,
@@ -529,6 +534,14 @@ impl Tracker {
         let loose = if self.sticky.contains(&id) { 2.0 } else { 1.0 };
         let p = &self.params;
         let wall = v.iter().filter(|e| e.source == Source::Raycast).count();
+        let tri = triangulate(v).filter(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap);
+        // lidar-backed: enough wall views, and every id that needs it has a consistent learned size
+        let wall_ok = wall >= p.min_wall_views && wall as f64 >= p.min_wall_fraction * v.len() as f64
+            && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
+            && (!p.require_scale_all || self.scale_consistent(id));
+        // camera-only: no wall support, but the bearings of many views cross wide apart (not for strict ids)
+        let cam_ok = p.pnp_only_spread > 0.0 && !p.strict_ids.contains(&id)
+            && tri.is_some_and(|t| t.spread >= p.pnp_only_spread);
         Some(Target {
             id,
             x: f.x,
@@ -536,14 +549,8 @@ impl Tracker {
             views: v.len(),
             spread: f.sigma,
             confirmed: v.len() >= p.min_views
-                && wall >= p.min_wall_views
-                && wall as f64 >= p.min_wall_fraction * v.len() as f64
-                && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
-                && (!p.require_scale_all || self.scale_consistent(id))
-                && (p.min_triangulation_spread <= 0.0
-                    || triangulate(v).is_some_and(|t| {
-                        t.spread >= p.min_triangulation_spread && (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap
-                    }))
+                && (wall_ok || cam_ok)
+                && (p.min_triangulation_spread <= 0.0 || tri.is_some_and(|t| t.spread >= p.min_triangulation_spread))
                 && f.sigma <= loose * p.max_spread
                 && f.consistency <= loose * p.max_consistency,
         })
@@ -933,6 +940,28 @@ mod tests {
         // all from one spot: no intersection
         let same: Vec<_> = (0..3).map(|k| view_at((0.0, 0.0), m, 0.1 * k as f64, Source::PnpRange)).collect();
         assert!(triangulate(&same).is_none());
+    }
+
+    #[test]
+    fn camera_only_confirms_from_wide_bearings_without_a_wall() {
+        let m = (3.0, 1.0);
+        // five camera spots spread around the marker, ranges wrong by up to 0.3 m, no lidar wall hit
+        let spots = [((0.0, 0.0), 0.3), ((0.0, 2.0), -0.3), ((1.0, -1.0), 0.2), ((-0.5, 1.5), -0.1), ((0.5, -0.5), 0.1)];
+        let views: Vec<_> = spots.iter().map(|&(c, e)| view_at(c, m, e, Source::PnpRange)).collect();
+        let mut plain = Tracker::new(TrackParams::default());
+        let mut cam = Tracker::new(TrackParams { pnp_only_spread: 0.35, ..TrackParams::default() });
+        for e in &views {
+            plain.add(7, e);
+            cam.add(7, e);
+        }
+        assert!(!plain.target(7).unwrap().confirmed, "off by default: no wall views");
+        assert!(cam.target(7).unwrap().confirmed, "wide bearings confirm when enabled");
+        // the same views from one bearing: no triangulation, no confirmation
+        let mut one = Tracker::new(TrackParams { pnp_only_spread: 0.35, ..TrackParams::default() });
+        for k in 0..5 {
+            one.add(7, &view_at((0.0, 0.0), m, 0.02 * k as f64, Source::PnpRange));
+        }
+        assert!(!one.target(7).unwrap().confirmed, "one bearing never confirms");
     }
 
     #[test]

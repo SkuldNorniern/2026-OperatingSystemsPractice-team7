@@ -1,0 +1,5 @@
+# experiment overlay (overlay:=PATH): the approach budget counts from the first view. In replay 085003 the first
+# view to (0.83, 1.26) took the whole 90 s (navigation aborted) and the other two views were never tried.
+explorer:
+  ros__parameters:
+    approach_timeout: 240.0

@@ -116,6 +116,7 @@ fn main() {
     if let Some(v) = env("min_triangulation_spread").and_then(|v| v.parse().ok()) { tp.min_triangulation_spread = v; }
     if let Some(v) = env("edge_triangulation_gap").and_then(|v| v.parse().ok()) { tp.edge_triangulation_gap = v; }
     if let Some(v) = env("edge_ratio_gate").and_then(|v| v.parse().ok()) { tp.edge_ratio_gate = v; }
+    if let Some(v) = env("pnp_only_spread").and_then(|v| v.parse().ok()) { tp.pnp_only_spread = v; }
     if let Some(v) = env("strict_ids").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<i64>>()) { tp.strict_ids = v; }
     let mut tr = Tracker::new(tp);
     let mut first_confirm: BTreeMap<i64, usize> = BTreeMap::new();

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9,6 +10,7 @@ use futures::executor::LocalPool;
 use futures::task::LocalSpawnExt;
 use r2r::QosProfile;
 use r2r::aruco_opencv_msgs::msg::ArucoDetection;
+use r2r::geometry_msgs::msg::Point;
 use r2r::nav2_msgs::msg::SpeedLimit;
 use r2r::nav_msgs::msg::OccupancyGrid;
 use r2r::visualization_msgs::msg::MarkerArray;
@@ -18,8 +20,16 @@ use tb4_core::nalgebra::Point3;
 use tb4_core::{Grid, TfBuffer};
 use tb4_markers::{LocateParams, Observation, Source, Target, TrackParams, Tracker};
 
+/// the camera views that saw a marker: the last `VIEW_RING` observations
+const VIEW_RING: usize = 300;
+/// wedge length (m) and half the camera field of view (rad)
+const VIEW_LEN: f64 = 1.5;
+const VIEW_HALF_FOV: f64 = 0.52;
+
 struct State {
     grid: Option<Grid>,
+    /// per observation: a wedge in the map frame from the camera xy along the bearing, as LINE_LIST pairs
+    views: VecDeque<[(f64, f64); 6]>,
     tracker: Tracker,
     locate: LocateParams,
     map_frame: String,
@@ -102,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {
             grid: None,
+            views: VecDeque::with_capacity(VIEW_RING),
             tracker: Tracker::new(track),
             locate,
             map_frame: p.string("map_frame", "map"),
@@ -183,6 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // frame with yaw = face normal toward the free side it was seen from (Tracker::facing).
     // Only markers with 2+ views that are not confirmed; one that leaves the list was confirmed.
     let pub_approach = node.create_publisher::<MarkerArray>("/team7/marker_approach", QosProfile::default())?;
+    // every camera view that saw a marker, as wedges (ns seen_views); the whole ring goes out on each new observation
+    let pub_views = node.create_publisher::<MarkerArray>("/team7/views_seen", QosProfile::default())?;
     let det_sub = node.subscribe::<ArucoDetection>(&detections_topic, QosProfile::sensor_data())?;
     let st = state.clone();
     let log2 = log.clone();
@@ -204,6 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let origin = cam * Point3::origin();
         let before: Vec<i64> = s.tracker.confirmed().iter().map(|t| t.id).collect();
+        let mut views_added = false;
         for m in &det.markers {
             let id = m.marker_id as i64;
             if s.ignore_ids.contains(&id) {
@@ -218,6 +232,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let b = cam.rotation * (t_cam / range);
             let obs = Observation { id, camera: (origin.x, origin.y, origin.z), bearing: (b.x, b.y, b.z), pnp_range: range };
             let st = &mut *s;
+            if b.x.hypot(b.y) > 1e-6 {
+                if st.views.len() == VIEW_RING {
+                    st.views.pop_front();
+                }
+                st.views.push_back(view_wedge((origin.x, origin.y), b.y.atan2(b.x)));
+                views_added = true;
+            }
             if let Some(f) = st.obs_log.as_mut() {
                 let _ = writeln!(f, "{:.3},{id},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4}", t_img.0 as f64 * 1e-9,
                     origin.x, origin.y, origin.z, b.x, b.y, b.z, range);
@@ -276,6 +297,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = f.flush();
         }
         let _ = pub_targets.publish(&markers(&s.map_frame, &targets, |id| s.tracker.pending(id)));
+        if views_added {
+            let _ = pub_views.publish(&views_markers(&s.map_frame, &s.views));
+        }
         // marker id = aruco id, so the explorer keys approaches by id: without ids a jumping
         // estimate looked like a confirmation and the same chair label was approached 3 times
         let approach = MarkerArray {
@@ -342,6 +366,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     team7_nodes::run(node, pool, || false);
     Ok(())
+}
+
+/// a camera view seen from above: apex at the camera, rim points at the bearing +/- half fov
+fn view_wedge(cam: (f64, f64), yaw: f64) -> [(f64, f64); 6] {
+    let at = |a: f64| (cam.0 + VIEW_LEN * (yaw + a).cos(), cam.1 + VIEW_LEN * (yaw + a).sin());
+    let (l, r) = (at(VIEW_HALF_FOV), at(-VIEW_HALF_FOV));
+    // apex -> left, apex -> right, left -> right (the rim chord)
+    [cam, l, cam, r, l, r]
+}
+
+/// the whole ring as one update: DELETEALL first, so wedges that left the ring disappear
+fn views_markers(frame: &str, ring: &VecDeque<[(f64, f64); 6]>) -> MarkerArray {
+    let mut out = vec![viz::delete_all(frame)];
+    for (i, wedge) in ring.iter().enumerate() {
+        let mut m = viz::base(frame, "seen_views", i as i32, viz::LINE_LIST);
+        m.scale.x = 0.03;
+        m.color = viz::color(0.35, 0.85, 0.55, 0.45);
+        m.points = wedge.iter().map(|&(x, y)| Point { x, y, z: 0.0 }).collect();
+        out.push(m);
+    }
+    MarkerArray { markers: out }
 }
 
 /// candidate labels: "ID 3? 5v | wall 1/3, angle 4/11 deg" (rules still failing after the bar)

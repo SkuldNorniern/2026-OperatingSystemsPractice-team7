@@ -183,6 +183,7 @@ pub mod viz {
     pub const ADD: i32 = 0;
     pub const DELETEALL: i32 = 3;
     pub const SPHERE: i32 = 2;
+    pub const LINE_LIST: i32 = 5;
     pub const POINTS: i32 = 8;
     pub const TEXT_VIEW_FACING: i32 = 9;
 

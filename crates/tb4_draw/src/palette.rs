@@ -34,6 +34,8 @@ pub const PATH: Rgba = [40, 200, 60, 255];
 pub const TRAJECTORY: Rgba = [255, 0, 200, 255];
 pub const FRONTIER: Rgba = [50, 110, 255, 255];
 pub const VIEW: Rgba = [255, 150, 0, 255];
+/// the camera wedges of the markers' observations (`/team7/views_seen`), see-through
+pub const SEEN_VIEW: Rgba = [90, 220, 140, 110];
 pub const GOAL: Rgba = [255, 230, 0, 255];
 pub const TARGET_TENTATIVE: Rgba = [255, 200, 0, 255];
 pub const TARGET_CONFIRMED: Rgba = [0, 210, 90, 255];

@@ -71,6 +71,8 @@ pub enum Slot {
     Trajectory,
     Frontiers,
     Views,
+    /// where the camera was when it saw a marker (wedges)
+    SeenViews,
     Goal,
     Targets,
     SlamGraph,
@@ -93,6 +95,7 @@ impl Slot {
             Slot::Trajectory => &["/team7/mppi/trajectory", "/local_plan"],
             Slot::Frontiers => &["/team7/frontiers", "/explore/frontiers"],
             Slot::Views => &["/team7/frontiers"],
+            Slot::SeenViews => &["/team7/views_seen"],
             Slot::Goal => &["/team7/goal", "/goal_pose"],
             Slot::Targets => &["/team7/targets"],
             Slot::SlamGraph => &["/team7/slam/graph", "/slam_toolbox/graph_visualization"],

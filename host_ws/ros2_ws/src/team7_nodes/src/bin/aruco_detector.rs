@@ -124,7 +124,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let _ = det_pub.publish(&out);
 
-        if debug_every > 0 && s.frames % debug_every == 0 {
+        // every frame with a marker gets its box on screen: the detections are counted on every frame, so a
+        // debug image only every debug_every frames showed the count rising with no box
+        if debug_every > 0 && (s.frames % debug_every == 0 || !s.markers.is_empty()) {
             let _ = dbg_pub.publish(&debug_image_color(s.rgb.as_ref(), &s.img, &s.markers, header));
         }
     };

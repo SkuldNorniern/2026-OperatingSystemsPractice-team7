@@ -31,6 +31,9 @@ pub struct ExplorerParams {
     /// beside the aborted one (live 2026-11-25, five goals outside the glass); 0 = off
     pub abort_ban_radius: f64,
     pub abort_ban_duration: f64,
+    /// m, cap of the abort ban radius: an abort within 2 radii of active zones gets radius x (1 + their
+    /// number), so a run of aborts in one area (outside the glass) covers it instead of leaving gaps
+    pub abort_ban_max_radius: f64,
     pub turn_weight: f64,
     /// s, exploration pauses when the costmap is older than this
     pub costmap_timeout: f64,
@@ -71,6 +74,7 @@ impl Default for ExplorerParams {
             blacklist_max_duration: 300.0,
             abort_ban_radius: 2.0,
             abort_ban_duration: 120.0,
+            abort_ban_max_radius: 6.0,
             turn_weight: 0.5,
             costmap_timeout: 5.0,
             explore: ExploreParams {
@@ -246,7 +250,7 @@ pub struct ExplorerPolicy {
     /// banned goals with the time the ban ends
     blacklist: Vec<((f64, f64), f64)>,
     /// areas around goals the navigator aborted, with the time the ban ends
-    zones: Vec<((f64, f64), f64)>,
+    zones: Vec<((f64, f64), f64, f64)>,
     /// failures per spot over the run, so a spot that keeps failing is banned longer
     strikes: Vec<((f64, f64), u32)>,
     /// goals switched away from, with the time
@@ -345,7 +349,7 @@ impl ExplorerPolicy {
         let spot = self.p.explore.blacklist_radius;
         self.zones
             .iter()
-            .map(|(c, _)| (*c, self.p.abort_ban_radius, true))
+            .map(|(c, r, _)| (*c, *r, true))
             .chain(self.blacklist.iter().map(|(c, _)| (*c, spot, false)))
             .collect()
     }
@@ -558,10 +562,12 @@ impl ExplorerPolicy {
                 NavStatus::Canceled => self.stats.canceled += 1,
                 NavStatus::Aborted => {
                     self.stats.aborted += 1;
-                    let (radius, secs) = (p.abort_ban_radius, p.abort_ban_duration);
+                    let (base, secs) = (p.abort_ban_radius, p.abort_ban_duration);
+                    let near = self.zones.iter().filter(|(c, _, _)| dist(*c, goal) <= 2.0 * base).count();
+                    let radius = (base * (1 + near) as f64).min(p.abort_ban_max_radius.max(base));
                     self.ban(goal, now);
-                    if radius > 0.0 {
-                        self.zones.push((goal, now + secs));
+                    if base > 0.0 {
+                        self.zones.push((goal, radius, now + secs));
                         out.push(Action::Info(format!(
                             "navigator aborted ({:.2}, {:.2}): no goals within {radius:.1} m for {secs:.0} s",
                             goal.0, goal.1
@@ -573,7 +579,7 @@ impl ExplorerPolicy {
 
         let p = &self.p;
         self.blacklist.retain(|(_, until)| now < *until);
-        self.zones.retain(|(_, until)| now < *until);
+        self.zones.retain(|(_, _, until)| now < *until);
         // Do not navigate using a costmap that stopped updating.
         if now - input.costmap_stamp > p.costmap_timeout {
             if !self.costmap_stale {
@@ -616,7 +622,7 @@ impl ExplorerPolicy {
         self.recent.retain(|(_, at)| now - at < p.switch_cooldown);
         // goals switched away from lately are skipped like blacklisted ones (no ping-pong)
         let blacklist: Vec<_> = self.blacklist.iter().chain(&self.recent).map(|(goal, _)| *goal).collect();
-        let in_zone = |pt: (f64, f64)| self.zones.iter().any(|(z, _)| dist(*z, pt) <= p.abort_ban_radius);
+        let in_zone = |pt: (f64, f64)| self.zones.iter().any(|(z, r, _)| dist(*z, pt) <= *r);
         let pickable: Vec<Frontier> = frontiers.iter().filter(|f| !in_zone(f.goal)).cloned().collect();
         let pick = || select_goal_with_heading(&pickable, &blacklist, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight);
         let need_views = p.view_detour > 0.0
@@ -923,6 +929,30 @@ mod tests {
         let next = e.tick(2.0, input(&g, r, Some(((goal.x, goal.y), NavStatus::Succeeded)), 2.0));
         assert!(sent(&next).is_some());
         assert_eq!(e.stats().succeeded, 1);
+    }
+
+    #[test]
+    fn aborts_in_one_area_grow_the_ban() {
+        let mut e = ExplorerPolicy::new(params(), 0.0);
+        let base = e.params().abort_ban_radius;
+        let g = map();
+        let r = Pose2::new(1.0, 1.0, 0.0);
+        let mut abort = |e: &mut ExplorerPolicy, at: (f64, f64), t: f64| {
+            e.active = Some(Active {
+                goal: at, kind: GoalKind::Frontier, frontier_missing: 0, view_target: None, approach: None,
+                accepted: true, started: t, progress_pose: (r.x, r.y, r.yaw), last_progress: t, closest: 9.0,
+                last_closer: t, cancelling: false, cancel_ok: false,
+            });
+            e.tick(t, input(&g, r, Some((at, NavStatus::Aborted)), t));
+        };
+        abort(&mut e, (5.0, 5.0), 1.0);
+        abort(&mut e, (6.0, 5.5), 2.0);
+        abort(&mut e, (7.0, 6.0), 3.0);
+        let radii: Vec<f64> = e.banned().iter().filter(|b| b.2).map(|b| b.1).collect();
+        assert_eq!(radii, vec![base, 2.0 * base, 3.0 * base]);
+        // far away: the base radius again
+        abort(&mut e, (-20.0, -20.0), 4.0);
+        assert_eq!(e.banned().iter().filter(|b| b.2).map(|b| b.1).last(), Some(base));
     }
 
     #[test]

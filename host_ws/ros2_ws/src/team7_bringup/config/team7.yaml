@@ -65,7 +65,7 @@ explorer:
     turn_weight: 0.5
     goal_standoff: 0.3
     free_threshold: 50
-    traversable_threshold: 99
+    traversable_threshold: 65  # = occupied_threshold: cells 65-98 are obstacles for the planner, so the explorer must not walk them (was 99)
     frontier_segment_length: 1.2
     min_frontier_cells: 12    # 0.6 m; 0.4 m leftovers near box corners cost 80 s in the sim studio
     size_weight: 1.0

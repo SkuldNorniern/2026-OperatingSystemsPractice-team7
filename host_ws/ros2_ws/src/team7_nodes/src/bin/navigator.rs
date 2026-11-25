@@ -272,6 +272,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wz_max: p.f64("wz_max", 1.9),
         goal_tolerance_xy: p.f64("goal_tolerance_xy", 0.15),
         goal_tolerance_yaw: p.f64("goal_tolerance_yaw", 0.3),
+        // goal clearance was fixed at 0.33 m (more than the centre distance of a 0.6 m gap): a goal in a gap was
+        // cut back to its mouth and counted as reached. 0.20 m is the robot radius plus 2 cm.
+        goal_clearance: p.f64("goal_clearance", 0.20),
+        goal_backoff: p.f64("goal_backoff", 0.4),
         ..MppiParams::default()
     };
     let action_name = p.string("action_name", "/team7/navigate_to_pose");

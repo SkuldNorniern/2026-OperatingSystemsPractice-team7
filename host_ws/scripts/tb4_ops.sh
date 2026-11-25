@@ -14,6 +14,10 @@
 #                                   bump (/hazard_detection) and IR (/ir_intensity) relay from the Create3.
 #                                   enable uncomments them in the Pi's republisher.yaml (backup .orig kept,
 #                                   copy in /etc/turtlebot4/) and restarts the bringup. Docs case 28.
+#    tb4_ops.sh camera-preview [SIZE|check|restore]
+#                                   OAK-D preview size in the Pi's oakd_pro.yaml (shipped 250). 500 doubles the
+#                                   distance a marker is read at (small markers: ~0.8 m -> ~1.6 m). Backup .orig kept,
+#                                   restarts the bringup. The detector reads the new size from camera_info.
 #    tb4_ops.sh create3-off         ask the Create3 to power off (/robot_power). Needs a button press to boot again.
 #
 #  Environment (all optional):
@@ -166,6 +170,37 @@ EOS
   esac
 }
 
+OAKD=/opt/ros/jazzy/share/turtlebot4_bringup/config/oakd_pro.yaml
+
+cmd_camera_preview() {
+  case "${1:-check}" in
+    check)
+      rssh "grep -n 'i_preview_size' $OAKD" || echo "oakd_pro.yaml: no i_preview_size line"
+      ;;
+    restore)
+      sudo_script <<EOS
+set -e
+[ -f "$OAKD.orig" ] || { echo "no $OAKD.orig backup"; exit 1; }
+cp "$OAKD.orig" "$OAKD"
+EOS
+      cmd_restart_bringup
+      ;;
+    ''|*[!0-9]*) die "camera-preview: SIZE (e.g. 500), check or restore" ;;
+    *)
+      local size="$1"
+      sudo_script <<EOS
+set -e
+F=$OAKD
+[ -f "\$F.orig" ] || cp "\$F" "\$F.orig"
+sed -i -E 's/^(\s*i_preview_size:\s*)[0-9]+/\1$size/' "\$F"
+grep -n 'i_preview_size' "\$F"
+EOS
+      cmd_restart_bringup
+      echo "the camera starts about 30 s after the bringup; check: ros2 topic hz /oakd/rgb/preview/image_raw/compressed"
+      ;;
+  esac
+}
+
 cmd_restart_bringup() {
   echo "restarting turtlebot4.service on the Pi (ROS bringup; the Create3 is not restarted)"
   sudo_remote "systemctl restart turtlebot4.service"
@@ -219,6 +254,7 @@ case "${1:-}" in
   tunnel)           shift; cmd_tunnel "$@" ;;
   tunnel-stop)      cmd_tunnel_stop ;;
   sensors)          shift; cmd_sensors "$@" ;;
+  camera-preview)   shift; cmd_camera_preview "$@" ;;
   create3-off)      cmd_create3_off ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

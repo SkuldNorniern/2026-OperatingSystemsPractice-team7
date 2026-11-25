@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 import yaml
 
 
-def prepare_bringup(source, prefix, *, map_frame, map_topic):
+def prepare_bringup(source, prefix, *, map_frame, map_topic, base_frame='base_link'):
     package = 'team7_bringup'
     share = prefix / 'share' / package
     shutil.copytree(source, share)
@@ -42,6 +42,9 @@ def prepare_bringup(source, prefix, *, map_frame, map_topic):
         view = yaml.safe_load(path.read_text())
         manager = view['Visualization Manager']
         manager['Global Options']['Fixed Frame'] = map_frame
+        current_view = manager.get('Views', {}).get('Current', {})
+        if current_view.get('Class') == 'rviz_default_plugins/TopDownOrtho':
+            current_view.update({'Target Frame': base_frame, 'X': 0, 'Y': 0})
         for display in manager['Displays']:
             topic = display.get('Topic', {})
             if topic.get('Value') == '/map':

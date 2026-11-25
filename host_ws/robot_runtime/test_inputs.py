@@ -32,10 +32,26 @@ class InputTests(unittest.TestCase):
         a.map_cb(NS(header=self.header('map'),info=info,data=data))
         self.assertEqual(a.mission.grid.origin,(-2.,-1.));self.assertEqual(a.mission.grid.res,.05)
         self.assertEqual(a.mission.grid.log[0,3],4);self.assertEqual(a.mission.grid.log[0,4],0)
+        self.assertEqual(a.mission.grid.extent(), [-2., -1., -1.4, -.6])
+        self.assertEqual(a.mission.grid.cell_status((-1.9, -.5)), 'outside_map')
         self.assertIn('map',a.gate.fresh)
     def test_wrong_map_frame_is_rejected(self):
         a=self.adapter();a.map_cb(NS(header=self.header('wrong_frame')))
         self.assertNotIn('map',a.gate.fresh)
+
+    def test_readiness_reports_stale_odometry_and_nav2_even_with_working_rgb(self):
+        adapter = self.adapter()
+        adapter.motion = Mock()
+        adapter.gate.fresh = dict(scan=10., odom=8., tf=10., map=10., camera=10.)
+        adapter.errors['nav2'] = 'No velocity_guard publisher on /cmd_vel'
+        with patch('ros_transport.time.monotonic', return_value=10.):
+            self.assertEqual(adapter.readiness_blockers(), {
+                'odom': 'Last valid update was 2.00 s ago',
+                'nav2': 'No velocity_guard publisher on /cmd_vel',
+            })
+            adapter.gate.fresh['odom'] = 10.
+            adapter.nav2_ready = True
+            self.assertTrue(adapter.ready())
     def test_validated_candidate_applies_and_clears_speed_limit(self):
         adapter = self.adapter()
         messages = []

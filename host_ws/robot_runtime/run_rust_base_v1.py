@@ -207,7 +207,7 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
     overlay = folder / 'bringup_overlay'
     share = prepare_bringup(
         checkout / 'host_ws/ros2_ws/src/team7_bringup', overlay,
-        map_frame=args.map_frame, map_topic=args.map_topic,
+        map_frame=args.map_frame, map_topic=args.map_topic, base_frame=args.base_frame,
     )
     if args.execute:
         v1 += ['--interior-explorer', str(installed_node(checkout, 'explorer')),

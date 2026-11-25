@@ -73,6 +73,7 @@ class Nav2Motion:
                 self.acceptance = client.send_goal_async(command)
                 self.key = key
                 self.started = time.monotonic()
+                self.node.get_logger().info(f'Nav2 request sent: {key}')
             return False
 
     def _poll(self):
@@ -83,6 +84,7 @@ class Nav2Motion:
             if self.handle is None or not self.handle.accepted:
                 return True
             self.result = self.handle.get_result_async()
+            self.node.get_logger().info(f'Nav2 request accepted: {self.key}')
         return self.result.done()
 
     def _reset(self):

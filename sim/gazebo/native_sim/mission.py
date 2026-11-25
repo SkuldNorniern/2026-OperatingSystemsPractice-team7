@@ -18,6 +18,7 @@ def stamp(m):return m.header.stamp.sec+m.header.stamp.nsec*1e-9
 class Grid:
     def __init__(self):
         self.res=.1;self.origin=(-25.,-25.);self.n=600
+        self.size = (self.n, self.n)
         self.log=np.zeros((self.n,self.n),np.float32)
     def cell(self,x,y):return (math.floor((x-self.origin[0])/self.res),math.floor((y-self.origin[1])/self.res))
     def xy(self,c):return (self.origin[0]+(c[0]+.5)*self.res,self.origin[1]+(c[1]+.5)*self.res)
@@ -38,18 +39,40 @@ class Grid:
         np.clip(self.log,-4,4,out=self.log)
     def blocked(self):
         return cv2.dilate((self.log>1).astype(np.uint8),np.ones((9,9),np.uint8)).astype(bool)
+    def contains(self, cell):
+        return 0 <= cell[0] < self.size[0] and 0 <= cell[1] < self.size[1]
+
+    def cell_status(self, point):
+        x, y = self.cell(*point)
+        if not self.contains((x, y)):
+            return 'outside_map'
+        if self.log[y, x] > 1:
+            return 'occupied'
+        return 'free' if self.log[y, x] < -.4 else 'unknown'
+
+    def extent(self):
+        x, y = self.origin
+        w, h = self.size
+        return [x, y, x + self.res * w, y + self.res * h]
+
     def reachable_goal(self, start, goal):
         """Pick the destination or a closer waypoint in connected, observed free space."""
         sx, sy = self.cell(*start)
         gx, gy = self.cell(*goal)
-        if not (0 <= sx < self.n and 0 <= sy < self.n):
+        if not self.contains((sx, sy)):
             return None
-        free = (self.log < -.4) & ~self.blocked()
+        blocked = self.blocked()
+        free = (self.log < -.4) & ~blocked
         if not free[sy, sx]:
-            return None
+            if blocked[sy, sx] or not any(self.contains((x, y)) and free[y, x]
+                                          for x, y in ((sx-1, sy), (sx+1, sy), (sx, sy-1), (sx, sy+1))):
+                return None
+            # SLAM can leave the chassis cell unobserved. Connect that one cell
+            # to adjacent measured free space without opening other unknown cells.
+            free[sy, sx] = True
         reachable = free.astype(np.uint8)
         cv2.floodFill(reachable, None, (sx, sy), 2, flags=4)
-        if 0 <= gx < self.n and 0 <= gy < self.n and reachable[gy, gx] == 2:
+        if self.contains((gx, gy)) and self.log[gy, gx] < -.4 and reachable[gy, gx] == 2:
             return goal
 
         # Leave space for the robot footprint at an intermediate waypoint.
@@ -311,7 +334,10 @@ class Mission:
                     self.event('wall_navigation_goal', goal=goal)
             if self.goal is None:
                 if now - self.wait_print > 5:
-                    self.event('waiting_for_wall_path', wall_step_found=step is not None)
+                    self.event('waiting_for_wall_path', wall_step_found=step is not None,
+                               robot_xy=pose[:2], map_extent=self.grid.extent(),
+                               robot_cell=self.grid.cell_status(pose[:2]),
+                               wall_target=step.target if step is not None else None)
                     self.wait_print = now
                 return
 

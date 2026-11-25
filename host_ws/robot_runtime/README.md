@@ -6,6 +6,8 @@
 
 RViz의 **V1 ArUco Targets**는 `/team7/v1/targets`를 읽습니다. 지도에서 첫 관측은 주황색, 두 프레임에서 위치가 일치한 마커는 초록색, 방문을 마친 마커는 파란색으로 표시합니다. RViz를 따로 열면 Fixed Frame을 `map`으로 두고 **MarkerArray**를 추가한 뒤 `/team7/v1/targets`와 **Transient Local**을 선택하세요. 데모가 시작할 때 해당 실행 폴더에 RViz와 감속 설정을 생성합니다.
 
+기본 위쪽 보기의 중심은 `base_link`를 따라가며, 지도는 `map` 좌표계를 사용합니다. 출발 대기 중 `waiting_for_startup`에 아직 필요한 입력이 표시됩니다. `waiting_for_wall_path`는 로봇 좌표, 지도 범위와 로봇 위치의 지도 상태를 함께 기록합니다.
+
 ROS 2 Jazzy와 `rust_base` 빌드 의존성이 설치된 Ubuntu 호스트의 `mapping_algo_sj` 저장소 루트에서 실행합니다.
 
 ```bash

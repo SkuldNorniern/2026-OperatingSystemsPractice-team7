@@ -3,6 +3,7 @@ from concurrent.futures import Future
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 from nav2_motion import Nav2GoalError, Nav2Motion
 
@@ -42,6 +43,7 @@ class Client:
 class MotionTests(unittest.TestCase):
     def setUp(self):
         self.motion = Nav2Motion.__new__(Nav2Motion)
+        self.motion.node = Mock()
         self.motion.lock = threading.RLock()
         self.motion.succeeded = 4
         self.motion._reset()

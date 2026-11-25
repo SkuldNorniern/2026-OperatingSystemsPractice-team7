@@ -19,6 +19,7 @@ class ROSAdapter:
         self.depth_topic = None
         self.interior = self.interior_process = None
         self.lock=threading.Lock();self.last_graph_check=0.;self.conflict=False;self.motion=None;self.nav2_ready=False
+        self.next_pause_notice = 0.0
         self.speed_limit_pub = None
         self.slow_until = self.last_speed_limit = 0.0
         self.marker_slow_active = False
@@ -145,8 +146,12 @@ class ROSAdapter:
             if m.distortion_model not in ('plumb_bob','rational_polynomial',''):self.error('camera_info','Unsupported distortion model');return
             self.info=m
     def odom_cb(self,m):
-        if -.2<=self.age(m.header)<.6 and np.isfinite([m.pose.pose.position.x,m.pose.pose.position.y]).all():
+        age = self.age(m.header)
+        if -.2 <= age < .6 and np.isfinite([m.pose.pose.position.x, m.pose.pose.position.y]).all():
             self.gate.fresh['odom']=time.monotonic()
+            self.errors.pop('odom', None)
+        else:
+            self.error('odom', f'Invalid or out-of-date odometry (message age {age:.3f} s)')
     def map_cb(self,m):
         try:
             if m.header.frame_id!=self.args.map_frame:raise ValueError('Map frame differs from --map-frame')
@@ -162,6 +167,7 @@ class ROSAdapter:
             if self.mission:
                 from mission import Grid
                 g=Grid();g.n=max(w,h);g.res=m.info.resolution
+                g.size = (w, h)
                 g.origin=(m.info.origin.position.x,m.info.origin.position.y)
                 g.log=np.zeros((g.n,g.n),np.float32)
                 log=g.log[:h,:w];log[(data>=0)&(data<50)]=-4;log[data>=65]=4
@@ -223,9 +229,23 @@ class ROSAdapter:
                         self.error('depth', error)
                 self.mission.image_cb(normalized)
         except Exception as e:self.error('camera',e)
+    def readiness_blockers(self):
+        now = time.monotonic()
+        blockers = {}
+        for key, limit in (('scan', .6), ('odom', .6), ('tf', .6), ('map', 15), ('camera', 2)):
+            last = self.gate.fresh.get(key)
+            if last is None:
+                blockers[key] = self.errors.get(key, 'No valid message received')
+            elif now - last >= limit:
+                blockers[key] = self.errors.get(key, f'Last valid update was {now - last:.2f} s ago')
+        if self.motion is not None and (not self.nav2_ready or self.conflict):
+            blockers['nav2'] = self.errors.get('nav2', 'Waiting for Nav2 actions and velocity_guard')
+        elif self.conflict:
+            blockers['cmd'] = self.errors.get('cmd', 'Velocity command topic conflict')
+        return blockers
+
     def ready(self):
-        now=time.monotonic()
-        return not self.conflict and (self.motion is None or self.nav2_ready) and all(now-self.gate.fresh.get(key,-math.inf)<limit for key,limit in [('scan',.6),('odom',.6),('tf',.6),('map',15),('camera',2)])
+        return not self.readiness_blockers()
     def timer(self):
         try:
             T=self.lookup(self.args.map_frame,self.args.base_frame)
@@ -240,10 +260,15 @@ class ROSAdapter:
                 self.last_graph_check=time.monotonic()
                 if self.motion is not None:
                     guards=self.node.get_publishers_info_by_topic('/cmd_vel')
-                    self.nav2_ready=self.motion.ready() and any(p.node_name=='velocity_guard' for p in guards)
-                    self.conflict=any(p.node_name!='velocity_guard' for p in guards)
-                    if not self.nav2_ready or self.conflict:
-                        self.error('nav2','Waiting for Nav2 actions and the sole velocity_guard publisher')
+                    self.nav2_ready = self.motion.ready() and len(guards) == 1 and guards[0].node_name == 'velocity_guard'
+                    self.conflict = len(guards) > 1 or any(p.node_name != 'velocity_guard' for p in guards)
+                    if self.conflict:
+                        publishers = ', '.join(f'{p.node_namespace.rstrip("/")}/{p.node_name}' for p in guards)
+                        self.error('nav2', f'Conflicting /cmd_vel publishers: {publishers}')
+                    elif not guards:
+                        self.error('nav2', 'No velocity_guard publisher on /cmd_vel')
+                    elif not self.nav2_ready:
+                        self.error('nav2', 'Waiting for /navigate_to_pose and /spin action servers')
                     else:
                         self.errors.pop('nav2',None)
                 else:
@@ -254,10 +279,17 @@ class ROSAdapter:
                     expected='geometry_msgs/msg/TwistStamped' if self.args.cmd_type=='stamped' else 'geometry_msgs/msg/Twist'
                     if any(t!=expected for t in types):self.conflict=True;self.error('cmd','Command message type mismatch')
         except Exception as e:self.gate.fresh.pop('tf',None);self.error('tf',e)
-        if self.motion is not None and not self.ready():
+        blockers = self.readiness_blockers() if self.motion is not None else {}
+        if blockers:
             self.motion.cancel()
             if self.interior is not None:
                 self.interior.pause()
+            if self.mission is not None and self.mission.first_sim_time is not None:
+                now = time.monotonic()
+                if now >= self.next_pause_notice:
+                    details = ', '.join(f'{key} ({reason})' for key, reason in blockers.items())
+                    self.node.get_logger().warn(f'Navigation paused, waiting for {details}')
+                    self.next_pause_notice = now + 5.0
         if not self.closed:
             self.update_marker_speed_limit(time.monotonic())
         if self.pub:

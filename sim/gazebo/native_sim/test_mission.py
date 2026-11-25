@@ -55,6 +55,18 @@ class MissionTests(unittest.TestCase):
         g=Grid();x,y=g.cell(1,0);g.log[y-5:y+6,x-2:x+3]=4
         path=g.plan((0,0),(2,0),(-4,4,-4,4));self.assertTrue(path)
         self.assertGreater(max(abs(y) for x,y in path),.6)
+    def test_reachable_goal_leaves_an_unobserved_chassis_cell_into_known_space(self):
+        grid = Grid()
+        x, y = grid.cell(3.0, 3.0)
+        grid.log[y-4:y+5, x-4:x+13] = -4
+        grid.log[y, x] = 0
+        start = grid.xy((x, y))
+        goal = tuple(grid.xy((x+10, y)))
+        self.assertEqual(grid.cell_status(start), 'unknown')
+        self.assertEqual(grid.reachable_goal(start, goal), goal)
+        self.assertEqual(grid.cell_status(start), 'unknown')
+        grid.log[y, x] = 4
+        self.assertIsNone(grid.reachable_goal(start, goal))
     def test_third_confirmed_id_cancels_patrol_and_starts_visits(self):
         m=self.stub();m.state='PATROL';m.pose=(0,0,0)
         stops=[];m.command=lambda *a:stops.append(a)

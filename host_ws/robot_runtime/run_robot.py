@@ -55,16 +55,23 @@ def load_config(ap, args, *, require_room_size=True):
 
 def wait_for_inputs(adapter, args, mission=None):
     deadline = time.monotonic() + args.timeout
+    next_report = 0.0
     while (mission is None or mission.running) and time.monotonic() < deadline:
-        if adapter.ready():
+        blockers = adapter.readiness_blockers()
+        if not blockers:
             inputs = ['scan', 'odom', 'camera', 'camera_info', 'map', 'TF']
             if args.nav2:
                 inputs += ['Nav2', 'velocity_guard']
             print(json.dumps({'ready': True, 'motion_enabled': mission is not None,
                               'inputs': inputs, 'version': args.version}), flush=True)
             return True
+        now = time.monotonic()
+        if now >= next_report:
+            print(json.dumps({'event': 'waiting_for_startup', 'blockers': blockers}), flush=True)
+            next_report = now + 5.0
         time.sleep(.1)
     print(json.dumps({'ready': False, 'motion_enabled': False,
+                      'blockers': adapter.readiness_blockers(),
                       'errors': adapter.errors.copy(), 'received': list(adapter.gate.fresh)}), flush=True)
     return False
 

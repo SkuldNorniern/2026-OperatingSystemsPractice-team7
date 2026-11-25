@@ -67,7 +67,19 @@ pub struct View {
 #[derive(Debug, Default, Clone)]
 pub struct Coverage {
     seen: std::collections::HashSet<(i64, i64)>,
+    /// per seen cell: bit k set when the camera has seen it from direction bin k (see `bin_of`)
+    bins: std::collections::HashMap<(i64, i64), u8>,
     res: f64,
+}
+
+/// Direction bin of a camera seen from a wall cell. `a` is the ray heading (the direction the camera
+/// looks, from camera to wall), so the direction from the cell to the camera is `a + PI`.
+/// Bin k covers [k * 45, (k + 1) * 45) degrees, counted counter-clockwise from +x (east, +y north):
+/// bin 0 = camera to the east of the cell, bin 2 = north, bin 4 = west, bin 6 = south.
+/// Bin edges sit on multiples of 45 degrees, so a camera exactly due east straddles bins 7 and 0.
+fn bin_of(a: f64) -> usize {
+    let to_cam = (a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
+    ((to_cam / (std::f64::consts::PI / 4.0)) as usize) % 8
 }
 
 impl Coverage {
@@ -89,6 +101,26 @@ impl Coverage {
         }
         let (x, y) = g.cell_to_world(c);
         self.seen.contains(&self.key(x, y))
+    }
+
+    /// bit mask of direction bins this cell has been seen from (bit k = bin k, see `bin_of`)
+    fn bin_mask(&self, g: &Grid, c: Cell) -> u8 {
+        if self.res <= 0.0 {
+            return 0;
+        }
+        let (x, y) = g.cell_to_world(c);
+        self.bins.get(&self.key(x, y)).copied().unwrap_or(0)
+    }
+
+    /// number of distinct direction bins (0 to 8) this cell has been seen from
+    pub fn bins_seen(&self, g: &Grid, c: Cell) -> u8 {
+        self.bin_mask(g, c).count_ones() as u8
+    }
+
+    /// direction bins (0 to 7, 45 degrees each) this cell has not been seen from yet
+    pub fn unseen_bins(&self, g: &Grid, c: Cell) -> Vec<usize> {
+        let m = self.bin_mask(g, c);
+        (0..8usize).filter(|&k| (m & (1u8 << k)) == 0).collect()
     }
 
     /// mark wall cells the camera sees from pose (x, y, yaw)
@@ -119,6 +151,7 @@ impl Coverage {
                 }
                 let k = self.key(hx, hy);
                 self.seen.insert(k);
+                *self.bins.entry(k).or_insert(0) |= 1u8 << bin_of(a);
             }
         }
     }
@@ -371,5 +404,86 @@ mod tests {
         let ahead = (v.x + 1.2 * v.yaw.cos(), v.y + 1.2 * v.yaw.sin());
         let near_wall = ahead.0 > 5.7 || ahead.0 < 0.3 || ahead.1 > 3.7 || ahead.1 < 0.3;
         assert!(near_wall, "{v:?}");
+    }
+
+    #[test]
+    fn bin_sign_convention() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        // ray heading west (PI): the camera is east of the cell -> bin 0
+        assert_eq!(bin_of(PI), 0);
+        assert_eq!(bin_of(PI + 0.1), 0);
+        // ray heading south (-PI/2): the camera is north of the cell -> bin 2
+        assert_eq!(bin_of(-FRAC_PI_2), 2);
+        // ray heading east (0): the camera is west -> bin 4
+        assert_eq!(bin_of(0.0), 4);
+        // just below the 0-degree edge (direction to camera about -6 deg) is bin 7, not bin 0
+        assert_eq!(bin_of(PI - 0.1), 7);
+    }
+
+    /// solid 11 x 11 cell block at cells 10..=20 in a 6 x 4 m free grid; cell (20, 20) is its NE corner
+    fn corner_block() -> Grid {
+        let meta = GridMeta { width: 120, height: 80, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, 0);
+        for y in 10..=20 {
+            for x in 10..=20 {
+                g.set(Cell { x, y }, 100);
+            }
+        }
+        g
+    }
+
+    /// camera 1 m away from the NE corner, heading at it: `yaw` is the heading, the camera sits behind
+    /// the corner on the line through it. Headings of 202.5 deg (camera east-north-east of the corner, so
+    /// the ray direction from the wall is bin 0) and -67.5 deg (camera north-north-west, bin 2) sit in
+    /// the middle of their bins, so the small fan used here stays in one bin.
+    fn pose_towards_corner(g: &Grid, yaw: f64) -> (f64, f64, f64) {
+        let t = g.cell_to_world(Cell { x: 20, y: 20 });
+        (t.0 - yaw.cos(), t.1 - yaw.sin(), yaw)
+    }
+
+    #[test]
+    fn wall_cell_records_the_bins_it_is_seen_from() {
+        let g = corner_block();
+        let corner = Cell { x: 20, y: 20 };
+        let p = CoverageParams { range: 4.0, half_fov: 0.02, cam_offset: 0.0, ..Default::default() };
+        let east = pose_towards_corner(&g, 202.5f64.to_radians());
+        let north = pose_towards_corner(&g, -67.5f64.to_radians());
+
+        let mut cov = Coverage::new();
+        assert_eq!(cov.bins_seen(&g, corner), 0);
+        cov.update(&g, east, &p);
+        assert!(cov.is_seen(&g, corner), "the corner is seen from the east");
+        assert_eq!(cov.bins_seen(&g, corner), 1);
+        assert!(!cov.unseen_bins(&g, corner).contains(&0), "bit 0 (east) is set");
+
+        cov.update(&g, north, &p);
+        assert_eq!(cov.bins_seen(&g, corner), 2);
+        assert_eq!(cov.unseen_bins(&g, corner), vec![1, 3, 4, 5, 6, 7], "bits 0 and 2 set");
+
+        // the same side again adds no bin
+        cov.update(&g, north, &p);
+        cov.update(&g, east, &p);
+        assert_eq!(cov.bins_seen(&g, corner), 2);
+        assert_eq!(cov.unseen_bins(&g, corner), vec![1, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn cells_never_seen_have_no_bins() {
+        let g = corner_block();
+        let p = CoverageParams { range: 4.0, half_fov: 0.02, cam_offset: 0.0, ..Default::default() };
+        let mut cov = Coverage::new();
+        cov.update(&g, pose_towards_corner(&g, 202.5f64.to_radians()), &p);
+        cov.update(&g, pose_towards_corner(&g, -67.5f64.to_radians()), &p);
+        // the far (south-west) corner of the block faces away from both cameras
+        let back = Cell { x: 10, y: 10 };
+        assert!(!cov.is_seen(&g, back));
+        assert_eq!(cov.bins_seen(&g, back), 0);
+        assert_eq!(cov.unseen_bins(&g, back), (0..8).collect::<Vec<_>>());
+        // free space never has bins
+        let free = Cell { x: 60, y: 40 };
+        assert_eq!(cov.bins_seen(&g, free), 0);
+        assert_eq!(cov.unseen_bins(&g, free).len(), 8);
+        // and nothing is recorded before any update
+        assert_eq!(Coverage::new().bins_seen(&g, Cell { x: 20, y: 20 }), 0);
     }
 }

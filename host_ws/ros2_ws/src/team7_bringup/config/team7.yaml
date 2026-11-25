@@ -68,7 +68,7 @@ explorer:
     blacklist_duration: 45.0
     blacklist_max_duration: 300.0  # s, ban doubles per failure at one spot (183647 replay cycled 3 failing goals)
     abort_ban_radius: 1.0      # m, a goal the navigator aborts (no path / blocked) bans frontiers and views this close
-    abort_ban_duration: 120.0  # s, for this long (live 2026-11-25: frontiers outside the glass, picked one after another)
+    abort_ban_duration: 600.0  # s, the whole run: glass does not move, and after 120 s the robot went back to it
     abort_ban_max_radius: 3.0  # m, aborts close together grow the zone (1, 2, 3 m); frontiers only, never camera views: live 2026-11-25 nine aborts outside the
                                # glass, each next frontier just past the last 2 m disc
     turn_weight: 0.5

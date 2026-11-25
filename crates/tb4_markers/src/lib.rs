@@ -544,9 +544,7 @@ impl Tracker {
             && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
             && (!p.require_scale_all || self.scale_consistent(id));
         // camera-only: no wall support, but the bearings of many views cross wide apart (not for strict ids)
-        // a size learned from wall hits must agree across views (decoy 103 learned 2.03 from 22 scaled views, inconsistent)
         let cam_ok = p.pnp_only_spread > 0.0 && !p.strict_ids.contains(&id)
-            && (self.scale(id).is_none() || self.scale_consistent(id))
             && tri.is_some_and(|t| t.spread >= p.pnp_only_spread);
         Some(Target {
             id,

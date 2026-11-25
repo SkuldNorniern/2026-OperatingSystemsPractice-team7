@@ -125,6 +125,21 @@ def sourced_command(install, command):
     return ['bash', '-ec', 'source "$1"; shift; exec "$@"', Path(command[0]).name, str(install), *command]
 
 
+def live_ros_environment(checkout):
+    env = os.environ.copy()
+    # Match run_demo.sh's live-domain rule, even after running a replay in this shell.
+    env['TB4_DOMAIN'] = env.get('TB4_DOMAIN') or '0'
+    env['ROS_DOMAIN_ID'] = env['TB4_DOMAIN']
+    env['RMW_IMPLEMENTATION'] = env.get('RMW_IMPLEMENTATION') or 'rmw_fastrtps_cpp'
+    # Match the DDS transport used by the demo when the robot cable is connected.
+    addresses = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
+                               capture_output=True, text=True, check=True).stdout
+    if any('inet 192.168.185.10/' in line for line in addresses.splitlines()):
+        env['FASTRTPS_DEFAULT_PROFILES_FILE'] = str(
+            checkout / WORKSPACE / 'src/team7_bringup/config/fastdds_wired.xml')
+    return env
+
+
 def start_rviz_fallback(processes, install, share, folder, env):
     command = sourced_command(install, ['ros2', 'run', 'rviz2', 'rviz2', '-d', str(share / 'rviz/stock.rviz')])
     print('Opening RViz after team7_viz failed. See team7_viz.log.', flush=True)
@@ -224,16 +239,7 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
         command.append(f'marker_size:={args.marker_size}')
     v1 = [sys.executable, '-u', str(Path(__file__).with_name('run_robot.py')),
           *mission_args, '--nav2', '--marker-slowdown', '--output-dir', str(folder / 'mission')]
-    env = os.environ.copy()
-    env['TB4_DOMAIN'] = env.get('TB4_DOMAIN') or env.get('ROS_DOMAIN_ID') or '0'
-    env['ROS_DOMAIN_ID'] = env['TB4_DOMAIN']
-    env['RMW_IMPLEMENTATION'] = env.get('RMW_IMPLEMENTATION') or 'rmw_fastrtps_cpp'
-    # The original script configures wired DDS itself. Both processes must use it.
-    addresses = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
-                               capture_output=True, text=True, check=True).stdout
-    if any('inet 192.168.185.10/' in line for line in addresses.splitlines()):
-        env['FASTRTPS_DEFAULT_PROFILES_FILE'] = str(
-            checkout / 'host_ws/ros2_ws/src/team7_bringup/config/fastdds_wired.xml')
+    env = live_ros_environment(checkout)
 
     from bringup_config import prepare_bringup
     overlay = folder / 'bringup_overlay'
@@ -264,6 +270,8 @@ exec "$@"
     log_threads = []
     try:
         print(f'Run outputs: {folder}', flush=True)
+        print(f'V1 ROS environment: ROS_DOMAIN_ID={env["ROS_DOMAIN_ID"]} '
+              f'RMW_IMPLEMENTATION={env["RMW_IMPLEMENTATION"]}', flush=True)
         if show_map and viewer is None:
             print('Opening RViz with the V1 map configuration.', flush=True)
         stack, stack_log = start_logged(processes, command, checkout, folder / 'stack.log', env)

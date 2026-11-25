@@ -287,6 +287,9 @@ pub struct TrackParams {
     /// bearings spread at least this (rad) and cross within max_triangulation_gap confirm it. Not for
     /// strict ids (they need a learned size). 0 = off.
     pub pnp_only_spread: f64,
+    /// consistency limit for camera-only confirmations (no wall views): their scatter is a little higher
+    /// than wall-backed views (live marker 5: 12.5-13.4). Decoy 103 sits at 16.
+    pub pnp_only_max_consistency: f64,
 }
 
 impl Default for TrackParams {
@@ -298,6 +301,7 @@ impl Default for TrackParams {
             min_triangulation_spread: 0.2,
             max_triangulation_gap: 0.3,
             pnp_only_spread: 0.0,
+            pnp_only_max_consistency: 14.0,
             strict_ids: Vec::new(),
             require_scale_all: false,
             max_spread: 0.08,
@@ -540,7 +544,9 @@ impl Tracker {
             && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
             && (!p.require_scale_all || self.scale_consistent(id));
         // camera-only: no wall support, but the bearings of many views cross wide apart (not for strict ids)
+        // a size learned from wall hits must agree across views (decoy 103 learned 2.03 from 22 scaled views, inconsistent)
         let cam_ok = p.pnp_only_spread > 0.0 && !p.strict_ids.contains(&id)
+            && (self.scale(id).is_none() || self.scale_consistent(id))
             && tri.is_some_and(|t| t.spread >= p.pnp_only_spread);
         Some(Target {
             id,
@@ -552,7 +558,7 @@ impl Tracker {
                 && (wall_ok || cam_ok)
                 && (p.min_triangulation_spread <= 0.0 || tri.is_some_and(|t| t.spread >= p.min_triangulation_spread))
                 && f.sigma <= loose * p.max_spread
-                && f.consistency <= loose * p.max_consistency,
+                && f.consistency <= loose * if wall_ok { p.max_consistency } else { p.pnp_only_max_consistency },
         })
     }
 

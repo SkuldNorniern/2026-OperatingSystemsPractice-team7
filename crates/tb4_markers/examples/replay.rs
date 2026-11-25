@@ -117,6 +117,7 @@ fn main() {
     if let Some(v) = env("edge_triangulation_gap").and_then(|v| v.parse().ok()) { tp.edge_triangulation_gap = v; }
     if let Some(v) = env("edge_ratio_gate").and_then(|v| v.parse().ok()) { tp.edge_ratio_gate = v; }
     if let Some(v) = env("pnp_only_spread").and_then(|v| v.parse().ok()) { tp.pnp_only_spread = v; }
+    if let Some(v) = env("pnp_only_max_consistency").and_then(|v| v.parse().ok()) { tp.pnp_only_max_consistency = v; }
     if let Some(v) = env("strict_ids").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<i64>>()) { tp.strict_ids = v; }
     let mut tr = Tracker::new(tp);
     let mut first_confirm: BTreeMap<i64, usize> = BTreeMap::new();
@@ -135,6 +136,9 @@ fn main() {
         let f = fuse(est);
         println!("id {:3}: ({:.3}, {:.3}) {} views of {} obs (ray {r} pnp {n} scaled {k}) scale {:?} sigma {:.3} consistency {:.2} confirmed {} first at obs {:?}",
             t.id, t.x, t.y, t.views, per_id[&t.id], tr.scale(t.id).map(|s| (s * 1000.0).round() / 1000.0), f.sigma, f.consistency, t.confirmed, first_confirm.get(&t.id));
+        if !t.confirmed {
+            println!("         still failing: {}", tr.pending(t.id).join(", "));
+        }
         if std::env::var("VIEWS").is_ok() {
             for e in est {
                 println!("         view {:?} ({:.3}, {:.3}) dir ({:.3}, {:.3}) along {:.3} across {:.3}", e.source, e.x, e.y, e.dir.0, e.dir.1, e.sigma_along, e.sigma_across);

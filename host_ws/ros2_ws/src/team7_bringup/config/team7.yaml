@@ -94,7 +94,8 @@ explorer:
     min_free_fraction: 0.5    # skip frontiers whose free side is a thin spike (lidar beams through chair legs);
                               # sim 3 seeds x 2 worlds: all 3 targets confirmed 6/6 vs 4/6 without
     look_around_turns: 3      # 120 deg in-place turns when nothing is left to explore (start deadlock), 0 = off
-    retry_delay: 5.0          # s, wait after a failed or cancelled goal; a success chains on at once
+    retry_delay: 1.0          # s, wait after a failed goal (live 2026-11-25: 5 s stops after every NoPath abort; the abort ban zone
+                              # keeps the next goal away from the bad area, so no need to wait for the map)
     # approach on sight: a marker marker_mapper holds but has not confirmed (/team7/marker_approach) is looked at
     # from approach_standoff in front and +-approach_spread around its facing direction, before any frontier or
     # camera view; stops as soon as it is confirmed. A decoy is given up after the timeout, max_failures failed
@@ -173,8 +174,8 @@ navigator:
     scan_topic: /scan
     odom_topic: /odom
     robot_radius: 0.18
-    safety_margin: 0.0615      # planner lethal radius 0.2415 m (+5 % from 0.23): gaps under ~0.48 m are not planned through
-                               # (live 2026-11-25: goals behind half-blocked openings ran into the timeout). MPPI keeps robot_radius
+    safety_margin: 0.0546      # planner lethal radius 0.2346 m (+2 % from 0.23): gaps under ~0.47 m are not planned through
+                               # (live 2026-11-25: goals behind half-blocked openings ran into the timeout; +5 % was too much). MPPI keeps robot_radius
     cost_scaling_dist: 0.5
     cost_weight: 2.0
     allow_unknown: true

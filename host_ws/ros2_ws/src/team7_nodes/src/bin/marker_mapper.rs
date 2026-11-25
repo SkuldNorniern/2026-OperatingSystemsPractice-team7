@@ -27,6 +27,8 @@ struct State {
     /// chair-barcode ids (ARUCO_ORIGINAL 0, 341, 682, 1023): never approached on sight, they only confirm
     /// from a wall with a learned size
     approach_ignore: Vec<i64>,
+    /// barcode-like ids: counted and confirmed by the wall rules, but never approached on sight
+    barcode_ids: Vec<i64>,
     csv_path: PathBuf,
     last_csv: String,
     out_dir: PathBuf,
@@ -105,6 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             map_frame: p.string("map_frame", "map"),
             ignore_ids: p.i64_list("ignore_ids"),
             approach_ignore: p.i64_list("approach_ignore_ids"),
+            barcode_ids: tb4_aruco::Dictionary::by_name(&p.string("marker_dict", "ARUCO_ORIGINAL"))
+                .map(|d| d.barcode_ids(p.i64("barcode_max_flips", 1) as u32))
+                .unwrap_or_default(),
             csv_path: out_dir.join(p.string("csv_name", "targets.csv")),
             last_csv: String::new(),
             out_dir: out_dir.clone(),
@@ -276,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let approach = MarkerArray {
             markers: targets
                 .iter()
-                .filter(|t| !t.confirmed && t.views >= 2 && !s.approach_ignore.contains(&t.id))
+                .filter(|t| !t.confirmed && t.views >= 2 && !s.approach_ignore.contains(&t.id) && !s.barcode_ids.contains(&t.id))
                 .filter_map(|t| {
                     let yaw = s.tracker.facing(t.id, s.grid.as_ref(), s.locate.occupied_threshold)?;
                     let mut m = team7_nodes::viz::base(&s.map_frame, "tentative", t.id as i32, team7_nodes::viz::SPHERE);

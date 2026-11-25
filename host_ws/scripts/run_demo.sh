@@ -135,7 +135,7 @@ prepare_live() {
   RUN_DIR=${RUN_DIR/#\~\//$HOME/}
   mkdir -p "$RUN_DIR/config"
   RUN_DIR=$(cd "$RUN_DIR" && pwd)
-  cp "$WS/src/team7_bringup/config/"* "$RUN_DIR/config/"
+  cp -r "$WS/src/team7_bringup/config/." "$RUN_DIR/config/"
   export ROS_LOG_DIR="$RUN_DIR/ros_logs"
   {
     date -u

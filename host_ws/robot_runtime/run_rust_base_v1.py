@@ -180,7 +180,9 @@ def run_demo(args, cfg, stack_args, mission_args, processes):
     # Dock actions can move the base independently of the forward-only velocity guard.
     command = ['bash', str(demo), '--no-prepare']
     stack_output = folder / 'rust_base'
-    command += ['explorer:=none', 'mission:=false', 'nav:=nav2', 'slam_backend:=toolbox', 'aruco:=opencv',
+    # V1 builds the ROS stack without rust_base's optional team7_viz package.
+    command += ['explorer:=none', 'mission:=false', 'viewer:=false',
+                'nav:=nav2', 'slam_backend:=toolbox', 'aruco:=opencv',
                 f'marker_dict:={cfg["dictionary"].removeprefix("DICT_")}',
                 f'output_dir:={stack_output}',
                 f'record:={str(args.execute and not stack_args.no_record).lower()}',

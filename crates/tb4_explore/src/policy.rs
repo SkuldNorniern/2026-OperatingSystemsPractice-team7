@@ -937,7 +937,7 @@ mod tests {
         let base = e.params().abort_ban_radius;
         let g = map();
         let r = Pose2::new(1.0, 1.0, 0.0);
-        let mut abort = |e: &mut ExplorerPolicy, at: (f64, f64), t: f64| {
+        let abort = |e: &mut ExplorerPolicy, at: (f64, f64), t: f64| {
             e.active = Some(Active {
                 goal: at, kind: GoalKind::Frontier, frontier_missing: 0, view_target: None, approach: None,
                 accepted: true, started: t, progress_pose: (r.x, r.y, r.yaw), last_progress: t, closest: 9.0,
@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(radii, vec![base, 2.0 * base, 3.0 * base]);
         // far away: the base radius again
         abort(&mut e, (-20.0, -20.0), 4.0);
-        assert_eq!(e.banned().iter().filter(|b| b.2).map(|b| b.1).last(), Some(base));
+        assert_eq!(e.banned().iter().filter(|b| b.2).map(|b| b.1).next_back(), Some(base));
     }
 
     #[test]

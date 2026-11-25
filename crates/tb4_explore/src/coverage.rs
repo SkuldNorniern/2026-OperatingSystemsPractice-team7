@@ -63,6 +63,9 @@ pub struct View {
     pub distance: f64,
 }
 
+/// world xy points
+pub type Points = Vec<(f64, f64)>;
+
 /// which occupied cells have been inside the camera view, kept in world coordinates so the map can grow
 #[derive(Debug, Default, Clone)]
 pub struct Coverage {
@@ -193,7 +196,7 @@ impl Coverage {
     }
 
     /// wall cells of `g` (occupied, next to free space), as (seen, not seen) by the camera, world xy
-    pub fn wall_split(&self, g: &Grid, occupied_threshold: i8) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    pub fn wall_split(&self, g: &Grid, occupied_threshold: i8) -> (Points, Points) {
         let (w, h) = (g.meta.width as i64, g.meta.height as i64);
         let free = |c: Cell| (0..occupied_threshold).contains(&g.get(c));
         let (mut seen, mut unseen) = (Vec::new(), Vec::new());

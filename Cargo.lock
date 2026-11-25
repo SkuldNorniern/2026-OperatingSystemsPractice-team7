@@ -604,6 +604,7 @@ dependencies = [
 name = "tb4_markers"
 version = "0.1.0"
 dependencies = [
+ "tb4_aruco",
  "tb4_core",
 ]
 
@@ -622,6 +623,7 @@ version = "0.1.0"
 name = "tb4_sim"
 version = "0.1.0"
 dependencies = [
+ "tb4_aruco",
  "tb4_control",
  "tb4_core",
  "tb4_explore",

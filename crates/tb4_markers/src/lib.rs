@@ -293,6 +293,9 @@ pub struct TrackParams {
     /// for a confirmed marker: fuse only the views whose bearing passes within this distance (m) of the
     /// fused position (a real marker's rays all point at it; a view off the marker is left out). 0 = off.
     pub ray_agree_m: f64,
+    /// robust ray intersection: bearing lines that miss the intersection by more than this (m) are dropped,
+    /// one at a time (a reflection or a wrong bearing pulls the plain intersection away). 0 = plain intersection.
+    pub ray_resid_m: f64,
 }
 
 impl Default for TrackParams {
@@ -306,6 +309,7 @@ impl Default for TrackParams {
             pnp_only_spread: 0.0,
             pnp_only_max_consistency: 14.0,
             ray_agree_m: 0.0,
+            ray_resid_m: 0.0,
             strict_ids: Vec::new(),
             require_scale_all: false,
             max_spread: 0.08,
@@ -541,7 +545,8 @@ impl Tracker {
         let loose = if self.sticky.contains(&id) { 2.0 } else { 1.0 };
         let p = &self.params;
         let wall = v.iter().filter(|e| e.source == Source::Raycast).count();
-        let tri = triangulate(v).filter(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap);
+        let raw = if p.ray_resid_m > 0.0 { triangulate_robust(v, p.ray_resid_m) } else { triangulate(v) };
+        let tri = raw.filter(|t| (t.x - f.x).hypot(t.y - f.y) <= loose * p.max_triangulation_gap);
         // lidar-backed: enough wall views, and every id that needs it has a consistent learned size
         let wall_ok = wall >= p.min_wall_views && wall as f64 >= p.min_wall_fraction * v.len() as f64
             && (!p.strict_ids.contains(&id) || self.scale(id).is_some())
@@ -710,6 +715,27 @@ pub struct Triangulated {
 /// distance (m) from point `p` to the line through a view's estimate along its bearing
 pub fn perp_dist(e: &Estimate, p: (f64, f64)) -> f64 {
     ((p.0 - e.x) * e.dir.1 - (p.1 - e.y) * e.dir.0).abs()
+}
+
+/// plain intersection, then drop the worst bearing line while one misses by more than `max_resid` (m),
+/// keeping at least 3 lines. Range errors slide points along their line, so they do not move the intersection.
+pub fn triangulate_robust(v: &[Estimate], max_resid: f64) -> Option<Triangulated> {
+    let mut keep: Vec<Estimate> = v.to_vec();
+    loop {
+        let t = triangulate(&keep)?;
+        let (worst, resid) = keep
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i, perp_dist(e, (t.x, t.y))))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        if resid <= max_resid {
+            return Some(t);
+        }
+        if keep.len() <= 3 {
+            return None;
+        }
+        keep.remove(worst);
+    }
 }
 
 pub fn triangulate(v: &[Estimate]) -> Option<Triangulated> {

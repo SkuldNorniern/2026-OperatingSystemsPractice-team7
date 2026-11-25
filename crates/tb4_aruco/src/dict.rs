@@ -40,6 +40,15 @@ impl Dictionary {
 
     /// OpenCV name with or without `DICT_`, any case: `ARUCO_ORIGINAL`, `4X4_50` .. `7X7_1000`,
     /// `APRILTAG_16H5`, `APRILTAG_25H9`, `APRILTAG_36H10`, `APRILTAG_36H11`
+    /// ids whose bit pattern looks like a barcode label (few stripes, see `stripe_flips`): computed from the
+    /// dictionary, not a fixed list. For ARUCO_ORIGINAL these are the codes with rows (or columns) all equal.
+    pub fn barcode_ids(&self, max_flips: u32) -> Vec<i64> {
+        (0..self.codes.len())
+            .filter(|&i| crate::detect::stripe_flips(self.codes[i], self.bits) <= max_flips)
+            .map(|i| i as i64)
+            .collect()
+    }
+
     pub fn by_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_uppercase();
         let name = name.strip_prefix("DICT_").unwrap_or(&name);
@@ -312,5 +321,18 @@ mod tests {
             .filter(|&i| d.identify(d.codes[i as usize], 0).unwrap().id == i)
             .count();
         assert!(self_ok >= 1022, "{self_ok}");
+    }
+}
+
+#[cfg(test)]
+mod barcode_tests {
+    use super::Dictionary;
+
+    #[test]
+    fn barcode_ids_are_computed_from_the_codes() {
+        let d = Dictionary::by_name("ARUCO_ORIGINAL").unwrap();
+        // the four barcode-like codes of ARUCO_ORIGINAL, from the bits alone (no list)
+        assert_eq!(d.barcode_ids(0), vec![0, 341, 682, 1023]);
+        assert_eq!(d.barcode_ids(1), vec![0, 341, 682, 1023]);
     }
 }

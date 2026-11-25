@@ -22,8 +22,8 @@ marker_mapper:
     min_triangulation_spread: 0.2   # rad; views must spread this far before confirming, and their bearings'
     max_triangulation_gap: 0.3      # m intersection must agree with the fused position (labels in front of a wall fail)
     min_range: 0.3            # m, ignore hits / pnp ranges closer to the camera (robot's own cells)
-    strict_ids: [0, 341, 682, 1023]  # ARUCO_ORIGINAL codes with all rows equal (= chair barcode labels): these
-                              # also need a learned marker size from clean wall hits (label 1023 had none)
+    strict_ids: []           # empty: computed from the dictionary's barcode-like ids (barcode_max_flips)
+    barcode_max_flips: 1     # stripe flips at most this -> barcode-like (ARUCO_ORIGINAL: 0, 341, 682, 1023)
     require_scale_all: true   # every id needs a consistent learned size (wall range vs pnp agree across views). Sim
                               # (approach on, 12 runs): all 3 confirmed 11/12 vs 10/12 without, 0 decoys; closes the
                               # case of a mid-air sticker confirmed after approach views (1 of 30 runs)
@@ -42,6 +42,10 @@ marker_mapper:
     edge_ratio_gate: 1.5      # ray hit near end of a surface (box face) needs ray/pnp within this factor until scale is learned
     edge_triangulation_gap: 0.15  # m, edge hit where earlier bearings cross is on the face: teaches the scale (spec: marker sizes differ)
     ignore_ids: [-1]
+    # camera-only confirmation (0 = off): a marker with no lidar wall hit confirms from views whose bearings
+    # spread >= 0.35 rad and cross within max_triangulation_gap. Offline on 10 saved runs: +1 real (marker 5, run
+    # 152437), no false confirmations (decoys 0/103/703/1023 stay unconfirmed; 0 and 1023 are strict, always excluded)
+    pnp_only_spread: 0.35
     slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
     slow_percent: 75.0
     slow_hold: 2.5
@@ -52,7 +56,8 @@ explorer:
     map_frame: map
     base_frame: base_link
     period: 1.0
-    goal_timeout: 120.0
+    goal_timeout: 75.0       # s per goal; above the navigator's 60 s so the navigator's limit applies
+    approach_budget: 180.0   # s of approach trips for the whole run (3 min of marker search, per the task); 0 = no limit
     progress_timeout: 15.0    # s without 0.1 m of movement: give the goal up (field runs lost 30 s per stuck goal)
     progress_epsilon: 0.1
     blacklist_duration: 45.0
@@ -169,7 +174,7 @@ navigator:
     allow_unknown: true
     goal_tolerance: 0.3
     replan_period: 2.0
-    goal_timeout: 90.0
+    goal_timeout: 60.0       # s per goal: a view or frontier that takes longer is cancelled (the explorer progress check cancels stuck goals at 15 s)
     smooth_iterations: 2
     use_scan_obstacles: true
     mppi_samples: 1000

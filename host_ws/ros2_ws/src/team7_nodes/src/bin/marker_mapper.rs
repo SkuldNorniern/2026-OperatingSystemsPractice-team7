@@ -68,7 +68,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_wall_fraction: p.f64("min_wall_fraction", 0.25),
             min_triangulation_spread: p.f64("min_triangulation_spread", 0.2),
             max_triangulation_gap: p.f64("max_triangulation_gap", 0.3),
-            strict_ids: p.i64_list("strict_ids"),
+            // barcode-like ids of the marker dictionary (computed, not a list); a yaml list overrides it
+            strict_ids: {
+                let listed = p.i64_list("strict_ids");
+                if listed.is_empty() {
+                    tb4_aruco::Dictionary::by_name(&p.string("marker_dict", "ARUCO_ORIGINAL"))
+                        .map(|d| d.barcode_ids(p.i64("barcode_max_flips", 1) as u32))
+                        .unwrap_or_default()
+                } else {
+                    listed
+                }
+            },
             require_scale_all: p.bool("require_scale_all", true),
             max_spread: p.f64("max_spread", 0.08),
             max_consistency: p.f64("max_consistency", 3.0),

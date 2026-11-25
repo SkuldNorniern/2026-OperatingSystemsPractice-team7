@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // every frame with a marker gets its box on screen: the detections are counted on every frame, so a
         // debug image only every debug_every frames showed the count rising with no box
         if debug_every > 0 && (s.frames % debug_every == 0 || !s.markers.is_empty()) {
-            let _ = dbg_pub.publish(&debug_image_color(s.rgb.as_ref(), &s.img, &s.markers, header));
+            let _ = dbg_pub.publish(&debug_image_color(s.rgb.take(), &s.img, &s.markers, header));
         }
     };
 
@@ -158,10 +158,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut guard = st.borrow_mut();
             let s = &mut *guard;
             let (w, h, step) = (m.width as usize, m.height as usize, m.step as usize);
+            // colour kept for the debug view, so the box is green on this transport too
             let ok = match m.encoding.as_str() {
-                "mono8" => s.img.set_mono8(w, h, step, &m.data),
-                "bgr8" => s.img.set_color(w, h, step, &m.data, true),
-                "rgb8" => s.img.set_color(w, h, step, &m.data, false),
+                "mono8" => {
+                    s.rgb = None;
+                    s.img.set_mono8(w, h, step, &m.data)
+                }
+                "bgr8" => {
+                    s.rgb = rgb_from_raw(w, h, step, &m.data, true);
+                    s.img.set_color(w, h, step, &m.data, true)
+                }
+                "rgb8" => {
+                    s.rgb = rgb_from_raw(w, h, step, &m.data, false);
+                    s.img.set_color(w, h, step, &m.data, false)
+                }
                 _ => false,
             };
             if ok {
@@ -186,6 +196,24 @@ fn decode_jpeg_gray(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     let info = dec.info()?;
     let (w, h) = (info.width as usize, info.height as usize);
     (gray.len() == w * h).then_some((w, h, gray))
+}
+
+/// raw bgr8/rgb8 frame to tightly packed rgb, for the debug view only (detection stays on gray)
+fn rgb_from_raw(w: usize, h: usize, step: usize, data: &[u8], bgr: bool) -> Option<(usize, usize, Vec<u8>)> {
+    if h > 0 && (step < w * 3 || data.len() < (h - 1) * step + w * 3) {
+        return None;
+    }
+    let mut px = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for p in data[y * step..y * step + w * 3].chunks_exact(3) {
+            if bgr {
+                px.extend_from_slice(&[p[2], p[1], p[0]]);
+            } else {
+                px.extend_from_slice(p);
+            }
+        }
+    }
+    Some((w, h, px))
 }
 
 /// colour decode of the same JPEG, for the debug view only (detection stays on gray)
@@ -233,35 +261,24 @@ fn draw_label(put: &mut dyn FnMut(f64, f64, [u8; 3]), x0: i64, y0: i64, text: &s
     }
 }
 
-/// colour debug view, scaled 2x: green marker outlines, red first corner, id label per marker.
-/// falls back to the gray view when no colour frame matches.
-fn debug_image_color(rgb: Option<&(usize, usize, Vec<u8>)>, img: &GrayImage, markers: &[Marker], header: &r2r::std_msgs::msg::Header) -> Image {
-    const S: usize = 2;
-    let Some((w, h, px)) = rgb else {
-        return debug_image(img, markers, header);
+/// colour debug view at the detection resolution (1x, so one lost fragment costs less on wifi):
+/// green marker outlines, red first corner, id label per marker. A gray frame with no matching
+/// colour frame is replicated to rgb, so the same green box is drawn on every transport.
+fn debug_image_color(rgb: Option<(usize, usize, Vec<u8>)>, img: &GrayImage, markers: &[Marker], header: &r2r::std_msgs::msg::Header) -> Image {
+    let (w, h) = (img.width, img.height);
+    let mut data = match rgb {
+        Some((rw, rh, px)) if rw == w && rh == h && px.len() == w * h * 3 => px,
+        _ => img.data.iter().flat_map(|&v| [v, v, v]).collect(),
     };
-    let (w, h) = (*w, *h);
-    if w != img.width || h != img.height || px.len() != w * h * 3 {
-        return debug_image(img, markers, header);
-    }
-    let (ow, oh) = (w * S, h * S);
-    let mut data = vec![0u8; ow * oh * 3];
-    for y in 0..oh {
-        for x in 0..ow {
-            let src = ((y / S) * w + x / S) * 3;
-            let dst = (y * ow + x) * 3;
-            data[dst..dst + 3].copy_from_slice(&px[src..src + 3]);
-        }
-    }
     let mut put = |x: f64, y: f64, c: [u8; 3]| {
         let (xi, yi) = (x.round() as i64, y.round() as i64);
-        if xi >= 0 && yi >= 0 && (xi as usize) < ow && (yi as usize) < oh {
-            let i = (yi as usize * ow + xi as usize) * 3;
+        if xi >= 0 && yi >= 0 && (xi as usize) < w && (yi as usize) < h {
+            let i = (yi as usize * w + xi as usize) * 3;
             data[i..i + 3].copy_from_slice(&c);
         }
     };
     for mk in markers {
-        let c = mk.corners.map(|p| [p[0] as f64 * S as f64, p[1] as f64 * S as f64]);
+        let c = mk.corners_f64();
         for k in 0..4 {
             let (a, b) = (c[k], c[(k + 1) % 4]);
             let n = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
@@ -286,48 +303,11 @@ fn debug_image_color(rgb: Option<&(usize, usize, Vec<u8>)>, img: &GrayImage, mar
     }
     Image {
         header: header.clone(),
-        height: oh as u32,
-        width: ow as u32,
-        encoding: "rgb8".into(),
-        is_bigendian: 0,
-        step: (ow * 3) as u32,
-        data,
-    }
-}
-
-/// gray copy with marker outlines in white and the first corner in black
-fn debug_image(img: &GrayImage, markers: &[Marker], header: &r2r::std_msgs::msg::Header) -> Image {
-    let (w, h) = (img.width, img.height);
-    let mut data = img.data.clone();
-    let mut put = |x: f64, y: f64, v: u8| {
-        let (xi, yi) = (x.round() as i64, y.round() as i64);
-        if xi >= 0 && yi >= 0 && (xi as usize) < w && (yi as usize) < h {
-            data[yi as usize * w + xi as usize] = v;
-        }
-    };
-    for mk in markers {
-        let c = mk.corners_f64();
-        for k in 0..4 {
-            let (a, b) = (c[k], c[(k + 1) % 4]);
-            let n = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
-            for i in 0..=n {
-                let t = i as f64 / n as f64;
-                put(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 255);
-            }
-        }
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                put(c[0][0] + dx as f64, c[0][1] + dy as f64, 0);
-            }
-        }
-    }
-    Image {
-        header: header.clone(),
         height: h as u32,
         width: w as u32,
-        encoding: "mono8".into(),
+        encoding: "rgb8".into(),
         is_bigendian: 0,
-        step: w as u32,
+        step: (w * 3) as u32,
         data,
     }
 }

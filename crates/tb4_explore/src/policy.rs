@@ -297,6 +297,13 @@ impl ExplorerPolicy {
         self.approaches.iter().map(move |a| (a.pos, now < a.ignore_until))
     }
 
+    /// camera reading distance for the coverage (the node scales it with the camera image width)
+    pub fn set_camera_range(&mut self, range: f64) {
+        if let Some(c) = self.p.coverage.as_mut() {
+            c.range = range;
+        }
+    }
+
     pub fn params(&self) -> &ExplorerParams {
         &self.p
     }

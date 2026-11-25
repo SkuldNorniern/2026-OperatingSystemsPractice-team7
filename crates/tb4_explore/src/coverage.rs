@@ -69,6 +69,8 @@ pub struct Coverage {
     seen: std::collections::HashSet<(i64, i64)>,
     /// per seen cell: bit k set when the camera has seen it from direction bin k (see `bin_of`)
     bins: std::collections::HashMap<(i64, i64), u8>,
+    /// floor cells inside the camera cone, up to the wall or the reading distance (fog cleared)
+    floor: std::collections::HashSet<(i64, i64)>,
     res: f64,
 }
 
@@ -132,7 +134,17 @@ impl Coverage {
         let n = ((2.0 * p.half_fov) / (0.5 * g.meta.resolution / p.range)).ceil().max(2.0) as usize;
         for i in 0..=n {
             let a = pose.2 - p.half_fov + 2.0 * p.half_fov * i as f64 / n as f64;
-            if let Some(hit) = g.raycast(cx, cy, a.cos(), a.sin(), p.range, p.occupied_threshold) {
+            let hit = g.raycast(cx, cy, a.cos(), a.sin(), p.range, p.occupied_threshold);
+            // the floor this ray crossed, to the wall or as far as a marker could be read
+            let reach = hit.as_ref().map_or(p.range, |h| h.range.min(p.range));
+            let step = 0.5 * g.meta.resolution;
+            let mut d = 0.0;
+            while d < reach {
+                let k = self.key(cx + d * a.cos(), cy + d * a.sin());
+                self.floor.insert(k);
+                d += step;
+            }
+            if let Some(hit) = hit {
                 // step just inside the wall cell
                 let (hx, hy) = (hit.x + a.cos() * 1e-3, hit.y + a.sin() * 1e-3);
                 // A marker on the wall looks cos(incidence) narrower, like one range / cos further
@@ -154,6 +166,30 @@ impl Coverage {
                 *self.bins.entry(k).or_insert(0) |= 1u8 << bin_of(a);
             }
         }
+    }
+
+    /// fog of war over `g` (same size and origin): -1 where the map is unknown, 0 where the camera has
+    /// seen (floor in its cone up to the reading distance, walls by the incidence rule), 100 elsewhere
+    pub fn fog(&self, g: &Grid, occupied_threshold: i8) -> Vec<i8> {
+        let (w, h) = (g.meta.width, g.meta.height);
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let c = Cell { x, y };
+                let v = g.get(c);
+                out.push(if v < 0 {
+                    -1
+                } else if self.res <= 0.0 {
+                    100
+                } else {
+                    let (px, py) = g.cell_to_world(c);
+                    let k = self.key(px, py);
+                    let seen = if v >= occupied_threshold { self.seen.contains(&k) } else { self.floor.contains(&k) };
+                    if seen { 0 } else { 100 }
+                });
+            }
+        }
+        out
     }
 
     /// wall cells of `g` (occupied, next to free space), as (seen, not seen) by the camera, world xy
@@ -336,6 +372,19 @@ mod tests {
             g.set(Cell { x: 119, y }, 100);
         }
         g
+    }
+
+    #[test]
+    fn fog_clears_in_the_camera_cone_only() {
+        let g = room();
+        let mut cov = Coverage::new();
+        let p = CoverageParams { range: 1.5, ..Default::default() };
+        cov.update(&g, (3.0, 2.0, 0.0), &p);
+        let fog = cov.fog(&g, 65);
+        let at = |x: f64, y: f64| fog[g.index(g.world_to_cell(x, y).unwrap())];
+        assert_eq!(at(3.8, 2.0), 0, "ahead, within range");
+        assert_eq!(at(5.5, 2.0), 100, "ahead, past the reading distance");
+        assert_eq!(at(2.0, 2.0), 100, "behind the camera");
     }
 
     #[test]

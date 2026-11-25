@@ -290,6 +290,9 @@ pub struct TrackParams {
     /// consistency limit for camera-only confirmations (no wall views): their scatter is a little higher
     /// than wall-backed views (live marker 5: 12.5-13.4). Decoy 103 sits at 16.
     pub pnp_only_max_consistency: f64,
+    /// for a confirmed marker: fuse only the views whose bearing passes within this distance (m) of the
+    /// fused position (a real marker's rays all point at it; a view off the marker is left out). 0 = off.
+    pub ray_agree_m: f64,
 }
 
 impl Default for TrackParams {
@@ -302,6 +305,7 @@ impl Default for TrackParams {
             max_triangulation_gap: 0.3,
             pnp_only_spread: 0.0,
             pnp_only_max_consistency: 14.0,
+            ray_agree_m: 0.0,
             strict_ids: Vec::new(),
             require_scale_all: false,
             max_spread: 0.08,
@@ -545,12 +549,19 @@ impl Tracker {
         // camera-only: no wall support, but the bearings of many views cross wide apart (not for strict ids)
         let cam_ok = p.pnp_only_spread > 0.0 && !p.strict_ids.contains(&id)
             && tri.is_some_and(|t| t.spread >= p.pnp_only_spread);
+        // confirmed: refine the position from the views whose bearing points at the fused spot
+        let shown = if p.ray_agree_m > 0.0 && self.sticky.contains(&id) {
+            let agree: Vec<Estimate> = v.iter().filter(|e| perp_dist(e, (f.x, f.y)) <= p.ray_agree_m).copied().collect();
+            if agree.len() >= 2 { fuse(&agree) } else { f }
+        } else {
+            f
+        };
         Some(Target {
             id,
-            x: f.x,
-            y: f.y,
+            x: shown.x,
+            y: shown.y,
             views: v.len(),
-            spread: f.sigma,
+            spread: shown.sigma,
             confirmed: self.sticky.contains(&id) || v.len() >= p.min_views
                 && (wall_ok || cam_ok)
                 && (p.min_triangulation_spread <= 0.0 || tri.is_some_and(|t| t.spread >= p.min_triangulation_spread))
@@ -696,6 +707,11 @@ pub struct Triangulated {
 /// Bearing-only position: least-squares intersection of the views' bearing lines (each passes
 /// through its estimate along `dir`, so the range of the view does not matter). None if the lines
 /// are (nearly) parallel.
+/// distance (m) from point `p` to the line through a view's estimate along its bearing
+pub fn perp_dist(e: &Estimate, p: (f64, f64)) -> f64 {
+    ((p.0 - e.x) * e.dir.1 - (p.1 - e.y) * e.dir.0).abs()
+}
+
 pub fn triangulate(v: &[Estimate]) -> Option<Triangulated> {
     if v.len() < 2 {
         return None;
@@ -943,6 +959,29 @@ mod tests {
         // all from one spot: no intersection
         let same: Vec<_> = (0..3).map(|k| view_at((0.0, 0.0), m, 0.1 * k as f64, Source::PnpRange)).collect();
         assert!(triangulate(&same).is_none());
+    }
+
+    #[test]
+    fn ray_agreement_refines_a_confirmed_marker_and_drops_off_bearing_views() {
+        let m = (3.0, 1.0);
+        let spots = [((0.0, 0.0), 0.3), ((0.0, 2.0), -0.3), ((1.0, -1.0), 0.2), ((-0.5, 1.5), -0.1), ((0.5, -0.5), 0.1), ((-0.2, 0.8), 0.2)];
+        let mut t = Tracker::new(TrackParams { pnp_only_spread: 0.35, ray_agree_m: 0.1, ..TrackParams::default() });
+        for (c, e) in spots {
+            t.add(7, &view_at(c, m, e, Source::PnpRange));
+        }
+        // a view whose bearing misses the marker by about 0.6 m (a reflection off another surface)
+        t.add(7, &Estimate::point(3.0, 1.6, Source::PnpRange));
+        let tg = t.target(7).unwrap();
+        assert!(tg.confirmed);
+        // the refined position uses only the bearings that pass through the marker, so it is closer to it
+        let refined = (tg.x - m.0).hypot(tg.y - m.1);
+        let mut plain = Tracker::new(TrackParams { pnp_only_spread: 0.35, ..TrackParams::default() });
+        for (c, e) in spots {
+            plain.add(7, &view_at(c, m, e, Source::PnpRange));
+        }
+        plain.add(7, &Estimate::point(3.0, 1.6, Source::PnpRange));
+        let unrefined = (plain.target(7).unwrap().x - m.0).hypot(plain.target(7).unwrap().y - m.1);
+        assert!(refined <= unrefined + 1e-9, "refined {refined:.3} vs unrefined {unrefined:.3}");
     }
 
     #[test]

@@ -316,9 +316,14 @@ impl ExplorerPolicy {
     }
 
     /// camera reading distance for the coverage (the node scales it with the camera image width)
-    pub fn set_camera_range(&mut self, range: f64) {
+    /// camera reading distance for the coverage; with `standoff_ratio` > 0 the view points move with
+    /// it (standoff = ratio x range), so a bigger preview also stands further back and sees more wall
+    pub fn set_camera_range(&mut self, range: f64, standoff_ratio: f64) {
         if let Some(c) = self.p.coverage.as_mut() {
             c.range = range;
+            if standoff_ratio > 0.0 {
+                c.standoff = standoff_ratio * range;
+            }
         }
     }
 

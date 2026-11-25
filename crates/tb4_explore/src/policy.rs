@@ -415,9 +415,9 @@ impl ExplorerPolicy {
         out: &mut Vec<Action>,
     ) -> Option<(Viewpoint, u64)> {
         let ap = self.p.approach.clone()?;
-        if self.p.approach_budget > 0.0 && self.approach_spent >= self.p.approach_budget {
-            return None;
-        }
+        // the budget only stops new approach trips: an approach already running is still cancelled when its
+        // marker is confirmed or times out (returning here used to leave a confirmed marker's goal running)
+        let budget_spent = self.p.approach_budget > 0.0 && self.approach_spent >= self.p.approach_budget;
         approach::sync(&mut self.approaches, markers, &ap, now, &mut self.next_serial);
         let active = self.active.as_ref().filter(|a| a.accepted && !a.cancelling).and_then(|a| a.approach);
         if let Some((serial, _)) = active
@@ -448,6 +448,9 @@ impl ExplorerPolicy {
             self.give_up(serial, now, why, out);
         }
         let grid = grid?;
+        if budget_spent {
+            return None;
+        }
         let open: Vec<usize> = (0..self.approaches.len())
             .filter(|&i| self.approaches[i].present && now >= self.approaches[i].ignore_until)
             .collect();

@@ -635,7 +635,7 @@ impl ExplorerPolicy {
                 .into_iter()
                 .filter(|v| self.visited_views.iter().all(|t| dist(*t, v.target) > 0.6))
                 .filter(|v| blacklist.iter().all(|b| dist(*b, (v.x, v.y)) > p.explore.blacklist_radius))
-                .filter(|v| !in_zone((v.x, v.y)))
+                // abort zones are for frontiers past glass / gaps; camera views stand inside the room
                 .collect(),
             _ => Vec::new(),
         };

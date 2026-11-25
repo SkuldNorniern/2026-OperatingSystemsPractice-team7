@@ -601,7 +601,7 @@ impl Tracker {
             out.push(if self.scale(id).is_some() { "size mismatch" } else { "size unknown" }.to_owned());
         }
         if p.min_triangulation_spread > 0.0 {
-            match triangulate(v) {
+            match if p.ray_resid_m > 0.0 { triangulate_robust(v, p.ray_resid_m) } else { triangulate(v) } {
                 Some(t) if t.spread < p.min_triangulation_spread => out.push(format!(
                     "angle {:.0}/{:.0} deg",
                     t.spread.to_degrees(),
@@ -729,7 +729,8 @@ pub fn triangulate_robust(v: &[Estimate], max_resid: f64) -> Option<Triangulated
             .map(|(i, e)| (i, perp_dist(e, (t.x, t.y))))
             .max_by(|a, b| a.1.total_cmp(&b.1))?;
         if resid <= max_resid {
-            return Some(t);
+            // dropping many views could leave a consistent subset that hides a bad fit: keep at least two thirds
+            return (keep.len() * 3 >= v.len() * 2).then_some(t);
         }
         if keep.len() <= 3 {
             return None;
@@ -761,7 +762,9 @@ pub fn triangulate(v: &[Estimate]) -> Option<Triangulated> {
     let mut spread: f64 = 0.0;
     for (i, a) in angles.iter().enumerate() {
         for b in &angles[i + 1..] {
-            spread = spread.max((a - b).sin().atan2((a - b).cos()).abs());
+            // a line has no direction: bearings from opposite sides describe the same line, so take min(d, pi - d)
+            let d = (a - b).sin().atan2((a - b).cos()).abs();
+            spread = spread.max(d.min(std::f64::consts::PI - d));
         }
     }
     Some(Triangulated { x: (a22 * b1 - a12 * b2) / det, y: (a11 * b2 - a12 * b1) / det, spread })
@@ -1008,6 +1011,34 @@ mod tests {
         plain.add(7, &Estimate::point(3.0, 1.6, Source::PnpRange));
         let unrefined = (plain.target(7).unwrap().x - m.0).hypot(plain.target(7).unwrap().y - m.1);
         assert!(refined <= unrefined + 1e-9, "refined {refined:.3} vs unrefined {unrefined:.3}");
+    }
+
+    #[test]
+    fn bearings_from_opposite_sides_have_no_spread() {
+        let m = (3.0, 1.0);
+        // two views on the same line from opposite sides (no point of intersection alone), plus one at 90 deg
+        let v = [
+            view_at((0.0, 0.0), m, 0.0, Source::PnpRange),
+            view_at((6.0, 2.0), m, 0.0, Source::PnpRange),
+            view_at((3.0, -3.0), m, 0.0, Source::PnpRange),
+        ];
+        let t = triangulate(&v).unwrap();
+        // the opposite pair is one line, so the spread is set by the 90 deg view, not by the pair's pi
+        assert!(t.spread <= std::f64::consts::FRAC_PI_2 + 0.01, "spread {:.3} rad", t.spread);
+    }
+
+    #[test]
+    fn robust_intersection_refuses_to_hide_most_views() {
+        let m = (3.0, 1.0);
+        // five views agree, three are wrong: dropping the three leaves a subset that is too small
+        let mut v: Vec<Estimate> = [((0.0, 0.0), 0.3), ((0.0, 2.0), -0.3), ((1.0, -1.0), 0.2), ((-0.5, 1.5), -0.1), ((0.5, -0.5), 0.1)]
+            .iter()
+            .map(|&(c, e)| view_at(c, m, e, Source::PnpRange))
+            .collect();
+        for k in 0..3 {
+            v.push(Estimate::point(3.0 + 0.8 * k as f64, 3.9, Source::PnpRange));
+        }
+        assert!(triangulate_robust(&v, 0.1).is_none(), "keeping only 5 of 8 views must not count as a fit");
     }
 
     #[test]

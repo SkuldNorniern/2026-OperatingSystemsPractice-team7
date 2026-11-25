@@ -156,6 +156,29 @@ impl Coverage {
         }
     }
 
+    /// wall cells of `g` (occupied, next to free space), as (seen, not seen) by the camera, world xy
+    pub fn wall_split(&self, g: &Grid, occupied_threshold: i8) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+        let (w, h) = (g.meta.width as i64, g.meta.height as i64);
+        let free = |c: Cell| (0..occupied_threshold).contains(&g.get(c));
+        let (mut seen, mut unseen) = (Vec::new(), Vec::new());
+        for y in 0..h {
+            for x in 0..w {
+                let c = Cell { x: x as u32, y: y as u32 };
+                if g.get(c) < occupied_threshold {
+                    continue;
+                }
+                let wall = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(dx, dy)| g.cell_checked(x + dx, y + dy).is_some_and(free));
+                if wall {
+                    let pt = g.cell_to_world(c);
+                    if self.is_seen(g, c) { seen.push(pt) } else { unseen.push(pt) }
+                }
+            }
+        }
+        (seen, unseen)
+    }
+
     /// clusters of occupied cells that touch free space but were never seen, with a viewpoint for each
     pub fn views(&self, g: &Grid, robot: (f64, f64), p: &CoverageParams) -> Vec<View> {
         let (w, h) = (g.meta.width as usize, g.meta.height as usize);
@@ -313,6 +336,18 @@ mod tests {
             g.set(Cell { x: 119, y }, 100);
         }
         g
+    }
+
+    #[test]
+    fn wall_split_follows_what_the_camera_saw() {
+        let g = room();
+        let mut cov = Coverage::new();
+        let (seen, unseen) = cov.wall_split(&g, 65);
+        assert!(seen.is_empty() && unseen.len() > 300);
+        cov.update(&g, (3.0, 2.0, 0.0), &CoverageParams { range: 4.0, ..Default::default() });
+        let (seen, unseen2) = cov.wall_split(&g, 65);
+        assert!(!seen.is_empty() && seen.iter().all(|p| p.0 > 5.5));
+        assert_eq!(seen.len() + unseen2.len(), unseen.len());
     }
 
     #[test]

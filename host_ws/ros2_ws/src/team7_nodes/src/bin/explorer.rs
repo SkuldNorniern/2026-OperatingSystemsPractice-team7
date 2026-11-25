@@ -189,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pubs = Pubs {
         frontiers: node.create_publisher::<MarkerArray>("/team7/frontiers", QosProfile::default())?,
         goal: node.create_publisher::<r2r::geometry_msgs::msg::PoseStamped>("/team7/goal", QosProfile::default())?,
+        banned: node.create_publisher::<MarkerArray>("/team7/banned", QosProfile::default())?,
     };
     let mut timer = node.create_wall_timer(period)?;
 
@@ -243,6 +244,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct Pubs {
     frontiers: r2r::Publisher<MarkerArray>,
+    /// areas the explorer will not send goals to (abort zones, failed spots)
+    banned: r2r::Publisher<MarkerArray>,
     goal: r2r::Publisher<r2r::geometry_msgs::msg::PoseStamped>,
 }
 
@@ -280,6 +283,7 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
         s.viz_seq = seq;
         let _ = io.pubs.frontiers.publish(&frontier_markers(io.map_frame, frontiers, views));
     }
+    let _ = io.pubs.banned.publish(&banned_markers(io.map_frame, &s.policy.banned()));
     let mut send = None;
     for a in actions {
         match a {
@@ -342,6 +346,23 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
             }
         }
     });
+}
+
+/// banned areas as circles (LINE_LIST, 24 segments): abort zones (ns banned_zone), failed spots (banned_spot)
+fn banned_markers(frame: &str, areas: &[((f64, f64), f64, bool)]) -> MarkerArray {
+    let mut out = vec![viz::delete_all(frame)];
+    for (i, ((cx, cy), r, zone)) in areas.iter().enumerate() {
+        let mut m = viz::base(frame, if *zone { "banned_zone" } else { "banned_spot" }, i as i32, viz::LINE_LIST);
+        m.scale.x = 0.03;
+        m.color = if *zone { viz::color(0.95, 0.2, 0.2, 0.9) } else { viz::color(0.95, 0.5, 0.5, 0.8) };
+        let p = |k: usize| {
+            let a = k as f64 * std::f64::consts::TAU / 24.0;
+            r2r::geometry_msgs::msg::Point { x: cx + r * a.cos(), y: cy + r * a.sin(), z: 0.03 }
+        };
+        m.points = (0..24).flat_map(|k| [p(k), p(k + 1)]).collect();
+        out.push(m);
+    }
+    MarkerArray { markers: out }
 }
 
 /// wall cells the camera has seen (green) and not seen yet (orange), map frame

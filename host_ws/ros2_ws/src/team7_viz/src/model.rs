@@ -75,6 +75,8 @@ pub enum Slot {
     SeenViews,
     /// wall cells the camera has / has not seen (explorer coverage)
     Coverage,
+    /// areas the explorer will not send goals to
+    Banned,
     Goal,
     Targets,
     SlamGraph,
@@ -99,6 +101,7 @@ impl Slot {
             Slot::Views => &["/team7/frontiers"],
             Slot::SeenViews => &["/team7/views_seen"],
             Slot::Coverage => &["/team7/camera_coverage"],
+            Slot::Banned => &["/team7/banned"],
             Slot::Goal => &["/team7/goal", "/goal_pose"],
             Slot::Targets => &["/team7/targets"],
             Slot::SlamGraph => &["/team7/slam/graph", "/slam_toolbox/graph_visualization"],

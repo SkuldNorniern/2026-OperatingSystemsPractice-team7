@@ -46,6 +46,9 @@ marker_mapper:
     # spread >= 0.35 rad and cross within max_triangulation_gap. Offline on 10 saved runs: +1 real (marker 5, run
     # 152437), no false confirmations (decoys 0/103/703/1023 stay unconfirmed; 0 and 1023 are strict, always excluded)
     pnp_only_spread: 0.35
+    glass_max_resid: 0.2      # m, marker on glass: bearings of wide-apart views cross (median miss <= this) but the lidar
+                              # hits lie behind it; confirmed at the crossing (live 2026-11-25: id 42, 1.1 m in front of its hits)
+    max_turn_rate: 0.3        # rad/s, detections from frames taken while the camera turned faster are skipped
     slow_on_tentative: true   # /speed_limit while an unconfirmed marker is in view
     slow_percent: 75.0
     slow_hold: 2.5

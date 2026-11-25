@@ -43,6 +43,8 @@ struct State {
     last_csv: String,
     out_dir: PathBuf,
     tf_failures: u64,
+    /// detections skipped because the camera turned faster than max_turn_rate
+    turn_skips: u64,
     stats: [u64; 2],
     slow_until: Option<Instant>,
     /// every detection in map frame, for replaying tracker offline (tb4_markers example replay)
@@ -63,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node = r2r::Node::create(ctx, "marker_mapper", "")?;
     let log = node.logger().to_owned();
 
-    let (state, detections_topic, map_topic, tf_topic, tf_static_topic, slow, time_offset, origin_shift) = {
+    let (state, detections_topic, map_topic, tf_topic, tf_static_topic, slow, time_offset, max_turn_rate, origin_shift) = {
         let p = Params(&node);
         let locate = LocateParams {
             max_range: p.f64("max_range", 4.0),
@@ -106,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             edge_triangulation_gap: p.f64("edge_triangulation_gap", 0.15),
             pnp_only_spread: p.f64("pnp_only_spread", 0.0),
             pnp_only_max_consistency: p.f64("pnp_only_max_consistency", 14.0),
+            glass_max_resid: p.f64("glass_max_resid", 0.0),
             ray_agree_m: p.f64("ray_agree_m", 0.0),
             ray_resid_m: p.f64("ray_resid_m", 0.0),
         };
@@ -125,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_csv: String::new(),
             out_dir: out_dir.clone(),
             tf_failures: 0,
+            turn_skips: 0,
             stats: [0, 0],
             slow_until: None,
             obs_log: p.bool("observation_log", true).then(|| {
@@ -156,6 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p.string("tf_static_topic", "/tf_static"),
             slow,
             (p.f64("image_time_offset", 0.0) * 1e9) as i64,
+            // rad/s: frames taken while the camera turned faster are skipped. Live 2026-11-25: bearings to
+            // id 42 were off by ~5 deg (0.18 m at 2 m) at 0.7 rad/s turns, so its views never agreed
+            p.f64("max_turn_rate", 0.3),
             // known grid origin error of the slam backend (m, both axes)
             p.f64("map_origin_shift", 0.0),
         )
@@ -215,6 +222,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return futures::future::ready(());
             }
         };
+        // camera heading 0.15 s earlier: a fast turn smears the bearing by the image delay
+        let fwd_yaw = |t: &tb4_core::nalgebra::Isometry3<f64>| {
+            let f = t.rotation * tb4_core::nalgebra::Vector3::z();
+            f.y.atan2(f.x)
+        };
+        if max_turn_rate > 0.0
+            && let Ok(prev) = tf.borrow().lookup(&s.map_frame, &det.header.frame_id, tb4_core::Stamp(t_img.0 - 150_000_000))
+        {
+            let d = fwd_yaw(&cam) - fwd_yaw(&prev);
+            let rate = d.sin().atan2(d.cos()).abs() / 0.15;
+            if rate > max_turn_rate {
+                s.turn_skips += 1;
+                return futures::future::ready(());
+            }
+        }
         let origin = cam * Point3::origin();
         let before: Vec<i64> = s.tracker.confirmed().iter().map(|t| t.id).collect();
         let mut views_added = false;

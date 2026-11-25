@@ -523,11 +523,10 @@ impl Tracker {
             let excess = v.len() - self.params.max_history;
             v.drain(..excess);
         }
-        let ok = self.target(id).is_some_and(|t| t.confirmed);
-        if ok {
+        // latched: once confirmed, a later view that breaks the rules does not turn it back into a candidate
+        // (the mission has already counted it; run 153653 lost marker 103 this way)
+        if self.target(id).is_some_and(|t| t.confirmed) {
             self.sticky.insert(id);
-        } else {
-            self.sticky.remove(&id);
         }
     }
 
@@ -552,7 +551,7 @@ impl Tracker {
             y: f.y,
             views: v.len(),
             spread: f.sigma,
-            confirmed: v.len() >= p.min_views
+            confirmed: self.sticky.contains(&id) || v.len() >= p.min_views
                 && (wall_ok || cam_ok)
                 && (p.min_triangulation_spread <= 0.0 || tri.is_some_and(|t| t.spread >= p.min_triangulation_spread))
                 && f.sigma <= loose * p.max_spread
@@ -944,6 +943,20 @@ mod tests {
         // all from one spot: no intersection
         let same: Vec<_> = (0..3).map(|k| view_at((0.0, 0.0), m, 0.1 * k as f64, Source::PnpRange)).collect();
         assert!(triangulate(&same).is_none());
+    }
+
+    #[test]
+    fn confirmation_latches_after_a_bad_view() {
+        let m = (3.0, 1.0);
+        let spots = [((0.0, 0.0), 0.3), ((0.0, 2.0), -0.3), ((1.0, -1.0), 0.2), ((-0.5, 1.5), -0.1), ((0.5, -0.5), 0.1)];
+        let mut t = Tracker::new(TrackParams { pnp_only_spread: 0.35, ..TrackParams::default() });
+        for (c, e) in spots {
+            t.add(7, &view_at(c, m, e, Source::PnpRange));
+        }
+        assert!(t.target(7).unwrap().confirmed);
+        // a bad view from one spot, far off: the rules now fail, but the confirmation stays
+        t.add(7, &view_at((0.0, 0.0), (3.0, 4.0), 1.5, Source::PnpRange));
+        assert!(t.target(7).unwrap().confirmed, "confirmed marker must not fall back to a candidate");
     }
 
     #[test]
@@ -1399,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn withdrawn_confirmation_no_longer_counts_as_found() {
+    fn confirmation_latches_when_later_views_disagree() {
         let mut t = Tracker::new(TrackParams { min_views: 3, min_triangulation_spread: 0.0, ..Default::default() });
         let e = |x, y| Estimate::point(x, y, Source::Raycast);
         let mut found = Found::default();
@@ -1410,17 +1423,17 @@ mod tests {
         }
         publish(&t, &mut found);
         assert_eq!(found.len(), 2);
-        // later views of id 1 land all over the place: marker_mapper logs LOST and drops its csv row
+        // later views of id 1 land all over the place: the confirmation stays (latched), so the marker is not
+        // lost from targets.csv once it was found (run 153653: marker 103 was found, then turned into a candidate)
         for k in 0..10 {
             t.add(1, &e(1.0 + k as f64, 3.0));
         }
-        assert!(!t.target(1).unwrap().confirmed);
+        assert!(t.target(1).unwrap().confirmed, "latched: disagreeing later views do not withdraw it");
         for d in [-0.01, 0.0, 0.01] {
             t.add(3, &e(3.0 + d, 0.0));
         }
         publish(&t, &mut found);
-        // targets.csv has only 2 and 3, so mission must not stop with "3 targets found"
-        assert_eq!(found.ids().iter().copied().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(found.ids().iter().copied().collect::<Vec<_>>(), [1, 2, 3]);
         assert_eq!(found.len(), to_csv(&t.confirmed()).lines().count() - 1);
     }
 

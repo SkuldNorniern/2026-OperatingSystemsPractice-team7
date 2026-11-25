@@ -100,8 +100,8 @@ explorer:
     approach_standoff: 1.3    # m from the marker (inside the 2 m scoring radius)
     approach_max_standoff: 1.9  # m, never further when the standoff point is blocked
     approach_spread: 0.52     # rad, views at 0 and +-30 deg off the face normal (triangulation wants >= 0.2 rad)
-    approach_timeout: 90.0    # s from the first approach goal to giving the marker up
-    approach_max_failures: 2  # failed views (aborted / no progress / timeout) before giving up
+    approach_timeout: 180.0   # s from the first approach goal: three viewpoints x goal_timeout 60 s (was 90, so one slow view used it all)
+    approach_max_failures: 3  # failed viewpoints before giving up: all three approach views get tried (was 2)
     approach_blacklist_duration: 300.0  # s a given-up marker is ignored, so a decoy cannot trap the robot
 
 velocity_guard:

@@ -333,6 +333,16 @@ impl ExplorerPolicy {
         self.blacklist.push((goal, now + secs));
     }
 
+    /// areas no goal is sent to now: (centre, radius m, true = navigator abort zone, false = failed spot)
+    pub fn banned(&self) -> Vec<((f64, f64), f64, bool)> {
+        let spot = self.p.explore.blacklist_radius;
+        self.zones
+            .iter()
+            .map(|(c, _)| (*c, self.p.abort_ban_radius, true))
+            .chain(self.blacklist.iter().map(|(c, _)| (*c, spot, false)))
+            .collect()
+    }
+
     pub fn blacklist(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
         self.blacklist.iter().map(|(g, _)| *g)
     }

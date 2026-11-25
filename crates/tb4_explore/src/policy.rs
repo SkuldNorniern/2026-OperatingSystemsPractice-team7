@@ -1,6 +1,7 @@
 //! Explorer decision logic without ROS: the explorer node and the simulator both drive this.
 //! Time is passed in as seconds on any monotonic clock, nothing here reads the wall clock.
 
+use tb4_core::grid::Cell;
 use tb4_core::{DistanceField, Grid, Pose2};
 
 use crate::approach::{self, Approach, ApproachParams, MarkerHint, Viewpoint};
@@ -34,6 +35,12 @@ pub struct ExplorerParams {
     /// m, cap of the abort ban radius: an abort within 2 radii of active zones gets radius x (1 + their
     /// number), so a run of aborts in one area (outside the glass) covers it instead of leaving gaps
     pub abort_ban_max_radius: f64,
+    /// costmap value: an aborted goal bans the region it reaches through cells below this, when that
+    /// region does not reach the robot (behind glass or a gap the robot cannot pass), like fog;
+    /// 0 = circles only. 95 on the team7 costmap = about 0.26 m clear of obstacles
+    pub ban_region_cost: i8,
+    /// cells, at most this many are banned per region
+    pub ban_region_max_cells: usize,
     pub turn_weight: f64,
     /// s, exploration pauses when the costmap is older than this
     pub costmap_timeout: f64,
@@ -75,6 +82,8 @@ impl Default for ExplorerParams {
             abort_ban_radius: 2.0,
             abort_ban_duration: 120.0,
             abort_ban_max_radius: 6.0,
+            ban_region_cost: 0,
+            ban_region_max_cells: 40_000,
             turn_weight: 0.5,
             costmap_timeout: 5.0,
             explore: ExploreParams {
@@ -251,6 +260,9 @@ pub struct ExplorerPolicy {
     blacklist: Vec<((f64, f64), f64)>,
     /// areas around goals the navigator aborted, with the time the ban ends
     zones: Vec<((f64, f64), f64, f64)>,
+    /// cut-off regions behind aborted goals: cells (costmap index space at `region_res`) and ban end
+    regions: Vec<(std::collections::HashSet<(i64, i64)>, f64)>,
+    region_res: f64,
     /// failures per spot over the run, so a spot that keeps failing is banned longer
     strikes: Vec<((f64, f64), u32)>,
     /// goals switched away from, with the time
@@ -281,6 +293,8 @@ impl ExplorerPolicy {
             blacklist: Vec::new(),
             strikes: Vec::new(),
             zones: Vec::new(),
+            regions: Vec::new(),
+            region_res: 0.0,
             recent: Vec::new(),
             next_goal_after: now,
             costmap_stale: false,
@@ -352,6 +366,22 @@ impl ExplorerPolicy {
             .map(|(c, r, _)| (*c, *r, true))
             .chain(self.blacklist.iter().map(|(c, _)| (*c, spot, false)))
             .collect()
+    }
+
+    /// centres of the cells in the banned regions (world xy)
+    pub fn banned_cells(&self) -> Vec<(f64, f64)> {
+        let r = self.region_res;
+        self.regions
+            .iter()
+            .flat_map(|(cells, _)| cells.iter().map(move |(x, y)| ((*x as f64 + 0.5) * r, (*y as f64 + 0.5) * r)))
+            .collect()
+    }
+
+    fn in_region(&self, pt: (f64, f64)) -> bool {
+        self.region_res > 0.0 && {
+            let k = ((pt.0 / self.region_res).floor() as i64, (pt.1 / self.region_res).floor() as i64);
+            self.regions.iter().any(|(cells, _)| cells.contains(&k))
+        }
     }
 
     pub fn blacklist(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
@@ -560,6 +590,28 @@ impl ExplorerPolicy {
             match status {
                 NavStatus::Succeeded => self.stats.succeeded += 1,
                 NavStatus::Canceled => self.stats.canceled += 1,
+                NavStatus::Aborted if p.ban_region_cost > 0 && input.costmap.is_some() && input.robot.is_ok() => {
+                    self.stats.aborted += 1;
+                    let g = input.costmap.unwrap();
+                    let robot = input.robot.as_ref().unwrap();
+                    let (secs, thr, max) = (p.abort_ban_duration, p.ban_region_cost, p.ban_region_max_cells);
+                    self.ban(goal, now);
+                    match cut_off_region(g, goal, (robot.x, robot.y), thr, max) {
+                        Some(cells) => {
+                            let n = cells.len();
+                            self.region_res = g.meta.resolution;
+                            self.regions.push((cells, now + secs));
+                            out.push(Action::Info(format!(
+                                "navigator aborted ({:.2}, {:.2}): its region is cut off from the robot, {n} cells banned for {secs:.0} s",
+                                goal.0, goal.1
+                            )));
+                        }
+                        None => out.push(Action::Info(format!(
+                            "navigator aborted ({:.2}, {:.2}): reachable area, only the spot is banned",
+                            goal.0, goal.1
+                        ))),
+                    }
+                }
                 NavStatus::Aborted => {
                     self.stats.aborted += 1;
                     let (base, secs) = (p.abort_ban_radius, p.abort_ban_duration);
@@ -580,6 +632,7 @@ impl ExplorerPolicy {
         let p = &self.p;
         self.blacklist.retain(|(_, until)| now < *until);
         self.zones.retain(|(_, _, until)| now < *until);
+        self.regions.retain(|(_, until)| now < *until);
         // Do not navigate using a costmap that stopped updating.
         if now - input.costmap_stamp > p.costmap_timeout {
             if !self.costmap_stale {
@@ -622,7 +675,7 @@ impl ExplorerPolicy {
         self.recent.retain(|(_, at)| now - at < p.switch_cooldown);
         // goals switched away from lately are skipped like blacklisted ones (no ping-pong)
         let blacklist: Vec<_> = self.blacklist.iter().chain(&self.recent).map(|(goal, _)| *goal).collect();
-        let in_zone = |pt: (f64, f64)| self.zones.iter().any(|(z, r, _)| dist(*z, pt) <= *r);
+        let in_zone = |pt: (f64, f64)| self.zones.iter().any(|(z, r, _)| dist(*z, pt) <= *r) || self.in_region(pt);
         let pickable: Vec<Frontier> = frontiers.iter().filter(|f| !in_zone(f.goal)).cloned().collect();
         let pick = || select_goal_with_heading(&pickable, &blacklist, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight);
         let need_views = p.view_detour > 0.0
@@ -875,6 +928,43 @@ impl ExplorerPolicy {
     }
 }
 
+/// Cells reachable from `goal` through costmap cells below `thr` (clear of obstacles by a margin).
+/// None when that region reaches the robot (the goal is in reachable space). Keys are cell
+/// indices in world units of the grid resolution (floor(x / res)).
+fn cut_off_region(g: &Grid, goal: (f64, f64), robot: (f64, f64), thr: i8, max_cells: usize) -> Option<std::collections::HashSet<(i64, i64)>> {
+    let res = g.meta.resolution;
+    let start = g.world_to_cell(goal.0, goal.1)?;
+    let target = g.world_to_cell(robot.0, robot.1)?;
+    let pass = |c: Cell| (0..thr).contains(&g.get(c));
+    let mut seen = std::collections::HashSet::new();
+    let mut q = std::collections::VecDeque::from([start]);
+    seen.insert((start.x, start.y));
+    while let Some(c) = q.pop_front() {
+        if c == target {
+            return None;
+        }
+        if seen.len() >= max_cells {
+            break;
+        }
+        for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+            if let Some(n) = g.cell_checked(c.x as i64 + dx, c.y as i64 + dy)
+                && pass(n)
+                && seen.insert((n.x, n.y))
+            {
+                q.push_back(n);
+            }
+        }
+    }
+    Some(
+        seen.into_iter()
+            .map(|(x, y)| {
+                let (wx, wy) = g.cell_to_world(Cell { x, y });
+                ((wx / res).floor() as i64, (wy / res).floor() as i64)
+            })
+            .collect(),
+    )
+}
+
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
@@ -929,6 +1019,24 @@ mod tests {
         let next = e.tick(2.0, input(&g, r, Some(((goal.x, goal.y), NavStatus::Succeeded)), 2.0));
         assert!(sent(&next).is_some());
         assert_eq!(e.stats().succeeded, 1);
+    }
+
+    #[test]
+    fn a_cut_off_region_is_banned_like_fog_and_the_robot_side_is_not() {
+        use tb4_core::grid::GridMeta;
+        // 6 x 4 m, wall at x = 3 m with a gap too narrow to pass cleanly (cost 96 >= 95)
+        let meta = GridMeta { width: 120, height: 80, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, 0);
+        for y in 0..80 {
+            g.set(Cell { x: 60, y }, if (38..42).contains(&y) { 96 } else { 100 });
+        }
+        let robot = (1.0, 2.0);
+        let outside = cut_off_region(&g, (5.0, 2.0), robot, 95, 40_000).expect("cut off");
+        let key = |x: f64, y: f64| ((x / 0.05).floor() as i64, (y / 0.05).floor() as i64);
+        assert!(outside.contains(&key(5.5, 3.5)) && outside.contains(&key(3.2, 0.2)));
+        assert!(!outside.contains(&key(1.0, 2.0)) && !outside.contains(&key(2.5, 2.0)));
+        // an abort on the robot's side bans no region
+        assert!(cut_off_region(&g, (2.0, 1.0), robot, 95, 40_000).is_none());
     }
 
     #[test]

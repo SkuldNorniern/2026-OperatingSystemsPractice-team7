@@ -3,6 +3,8 @@ use tb4_core::{Grid, GridMeta, Pose2, grid::UNKNOWN};
 const GROW_PAD: i32 = 64;
 /// half-width of the square the exported map always covers, metres around the map origin
 const EXPORT_ANCHOR_M: f64 = 10.0;
+/// returns this close to the sensor's max range (metres) are not occupied hits: the beam ran out of range
+const MAX_RANGE_HIT_MARGIN: f64 = 0.1;
 
 /// Growable dense log-odds grid indexed by global cell (floor(x / res)).
 #[derive(Debug, Clone)]
@@ -94,7 +96,8 @@ impl LogOddsMap {
         self.stamp = stamp;
     }
 
-    /// Points are in the sensor/base frame at `pose`; returns beyond `max_r` become free-only rays.
+    /// Points are in the sensor/base frame at `pose`. Returns at or beyond `max_r - MAX_RANGE_HIT_MARGIN`
+    /// become free-only rays, truncated at `max_r`: a beam at the sensor limit is not an obstacle.
     pub fn insert_scan(&mut self, pose: Pose2, pts: &[(f32, f32)], min_r: f64, max_r: f64) {
         let (s, c) = pose.yaw.sin_cos();
         let (sx, sy) = (self.cell(pose.x), self.cell(pose.y));
@@ -106,7 +109,11 @@ impl LogOddsMap {
             if !r.is_finite() || r < min_r {
                 continue;
             }
-            let (k, hit) = if r > max_r { (max_r / r, false) } else { (1.0, true) };
+            let (k, hit) = if r >= max_r - MAX_RANGE_HIT_MARGIN {
+                (if r > max_r { max_r / r } else { 1.0 }, false)
+            } else {
+                (1.0, true)
+            };
             let ex = pose.x + k * (c * px - s * py);
             let ey = pose.y + k * (s * px + c * py);
             let (cx, cy) = (self.cell(ex), self.cell(ey));
@@ -311,5 +318,19 @@ mod tests {
         assert!(m.get(m.cell(4.9), 0) < 0.0);
         assert_eq!(m.get(m.cell(5.5), 0), 0.0);
         assert!(m.get(m.cell(12.0), 0) == 0.0);
+    }
+
+    #[test]
+    fn return_at_max_range_is_not_a_hit() {
+        let mut m = LogOddsMap::new(0.05, 0.9, 0.4, 3.5);
+        // a return exactly at the limit (and one inside the margin) must not mark an obstacle
+        m.insert_scan(Pose2::new(0.0, 0.0, 0.0), &[(10.0, 0.0), (9.95, 0.0)], 0.1, 10.0);
+        assert!(m.get(m.cell(10.0), 0) < 0.0);
+        assert!(m.get(m.cell(9.95), 0) < 0.0);
+        assert!(m.get(m.cell(9.5), 0) < 0.0);
+        // a real return inside the range is still an occupied hit
+        let mut h = LogOddsMap::new(0.05, 0.9, 0.4, 3.5);
+        h.insert_scan(Pose2::new(0.0, 0.0, 0.0), &[(5.0, 0.0)], 0.1, 10.0);
+        assert!(h.get(h.cell(5.0), 0) > 0.5);
     }
 }

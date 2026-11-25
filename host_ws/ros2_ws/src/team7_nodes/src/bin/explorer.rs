@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         blacklist_max_duration: p.f64("blacklist_max_duration", 300.0),
         abort_ban_radius: p.f64("abort_ban_radius", 2.0),
         abort_ban_duration: p.f64("abort_ban_duration", 120.0),
+        abort_ban_max_radius: p.f64("abort_ban_max_radius", 6.0),
         turn_weight: p.f64("turn_weight", 0.5),
         costmap_timeout: 5.0,
         explore: ExploreParams {

@@ -175,9 +175,9 @@ navigator:
     map_topic: /map
     scan_topic: /scan
     odom_topic: /odom
-    robot_radius: 0.18
-    safety_margin: 0.0546      # planner lethal radius 0.2346 m (+2 % from 0.23): gaps under ~0.47 m are not planned through
-                               # (live 2026-11-25: goals behind half-blocked openings ran into the timeout; +5 % was too much). MPPI keeps robot_radius
+    robot_radius: 0.1836       # planner lethal radius, +2 % (live 2026-11-25: goals behind half-blocked openings); only the
+                               # planner uses it, MPPI keeps its own 0.18
+    safety_margin: 0.05        # cost band past robot_radius, not a hard limit
     cost_scaling_dist: 0.5
     cost_weight: 2.0
     allow_unknown: true

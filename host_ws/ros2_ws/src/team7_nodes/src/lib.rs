@@ -118,6 +118,13 @@ impl Params<'_> {
             _ => Vec::new(),
         }
     }
+
+    pub fn string_list(&self, name: &str) -> Vec<String> {
+        match self.raw(name) {
+            ParameterValue::StringArray(v) => v,
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// ros2 param services for this node, also turns on use_sim_time (/clock) when set

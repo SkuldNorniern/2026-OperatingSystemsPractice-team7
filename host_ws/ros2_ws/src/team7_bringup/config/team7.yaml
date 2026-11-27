@@ -204,6 +204,12 @@ navigator:
     wz_max: 0.7
     goal_tolerance_xy: 0.15
     goal_tolerance_yaw: 0.3
+    # map-frame polygons the planner and MPPI never enter (glass: the lidar sees through it). One entry per
+    # polygon, "x,y x,y x,y ..." (3+ vertices). Empty = no effect. Goals inside a polygon are aborted.
+    # Candidate west glass wall from the 2026-11-27 map (fit, 0.3 m outward margin); the south end is not
+    # confirmed, so it is not set yet:
+    #   "-7.08,9.72 -13.17,-4.67 -13.45,-4.55 -7.36,9.84"
+    forbidden_polygons: []
 
 aruco_detector:
   ros__parameters:

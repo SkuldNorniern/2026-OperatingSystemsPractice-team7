@@ -12,7 +12,7 @@ use r2r::sensor_msgs::msg::LaserScan;
 use r2r::{ActionClient, ActionClientGoal, ActionServerGoal, GoalStatus, QosProfile, log_info, log_warn};
 use tb4_control::{Mppi, MppiParams, RobotState};
 use tb4_core::{DistanceField, Grid, Pose2, Stamp, TfBuffer};
-use tb4_planning::{CSpace, CSpaceParams, IrParams, Planner, PlannerParams, VirtualObstacles, VirtualParams, bump_zone_angle, ir_points, remaining_free};
+use tb4_planning::{CSpace, CSpaceParams, ForbiddenZones, IrParams, Planner, PlannerParams, VirtualObstacles, VirtualParams, bump_zone_angle, ir_points, remaining_free};
 use team7_nodes::{Params, grid_from_msg, pose_msg, spawn_tf_listener};
 
 type Nav = NavigateToPose::Action;
@@ -68,6 +68,8 @@ struct Cfg {
     controller_id: String,
     /// keep the current route while it is free unless a new one is shorter than this fraction of it
     path_switch_ratio: f64,
+    /// areas the planner and MPPI never enter (glass walls); goals inside are aborted
+    forbidden: ForbiddenZones,
 }
 
 struct State {
@@ -231,6 +233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cliff_marks = p.bool("cliff_marks", false);
     let ir_threshold = p.i64("ir_threshold", 1000) as i32;
     let ir_range = p.f64("ir_range", 0.10);
+    let forbidden_entries = p.string_list("forbidden_polygons");
+    let forbidden = ForbiddenZones::parse(&forbidden_entries).map_err(|e| format!("forbidden_polygons: {e}"))?;
+    log_info!(&log, "forbidden polygons: {}", forbidden_entries.len());
 
     let mode = match p.string("mode", "mppi").as_str() {
         "nav2" | "nav2_controller" => Mode::Nav2Controller,
@@ -263,6 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scan_obstacle_range: p.f64("scan_obstacle_range", 2.5),
         controller_id: p.string("controller_id", "FollowPath"),
         path_switch_ratio: p.f64("path_switch_ratio", 0.8),
+        forbidden,
     });
     let mp = MppiParams {
         samples: p.i64("mppi_samples", 1000) as usize,
@@ -454,6 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let st = state.clone();
     let log2 = log.clone();
     let sp = spawner.clone();
+    let cfg2 = cfg.clone();
     spawner.spawn_local(async move {
         let mut requests = requests;
         while let Some(req) = requests.next().await {
@@ -461,7 +468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = req.reject();
                 continue;
             }
-            let (handle, mut cancels) = match req.accept() {
+            let (mut handle, mut cancels) = match req.accept() {
                 Ok(x) => x,
                 Err(e) => {
                     log_warn!(&log2, "accept failed: {e}");
@@ -469,6 +476,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let gp = &handle.goal.pose.pose;
+            if cfg2.forbidden.contains(gp.position.x, gp.position.y) {
+                log_warn!(&log2, "goal ({:.2}, {:.2}) is inside a forbidden polygon: aborted", gp.position.x, gp.position.y);
+                let _ = handle.abort(NavigateToPose::Result::default());
+                continue;
+            }
             let q = &gp.orientation;
             // frontier goals: the lidar sees all round, so stopping to turn at every goal only costs
             // time (the explorer marks them "xy_only"); camera views keep their heading
@@ -566,6 +578,7 @@ fn tick(
         let mut planner_grid = m.clone();
         s.bumps.stamp(&mut planner_grid, 100);
         s.ir_marks.stamp(&mut planner_grid, 100);
+        cfg.forbidden.stamp(&mut planner_grid, 100);
         let cs = CSpace::new(&planner_grid, &cfg.cs);
         s.timing[1].add(t);
         s.cspace = Some(cs);
@@ -590,6 +603,7 @@ fn tick(
             // bumper marks: age out, then write into the grid the planner and MPPI use
             s.bumps.stamp(&mut g, 100);
             s.ir_marks.stamp(&mut g, 100);
+            cfg.forbidden.stamp(&mut g, 100);
             let df = DistanceField::from_grid(&g, cfg.cs.occupied_threshold, false);
             obs_time = Some(t_obs.elapsed());            // team7 global costmap: team7 mode runs no Nav2, so publish ours on the usual topic
             // the costmap is big and only changes with the map: publish about once a second

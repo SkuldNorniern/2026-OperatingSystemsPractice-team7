@@ -96,7 +96,7 @@ explorer:
     view_standoff: 0.6        # m from the wall when looking at it; must be inside camera_range
     view_standoff_ratio: 0.75 # standoff = 0.75 x the camera range once camera_info is in (250 px: 0.6 m, 500 px: 1.2 m)
     view_max_cells: 32        # wall piece per view (cells)
-    view_detour: 1.0          # m, take a camera view of an unseen wall this close during the frontier phase, 0 = off
+    view_detour: 0.0          # m, camera view of an unseen wall during the frontier phase; 0 = off: mapping first, fog clearing after the frontiers (was 1.0: short moves kept the robot near its spot and spinning)
     preempt_distance: 0.5     # m, a frontier goal this close is replaced by the next one once its frontier starts to go
     switch_cooldown: 20.0     # s, a goal switched away from is not picked again (sim studio: 2 goals swapped for 8 min)
     min_unknown_area: 1.0     # m^2, skip frontiers onto enclosed unknown pockets smaller than this (box insides)

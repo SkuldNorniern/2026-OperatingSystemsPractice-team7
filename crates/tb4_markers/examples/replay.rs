@@ -122,6 +122,7 @@ fn main() {
     if let Some(v) = env("pnp_only_max_consistency").and_then(|v| v.parse().ok()) { tp.pnp_only_max_consistency = v; }
     if let Some(v) = env("ray_agree_m").and_then(|v| v.parse().ok()) { tp.ray_agree_m = v; }
     if let Some(v) = env("ray_resid_m").and_then(|v| v.parse().ok()) { tp.ray_resid_m = v; }
+    if let Some(v) = env("tri_position").and_then(|v| v.parse::<i32>().ok()) { tp.tri_position = v != 0; }
     if let Some(v) = env("strict_ids").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<i64>>()) { tp.strict_ids = v; }
     let mut tr = Tracker::new(tp);
     let mut first_confirm: BTreeMap<i64, usize> = BTreeMap::new();

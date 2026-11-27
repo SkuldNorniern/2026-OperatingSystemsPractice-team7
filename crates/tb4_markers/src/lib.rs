@@ -300,6 +300,9 @@ pub struct TrackParams {
     /// robust ray intersection: bearing lines that miss the intersection by more than this (m) are dropped,
     /// one at a time (a reflection or a wrong bearing pulls the plain intersection away). 0 = plain intersection.
     pub ray_resid_m: f64,
+    /// report the bearing intersection (where the rays cross) as the marker position instead of the weighted
+    /// median of the views; off by default until the offline residual test says it is better
+    pub tri_position: bool,
 }
 
 impl Default for TrackParams {
@@ -315,6 +318,7 @@ impl Default for TrackParams {
             glass_max_resid: 0.0,
             ray_agree_m: 0.0,
             ray_resid_m: 0.0,
+            tri_position: false,
             strict_ids: Vec::new(),
             require_scale_all: false,
             max_spread: 0.08,
@@ -573,7 +577,10 @@ impl Tracker {
         let cam_ok = p.pnp_only_spread > 0.0 && !p.strict_ids.contains(&id)
             && tri.is_some_and(|t| t.spread >= p.pnp_only_spread);
         // confirmed: refine the position from the views whose bearing points at the fused spot
-        let shown = if p.ray_agree_m > 0.0 && self.sticky.contains(&id) {
+        let shown = if p.tri_position && tri.is_some() {
+            let t = tri.unwrap();
+            Fused { x: t.x, y: t.y, sigma: f.sigma, consistency: f.consistency }
+        } else if p.ray_agree_m > 0.0 && self.sticky.contains(&id) {
             let agree: Vec<Estimate> = v.iter().filter(|e| perp_dist(e, (f.x, f.y)) <= p.ray_agree_m).copied().collect();
             if agree.len() >= 2 { fuse(&agree) } else { f }
         } else {

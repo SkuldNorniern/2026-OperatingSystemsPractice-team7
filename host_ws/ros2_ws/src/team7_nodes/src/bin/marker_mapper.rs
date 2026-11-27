@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             glass_max_resid: p.f64("glass_max_resid", 0.0),
             ray_agree_m: p.f64("ray_agree_m", 0.0),
             ray_resid_m: p.f64("ray_resid_m", 0.0),
+            tri_position: p.bool("tri_position", false),
         };
         let out_dir = team7_nodes::expand_home(&p.string("output_dir", "~/team7_run"));
         let state = State {

@@ -310,8 +310,30 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
     let actions = s.policy.tick(now, input);
     let (frontiers, views, seq) = s.policy.viz();
     // the orange dots are the wall cells the camera has not seen yet (the fog), so they follow the fog every tick
+    // dots sit on the edge of the fog: unseen known cells that touch a seen cell (not the wall cells in the middle)
     let unseen: Vec<(f64, f64)> = match s.map.as_ref() {
-        Some(m) => s.policy.coverage().wall_split(m, 65).1.into_iter().step_by(2).collect(),
+        Some(m) => {
+            let fog = Grid::new(m.meta, s.policy.coverage().fog(m, 65));
+            let (w, h) = (m.meta.width, m.meta.height);
+            let mut edge = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let c = tb4_core::grid::Cell { x, y };
+                    if fog.get(c) != 100 {
+                        continue;
+                    }
+                    let touches_seen = [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
+                        let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                        nx >= 0 && ny >= 0 && nx < w as i64 && ny < h as i64
+                            && fog.get(tb4_core::grid::Cell { x: nx as u32, y: ny as u32 }) == 0
+                    });
+                    if touches_seen {
+                        edge.push(fog.cell_to_world(c));
+                    }
+                }
+            }
+            edge.into_iter().step_by(2).collect()
+        }
         None => Vec::new(),
     };
     s.viz_seq = seq;

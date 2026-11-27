@@ -992,8 +992,10 @@ fn cut_off_region(g: &Grid, goal: (f64, f64), robot: (f64, f64), thr: i8, max_ce
         if c == target {
             return None;
         }
+        // the search was too big to finish: that does not show the region is cut off, so ban nothing
+        // (a 40000-cell region was banned for a whole mission on a partial search in run 153117)
         if seen.len() >= max_cells {
-            break;
+            return None;
         }
         for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
             if let Some(n) = g.cell_checked(c.x as i64 + dx, c.y as i64 + dy)

@@ -309,10 +309,13 @@ fn tick(io: &Io, state: &Rc<RefCell<State>>, tf: &TfBuffer) {
     };
     let actions = s.policy.tick(now, input);
     let (frontiers, views, seq) = s.policy.viz();
-    if seq != s.viz_seq {
-        s.viz_seq = seq;
-        let _ = io.pubs.frontiers.publish(&frontier_markers(io.map_frame, frontiers, views));
-    }
+    // the orange dots are the wall cells the camera has not seen yet (the fog), so they follow the fog every tick
+    let unseen: Vec<(f64, f64)> = match s.map.as_ref() {
+        Some(m) => s.policy.coverage().wall_split(m, 65).1.into_iter().step_by(2).collect(),
+        None => Vec::new(),
+    };
+    s.viz_seq = seq;
+    let _ = io.pubs.frontiers.publish(&frontier_markers(io.map_frame, frontiers, views, &unseen));
     let mut send = None;
     for a in actions {
         match a {
@@ -399,7 +402,7 @@ fn banned_grid(m: &Grid, areas: &[((f64, f64), f64, bool)]) -> Grid {
     g
 }
 
-fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> MarkerArray {
+fn frontier_markers(frame: &str, frontiers: &[Frontier], _views: &[View], unseen: &[(f64, f64)]) -> MarkerArray {
     let mut pts = viz::base(frame, "frontier_goals", 0, viz::POINTS);
     pts.scale.x = 0.12;
     pts.scale.y = 0.12;
@@ -414,6 +417,6 @@ fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> Mark
     cams.color = viz::color(1.0, 0.5, 0.0, 0.9);
     // the orange dots mark the wall each view looks at (v.target), not the standoff pose 1.2 m in front of it,
     // so they sit on the unseen fog; the goal sent to the navigator still uses the standoff pose (v.x, v.y)
-    cams.points = views.iter().map(|v| r2r::geometry_msgs::msg::Point { x: v.target.0, y: v.target.1, z: 0.05 }).collect();
+    cams.points = unseen.iter().map(|&(x, y)| r2r::geometry_msgs::msg::Point { x, y, z: 0.05 }).collect();
     MarkerArray { markers: vec![viz::delete_all(frame), pts, cams] }
 }

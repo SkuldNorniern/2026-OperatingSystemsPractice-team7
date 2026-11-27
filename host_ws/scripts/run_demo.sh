@@ -207,10 +207,10 @@ prepare_live() {
     echo "warning: no /odom stamp read; Create 3 clock not checked" >&2
   fi
   # camera JPEG quality is a live setting on the OAK-D node and a reboot resets it (95). CAMERA_JPEG_QUALITY sets it
-  # for the run (default 80; 85 gave 25 Hz at 450 px; 0 leaves it alone). Warning only.
-  if [ "${CAMERA_JPEG_QUALITY:-80}" != 0 ]; then
-    if timeout 20 ros2 param set /oakd oakd.rgb.preview.image_raw.compressed.jpeg_quality "${CAMERA_JPEG_QUALITY:-80}" >/dev/null 2>&1; then
-      echo "[*] camera jpeg quality ${CAMERA_JPEG_QUALITY:-80}"
+  # for the run (default 78; 85 gave 25 Hz at 450 px; 0 leaves it alone). Warning only.
+  if [ "${CAMERA_JPEG_QUALITY:-78}" != 0 ]; then
+    if timeout 20 ros2 param set /oakd oakd.rgb.preview.image_raw.compressed.jpeg_quality "${CAMERA_JPEG_QUALITY:-78}" >/dev/null 2>&1; then
+      echo "[*] camera jpeg quality ${CAMERA_JPEG_QUALITY:-78}"
     else
       echo "warning: could not set the camera jpeg quality (is the camera up?)" >&2
     fi

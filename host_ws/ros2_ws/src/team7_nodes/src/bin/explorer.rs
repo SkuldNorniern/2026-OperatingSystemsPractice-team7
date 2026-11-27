@@ -412,6 +412,8 @@ fn frontier_markers(frame: &str, frontiers: &[Frontier], views: &[View]) -> Mark
     cams.scale.x = 0.12;
     cams.scale.y = 0.12;
     cams.color = viz::color(1.0, 0.5, 0.0, 0.9);
-    cams.points = views.iter().map(|v| r2r::geometry_msgs::msg::Point { x: v.x, y: v.y, z: 0.05 }).collect();
+    // the orange dots mark the wall each view looks at (v.target), not the standoff pose 1.2 m in front of it,
+    // so they sit on the unseen fog; the goal sent to the navigator still uses the standoff pose (v.x, v.y)
+    cams.points = views.iter().map(|v| r2r::geometry_msgs::msg::Point { x: v.target.0, y: v.target.1, z: 0.05 }).collect();
     MarkerArray { markers: vec![viz::delete_all(frame), pts, cams] }
 }

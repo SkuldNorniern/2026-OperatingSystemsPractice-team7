@@ -276,6 +276,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // cut back to its mouth and counted as reached. 0.20 m is the robot radius plus 2 cm.
         goal_clearance: p.f64("goal_clearance", 0.20),
         goal_backoff: p.f64("goal_backoff", 0.4),
+        // heading error that starts a rotate-in-place, and the error that ends it (was fixed at 1.2 and 0.35 rad)
+        rotate_in_place_angle: p.f64("rotate_in_place_angle", 1.2),
+        rotate_exit_angle: p.f64("rotate_exit_angle", 0.35),
         ..MppiParams::default()
     };
     let action_name = p.string("action_name", "/team7/navigate_to_pose");

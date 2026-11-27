@@ -288,7 +288,7 @@ pub struct TrackParams {
     /// strict ids (they need a learned size). 0 = off.
     pub pnp_only_spread: f64,
     /// consistency limit for camera-only confirmations (no wall views): their scatter is a little higher
-    /// than wall-backed views (live marker 5: 12.5-13.4). Decoy 103 sits at 16.
+    /// than wall-backed views (live marker 5: 12.5-13.4). Real marker 103 sits at 16.
     pub pnp_only_max_consistency: f64,
     /// m, glass case: the bearings of a wide spread of views cross at one point (median miss at most
     /// this) but the lidar hits lie behind it (marker on glass, rays pass through). Confirmed at the

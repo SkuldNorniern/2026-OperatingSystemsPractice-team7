@@ -276,7 +276,8 @@ impl Coverage {
                 let mid = (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n);
                 // aim at the chunk cell nearest its centroid, so the target is on the wall
                 let c = *pts.iter().min_by(|a, b| d2(**a, mid).total_cmp(&d2(**b, mid))).unwrap();
-                if let Some(v) = viewpoint(g, &clearance, c, robot, chunk.len(), p) {
+                let rings = [p.standoff, p.standoff * 0.75, p.standoff * 1.4];
+                if let Some(v) = viewpoint(g, &clearance, c, robot, chunk.len(), p, &rings, None) {
                     out.push(v);
                 }
             }
@@ -285,6 +286,73 @@ impl Coverage {
             .total_cmp(&(b.distance - 0.2 * b.cells as f64 * g.meta.resolution)));
         out
     }
+
+    /// post-mapping patrol for ArUco markers: a wall cell seen from fewer than `PATROL_COVERED_BINS`
+    /// directions, viewed from one of its unseen bins at marker reading distance. Cells are ranked by
+    /// fewest bins, then farthest from the unconfirmed marker hints `markers`, then farthest from `from`.
+    /// `skip` drops cells on cooldown or in a ban zone.
+    pub fn patrol_view(
+        &self,
+        g: &Grid,
+        robot: (f64, f64),
+        from: (f64, f64),
+        markers: &[(f64, f64)],
+        skip: &dyn Fn((f64, f64)) -> bool,
+        p: &CoverageParams,
+    ) -> Option<View> {
+        let (w, h) = (g.meta.width as usize, g.meta.height as usize);
+        let free = |c: Cell| (0..p.occupied_threshold).contains(&g.get(c));
+        // (bins, distance to nearest marker hint, cell, world point)
+        let mut cands: Vec<(u8, f64, Cell, (f64, f64))> = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let c = Cell { x: x as u32, y: y as u32 };
+                if g.get(c) < p.occupied_threshold {
+                    continue;
+                }
+                let touches_free = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(dx, dy)| g.cell_checked(x as i64 + dx, y as i64 + dy).is_some_and(free));
+                if !touches_free {
+                    continue;
+                }
+                let pt = g.cell_to_world(c);
+                let bins = self.bins_seen(g, c);
+                if bins >= PATROL_COVERED_BINS || skip(pt) {
+                    continue;
+                }
+                let near = markers.iter().map(|m| d2(*m, pt)).fold(f64::INFINITY, f64::min).sqrt();
+                cands.push((bins, near, c, pt));
+            }
+        }
+        // fewest bins first; then the wall farthest from the unconfirmed hints; then farthest from `from`
+        cands.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(b.1.total_cmp(&a.1))
+                .then(d2(b.3, from).total_cmp(&d2(a.3, from)))
+        });
+        let clearance = tb4_core::DistanceField::from_grid(g, p.occupied_threshold, true);
+        for (_, _, c, pt) in cands.into_iter().take(PATROL_TRIES) {
+            for k in self.unseen_bins(g, c) {
+                let toward = (k as f64 + 0.5) * std::f64::consts::FRAC_PI_4;
+                if let Some(v) = viewpoint(g, &clearance, pt, robot, 1, p, &patrol_rings(p), Some(toward)) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// a wall cell with this many direction bins seen counts as covered for the marker patrol
+pub const PATROL_COVERED_BINS: u8 = 3;
+/// wall cells the patrol tries for a viewpoint before giving up for this tick
+const PATROL_TRIES: usize = 50;
+
+/// patrol viewpoint rings: marker reading distance (80 % and 90 % of `range`), never closer than the
+/// view standoff; empty when the standoff already is past the reading distance
+fn patrol_rings(p: &CoverageParams) -> Vec<f64> {
+    [0.8, 0.9].iter().map(|f| f * p.range).filter(|r| *r >= p.standoff).collect()
 }
 
 /// unit direction along the wall at `pt`: principal axis of the occupied cells within 2 cells.
@@ -321,7 +389,8 @@ fn d2(a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)
 }
 
-/// free, clear point about `standoff` from target with line of sight to it, nearest to robot
+/// free, clear point about `standoff` from target with line of sight to it, nearest to robot.
+/// `toward` (rad) limits the points to within 45 degrees of that bearing from the target.
 fn viewpoint(
     g: &Grid,
     clearance: &tb4_core::DistanceField,
@@ -329,12 +398,17 @@ fn viewpoint(
     robot: (f64, f64),
     cells: usize,
     p: &CoverageParams,
+    rings: &[f64],
+    toward: Option<f64>,
 ) -> Option<View> {
     let meta: GridMeta = g.meta;
     let mut best: Option<View> = None;
-    for ring in [p.standoff, p.standoff * 0.75, p.standoff * 1.4] {
+    for &ring in rings {
         for k in 0..24 {
             let a = k as f64 * std::f64::consts::TAU / 24.0;
+            if let Some(t) = toward && (a - t).sin().atan2((a - t).cos()).abs() > std::f64::consts::FRAC_PI_4 {
+                continue;
+            }
             let (x, y) = (target.0 + ring * a.cos(), target.1 + ring * a.sin());
             let Some(c) = g.world_to_cell(x, y) else { continue };
             if !(0..p.occupied_threshold).contains(&g.get(c)) || (clearance.get(c) as f64) < p.min_clearance {

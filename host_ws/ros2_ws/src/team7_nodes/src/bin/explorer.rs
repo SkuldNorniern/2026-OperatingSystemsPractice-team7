@@ -97,6 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // approach on sight: views of unconfirmed markers from close by and from three angles
         approach_budget: p.f64("approach_budget", 0.0),
         idle_fallback: p.bool("idle_fallback", false),
+        patrol: p.bool("patrol", false),
+        patrol_cooldown: p.f64("patrol_cooldown", 60.0),
         approach: p.bool("approach_markers", true).then(|| {
             let d = ApproachParams::default();
             ApproachParams {

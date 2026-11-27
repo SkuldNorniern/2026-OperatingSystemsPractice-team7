@@ -64,6 +64,11 @@ pub struct ExplorerParams {
     /// and the recent switches (bans on spots with two or more failures still hold). Only changes
     /// the no-goal case, before the explorer waits for the map
     pub idle_fallback: bool,
+    /// after mapping, with no frontier, view or turn left: patrol the wall cells seen from the fewest
+    /// directions (ArUco hunt), each from marker reading distance, instead of waiting for the map
+    pub patrol: bool,
+    /// s a patrolled wall cell is not picked again, so the robot sweeps the room
+    pub patrol_cooldown: f64,
 }
 
 impl Default for ExplorerParams {
@@ -115,6 +120,8 @@ impl Default for ExplorerParams {
             switch_cooldown: 20.0,
             approach: Some(ApproachParams::default()),
             idle_fallback: false,
+            patrol: false,
+            patrol_cooldown: 60.0,
         }
     }
 }
@@ -250,6 +257,8 @@ pub struct ExplorerPolicy {
     p: ExplorerParams,
     coverage: Coverage,
     visited_views: Vec<(f64, f64)>,
+    /// wall cells sent on a patrol goal, with the time their cooldown ends
+    patrolled: Vec<((f64, f64), f64)>,
     /// goals that were reached (for the revisit penalty)
     reached: Vec<(f64, f64)>,
     /// approach-on-sight seconds spent this mission (see ExplorerParams::approach_budget)
@@ -286,6 +295,7 @@ impl ExplorerPolicy {
         Self {
             coverage: Coverage::new(),
             visited_views: Vec::new(),
+            patrolled: Vec::new(),
             reached: Vec::new(),
             approach_spent: 0.0,
             last_tick: None,
@@ -857,6 +867,16 @@ impl ExplorerPolicy {
                     f.goal.0, f.goal.1, f.size_m, f.distance
                 )));
                 (f.goal, yaw, None, GoalKind::Frontier)
+            } else if p.patrol
+                && frontiers.is_empty()
+                && let Some(v) = self.patrol_pick(input.map, input.markers, robot, now, &blacklist)
+            {
+                self.patrolled.push((v.target, now + p.patrol_cooldown));
+                out.push(Action::Info(format!(
+                    "new goal ({:.2}, {:.2}) patrol: wall at ({:.2}, {:.2}) seen from few directions, {:.1} m away",
+                    v.x, v.y, v.target.0, v.target.1, v.distance
+                )));
+                ((v.x, v.y), v.yaw, None, GoalKind::View)
             } else {
                 if !self.finished_exploring {
                     out.push(Action::Info(format!(
@@ -926,6 +946,28 @@ impl ExplorerPolicy {
             .filter(|goal| self.strikes.iter().find(|(g, _)| dist(*g, *goal) < r).is_some_and(|(_, n)| *n >= 2))
             .collect();
         select_goal_with_heading(frontiers, &kept, &p.explore, (robot.x, robot.y), robot.yaw, p.turn_weight)
+    }
+
+    /// the patrol goal: a wall cell off cooldown, banned and in zone are skipped
+    fn patrol_pick(
+        &self,
+        map: Option<&Grid>,
+        hints: &[MarkerHint],
+        robot: Pose2,
+        now: f64,
+        blacklist: &[(f64, f64)],
+    ) -> Option<View> {
+        let (m, cp) = (map?, self.p.coverage.as_ref()?);
+        let r = self.p.explore.blacklist_radius;
+        let from = self.reached.last().copied().unwrap_or((robot.x, robot.y));
+        let markers: Vec<(f64, f64)> = hints.iter().map(|h| (h.x, h.y)).collect();
+        let skip = |pt: (f64, f64)| {
+            self.patrolled.iter().any(|(c, until)| now < *until && dist(*c, pt) < 0.05)
+                || blacklist.iter().any(|b| dist(*b, pt) <= r)
+                || self.zones.iter().any(|(z, r, _)| dist(*z, pt) <= *r)
+                || self.in_region(pt)
+        };
+        self.coverage.patrol_view(m, (robot.x, robot.y), from, &markers, &skip, cp)
     }
 
     fn set_viz(&mut self, frontiers: Vec<Frontier>, views: Vec<View>) {
@@ -1479,5 +1521,45 @@ mod tests {
         let mut off = ExplorerPolicy::new(ExplorerParams { approach: None, ..params() }, 0.0);
         let f = sent(&off.tick(0.0, with_markers(input(&g, r, None, 0.0), &hints))).unwrap();
         assert_ne!(f.kind, GoalKind::Approach);
+    }
+
+    /// 4 x 4 m known free room closed by occupied walls: no frontiers, only walls left to look at
+    fn closed_room() -> Grid {
+        let meta = GridMeta { width: 120, height: 120, resolution: 0.05, origin_x: 0.0, origin_y: 0.0 };
+        let mut g = Grid::filled(meta, UNKNOWN);
+        for y in 9..=90 {
+            for x in 9..=90 {
+                let wall = x == 9 || x == 90 || y == 9 || y == 90;
+                g.set(Cell { x, y }, if wall { 100 } else { 0 });
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn patrol_sends_a_view_goal_on_a_complete_map_only_when_on() {
+        let g = closed_room();
+        let robot = Pose2::new(2.5, 2.5, 0.0);
+        let cp = CoverageParams::default();
+        let base = ExplorerParams { look_around_turns: 0, coverage: Some(cp), ..ExplorerParams::default() };
+        // the camera has swept the room from a few spots: every wall seen, from several sides
+        let sweep = |e: &mut ExplorerPolicy| {
+            for (x, y) in [(1.0, 1.0), (1.0, 3.5), (3.5, 1.0), (3.5, 3.5), (2.5, 2.5)] {
+                for i in 0..36 {
+                    e.update_coverage(&g, (x, y, i as f64 * std::f64::consts::TAU / 36.0));
+                }
+            }
+        };
+        let mut on = ExplorerPolicy::new(ExplorerParams { patrol: true, ..base.clone() }, 0.0);
+        sweep(&mut on);
+        let acts = on.tick(10.0, input(&g, robot, None, 10.0));
+        let req = sent(&acts).expect("patrol goal on a complete map");
+        assert_eq!(req.kind, GoalKind::View);
+        assert!(acts.iter().any(|a| matches!(a, Action::Info(t) if t.contains("patrol"))), "{acts:?}");
+        let mut off = ExplorerPolicy::new(ExplorerParams { patrol: false, ..base }, 0.0);
+        sweep(&mut off);
+        let acts = off.tick(10.0, input(&g, robot, None, 10.0));
+        assert!(sent(&acts).is_none(), "patrol off keeps the wait: {acts:?}");
+        assert!(acts.iter().any(|a| matches!(a, Action::Info(t) if t.contains("waiting for map updates"))));
     }
 }

@@ -89,6 +89,8 @@ pub fn team7_explorer_params() -> ExplorerParams {
     ExplorerParams {
         approach_budget: 0.0,
         idle_fallback: false,
+        patrol: false,
+        patrol_cooldown: 60.0,
         goal_timeout: 120.0,
         progress_timeout: 15.0,
         closing_timeout: 30.0,
@@ -172,7 +174,7 @@ impl SimConfig {
 }
 
 /// names `SimConfig::set` accepts
-pub const SET_NAMES: [&str; 46] = [
+pub const SET_NAMES: [&str; 48] = [
     "closing_timeout",
     "min_triangulation_spread",
     "min_free_fraction",
@@ -183,6 +185,7 @@ pub const SET_NAMES: [&str; 46] = [
     "view_detour", "preempt_distance", "switch_cooldown", "min_unknown_area", "revisit_radius", "revisit_penalty", "approach_budget", "gain_weight", "gain_radius", "idle_fallback", "min_frontier_cells", "plan_with_scan", "look_around_turns", "camera_coverage", "vx_max", "wz_max",
     "path_switch_ratio", "slow_on_tentative", "decoys", "vision", "pnp_sigma", "bearing_sigma_deg",
     "approach_markers", "approach_standoff", "approach_spread_deg", "approach_timeout",
+    "patrol", "patrol_cooldown",
 ];
 
 impl SimConfig {
@@ -219,6 +222,8 @@ impl SimConfig {
             "gain_weight" => e.explore.gain_weight = x,
             "gain_radius" => e.explore.gain_radius = x,
             "idle_fallback" => e.idle_fallback = x != 0.0,
+            "patrol" => e.patrol = x != 0.0,
+            "patrol_cooldown" => e.patrol_cooldown = x,
             "revisit_penalty" => e.explore.revisit_penalty = x,
             "min_frontier_cells" => e.explore.min_frontier_cells = x as usize,
             "look_around_turns" => e.look_around_turns = x as u32,

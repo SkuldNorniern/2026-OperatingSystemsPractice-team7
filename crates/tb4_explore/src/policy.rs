@@ -733,7 +733,9 @@ impl ExplorerPolicy {
                     abandon = Some((a.goal, CancelReason::Timeout, true));
                 } else if now - a.last_progress > p.progress_timeout || closing_stalled {
                     abandon = Some((a.goal, CancelReason::NoProgress, true));
-                } else if a.view_target.is_some_and(|t| !views.iter().any(|v| dist(v.target, t) < 0.6)) {
+                // a view goal is only cancelled for "wall seen" while the robot is still away from it: in tight space the
+                // wall is visible from the spot before the view is reached, and cancelling then made the robot never move
+                } else if d > 0.5 && a.view_target.is_some_and(|t| !views.iter().any(|v| dist(v.target, t) < 0.6)) {
                     abandon = Some((a.goal, CancelReason::WallSeen, false));
                 }
             }

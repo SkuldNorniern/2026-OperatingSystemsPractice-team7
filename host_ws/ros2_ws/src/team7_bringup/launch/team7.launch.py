@@ -198,7 +198,7 @@ def setup(context):
         explorers.append(Node(package='team7_nodes', executable='explorer', name='explorer',
                               parameters=[team7_yaml, *overlay, {
                                   'nav_action': nav_action,
-                                  'costmap_topic': '/global_costmap/costmap' if use_nav2 else '/map'}],
+                                  'costmap_topic': '/global_costmap/costmap'}],  # team7 mode publishes its planner costmap (live scan, bumps, forbidden) on this topic too
                               output='screen'))
     elif explorer == 'explore_lite':
         explorers.append(Node(package='explore_lite', executable='explore', name='explore_node',
